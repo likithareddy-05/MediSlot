@@ -1,0 +1,16 @@
+name: Deployment Workflow
+
+on:
+  workflow_dispatch:
+
+jobs:
+  prepare:
+    name: Verify deployment workflow
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Confirm workflow is ready
+        run: echo "Deployment workflow is configured. No AWS deployment performed."

@@ -3,14 +3,24 @@ name: Deployment Workflow
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+  id-token: write
+
 jobs:
-  prepare:
-    name: Verify deployment workflow
+  test-aws-oidc:
+    name: Test AWS OIDC Authentication
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Confirm workflow is ready
-        run: echo "Deployment workflow is configured. No AWS deployment performed."
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::201261380083:role/MediSlotGitHubActionsRole
+          aws-region: eu-north-1
+
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity

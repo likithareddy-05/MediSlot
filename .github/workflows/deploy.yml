@@ -1,5 +1,5 @@
 
-name: MediSlot Network Deployment
+name: MediSlot Infrastructure Deployment
 
 on:
   workflow_dispatch:
@@ -9,16 +9,20 @@ permissions:
   id-token: write
 
 concurrency:
-  group: medislot-network-dev
+  group: medislot-infrastructure-dev
   cancel-in-progress: false
 
 jobs:
-  deploy-network:
-    name: Validate and Deploy Network Stack
+  deploy-infrastructure:
+    name: Deploy MediSlot Infrastructure
     runs-on: ubuntu-latest
 
-    # Deploy only from the feature branch for this initial test.
+    # Development deployments only from feature.
     if: github.ref == 'refs/heads/feature'
+
+    env:
+      AWS_REGION: eu-north-1
+      ENVIRONMENT_NAME: dev
 
     steps:
       - name: Checkout repository
@@ -33,121 +37,234 @@ jobs:
       - name: Verify AWS identity
         run: aws sts get-caller-identity
 
-      - name: Validate CloudFormation template
+      # Validate both templates before making infrastructure changes.
+      - name: Validate Network template
         run: |
           aws cloudformation validate-template \
             --template-body file://infrastructure/network.yaml \
-            --region eu-north-1
+            --region "$AWS_REGION"
 
-      - name: Create CloudFormation change set
-        id: changeset
+      - name: Validate Data template
+        run: |
+          aws cloudformation validate-template \
+            --template-body file://infrastructure/data.yaml \
+            --region "$AWS_REGION"
+
+      # Network must finish successfully before Data is deployed.
+      - name: Deploy Network Stack
         shell: bash
         run: |
           set -euo pipefail
 
-          STACK_NAME="medislot-dev-network"
-          CHANGE_SET_NAME="network-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          deploy_stack() {
+            local stack_name="$1"
+            local template_file="$2"
+            local change_set_name
+            local change_set_type
+            local reason
+            local status
+
+            change_set_name="${stack_name}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
+            if aws cloudformation describe-stacks \
+              --stack-name "$stack_name" \
+              --region "$AWS_REGION" >/dev/null 2>&1; then
+              change_set_type="UPDATE"
+            else
+              change_set_type="CREATE"
+            fi
+
+            echo "Deploying $stack_name using $change_set_type"
+
+            aws cloudformation create-change-set \
+              --stack-name "$stack_name" \
+              --change-set-name "$change_set_name" \
+              --change-set-type "$change_set_type" \
+              --template-body "file://${template_file}" \
+              --parameters \
+                "ParameterKey=EnvironmentName,ParameterValue=${ENVIRONMENT_NAME}" \
+              --region "$AWS_REGION"
+
+            if ! aws cloudformation wait change-set-create-complete \
+              --stack-name "$stack_name" \
+              --change-set-name "$change_set_name" \
+              --region "$AWS_REGION"; then
+
+              status=$(aws cloudformation describe-change-set \
+                --stack-name "$stack_name" \
+                --change-set-name "$change_set_name" \
+                --region "$AWS_REGION" \
+                --query 'Status' \
+                --output text)
+
+              reason=$(aws cloudformation describe-change-set \
+                --stack-name "$stack_name" \
+                --change-set-name "$change_set_name" \
+                --region "$AWS_REGION" \
+                --query 'StatusReason' \
+                --output text)
+
+              if [[ "$status" == "FAILED" ]] &&
+                 [[ "$reason" == *"didn't contain changes"* ||
+                    "$reason" == *"No updates are to be performed"* ]]; then
+                echo "No changes required for $stack_name."
+                return 0
+              fi
+
+              echo "Change set failed: $reason"
+              return 1
+            fi
+
+            echo "Planned changes:"
+            aws cloudformation describe-change-set \
+              --stack-name "$stack_name" \
+              --change-set-name "$change_set_name" \
+              --region "$AWS_REGION" \
+              --query 'Changes[*].ResourceChange.{Action:Action,Type:ResourceType,LogicalId:LogicalResourceId}' \
+              --output table
+
+            aws cloudformation execute-change-set \
+              --stack-name "$stack_name" \
+              --change-set-name "$change_set_name" \
+              --region "$AWS_REGION"
+
+            if [[ "$change_set_type" == "CREATE" ]]; then
+              aws cloudformation wait stack-create-complete \
+                --stack-name "$stack_name" \
+                --region "$AWS_REGION"
+            else
+              aws cloudformation wait stack-update-complete \
+                --stack-name "$stack_name" \
+                --region "$AWS_REGION"
+            fi
+
+            echo "$stack_name deployment completed."
+          }
+
+          deploy_stack \
+            "medislot-${ENVIRONMENT_NAME}-network" \
+            "infrastructure/network.yaml"
+
+      - name: Verify Network Stack exports
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for export_name in \
+            "medislot-${ENVIRONMENT_NAME}-PrivateSubnetAId" \
+            "medislot-${ENVIRONMENT_NAME}-PrivateSubnetBId" \
+            "medislot-${ENVIRONMENT_NAME}-RDSSecurityGroupId"
+          do
+            found=$(aws cloudformation list-exports \
+              --region "$AWS_REGION" \
+              --query "Exports[?Name=='${export_name}'].Name | [0]" \
+              --output text)
+
+            if [[ "$found" != "$export_name" ]]; then
+              echo "Required network export is missing: $export_name"
+              exit 1
+            fi
+          done
+
+          echo "Required network exports are available."
+
+      - name: Deploy Data Stack
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          STACK_NAME="medislot-${ENVIRONMENT_NAME}-data"
+          TEMPLATE_FILE="infrastructure/data.yaml"
+          CHANGE_SET_NAME="${STACK_NAME}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
 
           if aws cloudformation describe-stacks \
             --stack-name "$STACK_NAME" \
-            --region eu-north-1 >/dev/null 2>&1; then
+            --region "$AWS_REGION" >/dev/null 2>&1; then
             CHANGE_SET_TYPE="UPDATE"
           else
             CHANGE_SET_TYPE="CREATE"
           fi
 
-          echo "Stack: $STACK_NAME"
-          echo "Change set type: $CHANGE_SET_TYPE"
+          echo "Deploying $STACK_NAME using $CHANGE_SET_TYPE"
 
           aws cloudformation create-change-set \
             --stack-name "$STACK_NAME" \
             --change-set-name "$CHANGE_SET_NAME" \
             --change-set-type "$CHANGE_SET_TYPE" \
-            --template-body file://infrastructure/network.yaml \
+            --template-body "file://${TEMPLATE_FILE}" \
             --parameters \
-              ParameterKey=EnvironmentName,ParameterValue=dev \
-            --region eu-north-1
+              "ParameterKey=EnvironmentName,ParameterValue=${ENVIRONMENT_NAME}" \
+            --region "$AWS_REGION"
 
-          echo "stack_name=$STACK_NAME" >> "$GITHUB_OUTPUT"
-          echo "change_set_name=$CHANGE_SET_NAME" >> "$GITHUB_OUTPUT"
-          echo "change_set_type=$CHANGE_SET_TYPE" >> "$GITHUB_OUTPUT"
-
-      - name: Wait for change set
-        id: wait_changeset
-        continue-on-error: true
-        shell: bash
-        env:
-          STACK_NAME: ${{ steps.changeset.outputs.stack_name }}
-          CHANGE_SET_NAME: ${{ steps.changeset.outputs.change_set_name }}
-        run: |
-          aws cloudformation wait change-set-create-complete \
+          if ! aws cloudformation wait change-set-create-complete \
             --stack-name "$STACK_NAME" \
             --change-set-name "$CHANGE_SET_NAME" \
-            --region eu-north-1
+            --region "$AWS_REGION"; then
 
-      - name: Review planned changes
-        if: steps.wait_changeset.outcome == 'success'
-        env:
-          STACK_NAME: ${{ steps.changeset.outputs.stack_name }}
-          CHANGE_SET_NAME: ${{ steps.changeset.outputs.change_set_name }}
-        run: |
+            STATUS=$(aws cloudformation describe-change-set \
+              --stack-name "$STACK_NAME" \
+              --change-set-name "$CHANGE_SET_NAME" \
+              --region "$AWS_REGION" \
+              --query 'Status' \
+              --output text)
+
+            REASON=$(aws cloudformation describe-change-set \
+              --stack-name "$STACK_NAME" \
+              --change-set-name "$CHANGE_SET_NAME" \
+              --region "$AWS_REGION" \
+              --query 'StatusReason' \
+              --output text)
+
+            if [[ "$STATUS" == "FAILED" ]] &&
+               [[ "$REASON" == *"didn't contain changes"* ||
+                  "$REASON" == *"No updates are to be performed"* ]]; then
+              echo "No changes required for $STACK_NAME."
+              exit 0
+            fi
+
+            echo "Data change set failed: $REASON"
+            exit 1
+          fi
+
+          echo "Planned data stack changes:"
           aws cloudformation describe-change-set \
             --stack-name "$STACK_NAME" \
             --change-set-name "$CHANGE_SET_NAME" \
-            --region eu-north-1 \
-            --query '{Status:Status,ExecutionStatus:ExecutionStatus,Changes:Changes[*].ResourceChange.{Action:Action,Type:ResourceType,LogicalId:LogicalResourceId}}' \
-            --output json
+            --region "$AWS_REGION" \
+            --query 'Changes[*].ResourceChange.{Action:Action,Type:ResourceType,LogicalId:LogicalResourceId}' \
+            --output table
 
-      - name: Execute change set
-        if: steps.wait_changeset.outcome == 'success'
-        env:
-          STACK_NAME: ${{ steps.changeset.outputs.stack_name }}
-          CHANGE_SET_NAME: ${{ steps.changeset.outputs.change_set_name }}
-        run: |
           aws cloudformation execute-change-set \
             --stack-name "$STACK_NAME" \
             --change-set-name "$CHANGE_SET_NAME" \
-            --region eu-north-1
+            --region "$AWS_REGION"
 
-      - name: Wait for stack creation
-        if: steps.wait_changeset.outcome == 'success' && steps.changeset.outputs.change_set_type == 'CREATE'
-        env:
-          STACK_NAME: ${{ steps.changeset.outputs.stack_name }}
-        run: |
-          aws cloudformation wait stack-create-complete \
-            --stack-name "$STACK_NAME" \
-            --region eu-north-1
+          if [[ "$CHANGE_SET_TYPE" == "CREATE" ]]; then
+            aws cloudformation wait stack-create-complete \
+              --stack-name "$STACK_NAME" \
+              --region "$AWS_REGION"
+          else
+            aws cloudformation wait stack-update-complete \
+              --stack-name "$STACK_NAME" \
+              --region "$AWS_REGION"
+          fi
 
-      - name: Wait for stack update
-        if: steps.wait_changeset.outcome == 'success' && steps.changeset.outputs.change_set_type == 'UPDATE'
-        env:
-          STACK_NAME: ${{ steps.changeset.outputs.stack_name }}
-        run: |
-          aws cloudformation wait stack-update-complete \
-            --stack-name "$STACK_NAME" \
-            --region eu-north-1
+          echo "Data stack deployment completed."
 
-      - name: Show deployed stack outputs
+      - name: Show Network Stack outputs
         if: success()
-        env:
-          STACK_NAME: medislot-dev-network
         run: |
           aws cloudformation describe-stacks \
-            --stack-name "$STACK_NAME" \
-            --region eu-north-1 \
+            --stack-name "medislot-${ENVIRONMENT_NAME}-network" \
+            --region "$AWS_REGION" \
             --query 'Stacks[0].{Status:StackStatus,Outputs:Outputs}' \
             --output json
 
-      - name: Report change set failure
-        if: steps.wait_changeset.outcome == 'failure'
-        env:
-          STACK_NAME: ${{ steps.changeset.outputs.stack_name }}
-          CHANGE_SET_NAME: ${{ steps.changeset.outputs.change_set_name }}
+      - name: Show Data Stack outputs
+        if: success()
         run: |
-          aws cloudformation describe-change-set \
-            --stack-name "$STACK_NAME" \
-            --change-set-name "$CHANGE_SET_NAME" \
-            --region eu-north-1 \
-            --query '{Status:Status,Reason:StatusReason}' \
+          aws cloudformation describe-stacks \
+            --stack-name "medislot-${ENVIRONMENT_NAME}-data" \
+            --region "$AWS_REGION" \
+            --query 'Stacks[0].{Status:StackStatus,Outputs:Outputs}' \
             --output json
-          exit 1

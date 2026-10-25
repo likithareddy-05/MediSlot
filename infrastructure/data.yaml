@@ -1,0 +1,287 @@
+
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  MediSlot development data stack:
+  private RDS MySQL, DynamoDB tables, and private S3 buckets.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - test
+      - prod
+    Description: Environment name used for resource naming.
+
+Resources:
+
+  # ------------------------------------------------------------
+  # RDS NETWORKING
+  # ------------------------------------------------------------
+
+  MediSlotDBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: !Sub "MediSlot ${EnvironmentName} private DB subnets"
+      SubnetIds:
+        - Fn::ImportValue:
+            !Sub "medislot-${EnvironmentName}-PrivateSubnetAId"
+        - Fn::ImportValue:
+            !Sub "medislot-${EnvironmentName}-PrivateSubnetBId"
+      Tags:
+        - Key: Name
+          Value: !Sub "medislot-${EnvironmentName}-db-subnet-group"
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # ------------------------------------------------------------
+  # RDS MYSQL
+  # ------------------------------------------------------------
+
+  MediSlotDatabase:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: !Sub "medislot-${EnvironmentName}-mysql"
+      Engine: mysql
+      DBInstanceClass: db.t3.micro
+      AllocatedStorage: 20
+      StorageType: gp3
+      StorageEncrypted: true
+      DBName: medislot
+      MasterUsername: medislotadmin
+      ManageMasterUserPassword: true
+      DBSubnetGroupName: !Ref MediSlotDBSubnetGroup
+      VPCSecurityGroups:
+        - Fn::ImportValue:
+            !Sub "medislot-${EnvironmentName}-RDSSecurityGroupId"
+      PubliclyAccessible: false
+      MultiAZ: false
+      BackupRetentionPeriod: 1
+      AutoMinorVersionUpgrade: true
+      CopyTagsToSnapshot: true
+      DeletionProtection: false
+      Tags:
+        - Key: Name
+          Value: !Sub "medislot-${EnvironmentName}-mysql"
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # ------------------------------------------------------------
+  # DYNAMODB: REFRESH TOKENS
+  # One user can have multiple active sessions.
+  # Store a hash/identifier of the opaque refresh token, not the
+  # raw token. expires_at is Unix epoch seconds for DynamoDB TTL.
+  # ------------------------------------------------------------
+
+  RefreshTokensTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "medislot-${EnvironmentName}-refresh-tokens"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: user_id
+          AttributeType: S
+        - AttributeName: token_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: user_id
+          KeyType: HASH
+        - AttributeName: token_id
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # ------------------------------------------------------------
+  # DYNAMODB: REVOKED ACCESS TOKENS
+  # Use JWT jti as the partition key. TTL eventually removes old
+  # entries; authorization must still reject expired JWTs itself.
+  # ------------------------------------------------------------
+
+  RevokedTokensTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "medislot-${EnvironmentName}-revoked-tokens"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: jti
+          AttributeType: S
+      KeySchema:
+        - AttributeName: jti
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # ------------------------------------------------------------
+  # DYNAMODB: SLOT COORDINATION
+  # Conditional writes will protect slot capacity from overbooking.
+  # ------------------------------------------------------------
+
+  SlotStateTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "medislot-${EnvironmentName}-slot-state"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: slot_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: slot_id
+          KeyType: HASH
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # ------------------------------------------------------------
+  # S3: REPORTS
+  # Bucket names include account and region to reduce collisions.
+  # ------------------------------------------------------------
+
+  ReportsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "medislot-${EnvironmentName}-${AWS::AccountId}-${AWS::Region}-reports"
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  ReportsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ReportsBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt ReportsBucket.Arn
+              - !Sub "${ReportsBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+
+  # ------------------------------------------------------------
+  # S3: APPLICATION ASSETS
+  # ------------------------------------------------------------
+
+  AssetsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "medislot-${EnvironmentName}-${AWS::AccountId}-${AWS::Region}-assets"
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  AssetsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref AssetsBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt AssetsBucket.Arn
+              - !Sub "${AssetsBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+
+Outputs:
+  DatabaseEndpointAddress:
+    Description: Private RDS endpoint hostname.
+    Value: !GetAtt MediSlotDatabase.Endpoint.Address
+    Export:
+      Name: !Sub "medislot-${EnvironmentName}-DatabaseEndpointAddress"
+
+  DatabaseEndpointPort:
+    Description: RDS MySQL port.
+    Value: !GetAtt MediSlotDatabase.Endpoint.Port
+    Export:
+      Name: !Sub "medislot-${EnvironmentName}-DatabaseEndpointPort"
+
+  DatabaseName:
+    Value: medislot
+    Export:
+      Name: !Sub "medislot-${EnvironmentName}-DatabaseName"
+
+  DatabaseSecretArn:
+    Description: Secrets Manager ARN containing the RDS master credentials.
+    Value: !GetAtt MediSlotDatabase.MasterUserSecret.SecretArn
+    Export:
+      Name: !Sub "medislot-${EnvironmentName}-DatabaseSecretArn"
+
+  RefreshTokensTableName:
+    Value: !Ref RefreshTokensTable
+    Export:
+      Name: !Sub "medislot-${EnvironmentName}-RefreshTokensTableName"
+
+  RevokedTokensTableName:
+    Value: !Ref RevokedTokensTable
+    Export:
+      Name: !Sub "medislot-${EnvironmentName}-RevokedTokensTableName"
+
+  SlotStateTableName:
+    Value: !Ref SlotStateTable
+    Export:
+      Name: !Sub "medislot-${EnvironmentName}-SlotStateTableName"
+
+  ReportsBucketName:
+    Value: !Ref ReportsBucket
+    Export:
+      Name: !Sub "medislot-${EnvironmentName}-ReportsBucketName"
+
+  AssetsBucketName:
+    Value: !Ref AssetsBucket
+    Export:
+      Name: !Sub "medislot-${EnvironmentName}-AssetsBucketName"

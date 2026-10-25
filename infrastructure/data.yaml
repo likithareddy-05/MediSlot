@@ -285,3 +285,4 @@ Outputs:
     Value: !Ref AssetsBucket
     Export:
       Name: !Sub "medislot-${EnvironmentName}-AssetsBucketName"
+

@@ -1,0 +1,255 @@
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: MediSlot network foundation - VPC, public and private subnets, routing and security groups
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - test
+      - prod
+    Description: Deployment environment
+
+  VpcCidr:
+    Type: String
+    Default: 10.0.0.0/16
+    Description: CIDR range for the MediSlot VPC
+
+  PublicSubnetCidr:
+    Type: String
+    Default: 10.0.1.0/24
+    Description: CIDR range for the public subnet
+
+  PrivateSubnetACidr:
+    Type: String
+    Default: 10.0.11.0/24
+    Description: CIDR range for private subnet A
+
+  PrivateSubnetBCidr:
+    Type: String
+    Default: 10.0.12.0/24
+    Description: CIDR range for private subnet B
+
+Resources:
+  MediSlotVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub 'medislot-${EnvironmentName}-vpc'
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Project
+          Value: MediSlot
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub 'medislot-${EnvironmentName}-igw'
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  AttachInternetGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref MediSlotVPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MediSlotVPC
+      CidrBlock: !Ref PublicSubnetCidr
+      AvailabilityZone: !Select
+        - 0
+        - !GetAZs ''
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub 'medislot-${EnvironmentName}-public-subnet'
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MediSlotVPC
+      CidrBlock: !Ref PrivateSubnetACidr
+      AvailabilityZone: !Select
+        - 0
+        - !GetAZs ''
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub 'medislot-${EnvironmentName}-private-subnet-a'
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  PrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MediSlotVPC
+      CidrBlock: !Ref PrivateSubnetBCidr
+      AvailabilityZone: !Select
+        - 1
+        - !GetAZs ''
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub 'medislot-${EnvironmentName}-private-subnet-b'
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref MediSlotVPC
+      Tags:
+        - Key: Name
+          Value: !Sub 'medislot-${EnvironmentName}-public-rt'
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachInternetGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref MediSlotVPC
+      Tags:
+        - Key: Name
+          Value: !Sub 'medislot-${EnvironmentName}-private-rt'
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  PrivateSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetA
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetB
+      RouteTableId: !Ref PrivateRouteTable
+
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for the MediSlot Flask EC2 application
+      VpcId: !Ref MediSlotVPC
+      SecurityGroupIngress:
+        - Description: HTTP access
+          IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - Description: HTTPS access
+          IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub 'medislot-${EnvironmentName}-ec2-sg'
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for MediSlot backend Lambda functions
+      VpcId: !Ref MediSlotVPC
+      Tags:
+        - Key: Name
+          Value: !Sub 'medislot-${EnvironmentName}-lambda-sg'
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  RDSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow MySQL only from the MediSlot Lambda security group
+      VpcId: !Ref MediSlotVPC
+      SecurityGroupIngress:
+        - Description: MySQL from backend Lambda functions
+          IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref LambdaSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub 'medislot-${EnvironmentName}-rds-sg'
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+Outputs:
+  VpcId:
+    Description: MediSlot VPC ID
+    Value: !Ref MediSlotVPC
+    Export:
+      Name: !Sub 'medislot-${EnvironmentName}-VpcId'
+
+  PublicSubnetId:
+    Description: Public subnet ID
+    Value: !Ref PublicSubnet
+    Export:
+      Name: !Sub 'medislot-${EnvironmentName}-PublicSubnetId'
+
+  PrivateSubnetAId:
+    Description: Private subnet A ID
+    Value: !Ref PrivateSubnetA
+    Export:
+      Name: !Sub 'medislot-${EnvironmentName}-PrivateSubnetAId'
+
+  PrivateSubnetBId:
+    Description: Private subnet B ID
+    Value: !Ref PrivateSubnetB
+    Export:
+      Name: !Sub 'medislot-${EnvironmentName}-PrivateSubnetBId'
+
+  PublicRouteTableId:
+    Description: Public route table ID
+    Value: !Ref PublicRouteTable
+
+  PrivateRouteTableId:
+    Description: Private route table ID shared by both private subnets
+    Value: !Ref PrivateRouteTable
+
+  EC2SecurityGroupId:
+    Description: EC2 security group ID
+    Value: !Ref EC2SecurityGroup
+    Export:
+      Name: !Sub 'medislot-${EnvironmentName}-EC2SecurityGroupId'
+
+  LambdaSecurityGroupId:
+    Description: Lambda security group ID
+    Value: !Ref LambdaSecurityGroup
+    Export:
+      Name: !Sub 'medislot-${EnvironmentName}-LambdaSecurityGroupId'
+
+  RDSSecurityGroupId:
+    Description: RDS security group ID
+    Value: !Ref RDSSecurityGroup
+    Export:
+      Name: !Sub 'medislot-${EnvironmentName}-RDSSecurityGroupId'

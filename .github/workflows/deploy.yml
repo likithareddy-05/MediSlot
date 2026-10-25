@@ -1,4 +1,5 @@
-name: Deployment Workflow
+
+name: MediSlot Network Deployment
 
 on:
   workflow_dispatch:
@@ -7,16 +8,23 @@ permissions:
   contents: read
   id-token: write
 
+concurrency:
+  group: medislot-network-dev
+  cancel-in-progress: false
+
 jobs:
-  test-aws-oidc:
-    name: Test AWS OIDC Authentication
+  deploy-network:
+    name: Validate and Deploy Network Stack
     runs-on: ubuntu-latest
+
+    # Deploy only from the feature branch for this initial test.
+    if: github.ref == 'refs/heads/feature'
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Configure AWS credentials
+      - name: Configure AWS credentials using OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::201261380083:role/MediSlotGitHubActionsRole
@@ -24,3 +32,122 @@ jobs:
 
       - name: Verify AWS identity
         run: aws sts get-caller-identity
+
+      - name: Validate CloudFormation template
+        run: |
+          aws cloudformation validate-template \
+            --template-body file://infrastructure/network.yaml \
+            --region eu-north-1
+
+      - name: Create CloudFormation change set
+        id: changeset
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          STACK_NAME="medislot-dev-network"
+          CHANGE_SET_NAME="network-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
+          if aws cloudformation describe-stacks \
+            --stack-name "$STACK_NAME" \
+            --region eu-north-1 >/dev/null 2>&1; then
+            CHANGE_SET_TYPE="UPDATE"
+          else
+            CHANGE_SET_TYPE="CREATE"
+          fi
+
+          echo "Stack: $STACK_NAME"
+          echo "Change set type: $CHANGE_SET_TYPE"
+
+          aws cloudformation create-change-set \
+            --stack-name "$STACK_NAME" \
+            --change-set-name "$CHANGE_SET_NAME" \
+            --change-set-type "$CHANGE_SET_TYPE" \
+            --template-body file://infrastructure/network.yaml \
+            --parameters \
+              ParameterKey=EnvironmentName,ParameterValue=dev \
+            --region eu-north-1
+
+          echo "stack_name=$STACK_NAME" >> "$GITHUB_OUTPUT"
+          echo "change_set_name=$CHANGE_SET_NAME" >> "$GITHUB_OUTPUT"
+          echo "change_set_type=$CHANGE_SET_TYPE" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for change set
+        id: wait_changeset
+        continue-on-error: true
+        shell: bash
+        env:
+          STACK_NAME: ${{ steps.changeset.outputs.stack_name }}
+          CHANGE_SET_NAME: ${{ steps.changeset.outputs.change_set_name }}
+        run: |
+          aws cloudformation wait change-set-create-complete \
+            --stack-name "$STACK_NAME" \
+            --change-set-name "$CHANGE_SET_NAME" \
+            --region eu-north-1
+
+      - name: Review planned changes
+        if: steps.wait_changeset.outcome == 'success'
+        env:
+          STACK_NAME: ${{ steps.changeset.outputs.stack_name }}
+          CHANGE_SET_NAME: ${{ steps.changeset.outputs.change_set_name }}
+        run: |
+          aws cloudformation describe-change-set \
+            --stack-name "$STACK_NAME" \
+            --change-set-name "$CHANGE_SET_NAME" \
+            --region eu-north-1 \
+            --query '{Status:Status,ExecutionStatus:ExecutionStatus,Changes:Changes[*].ResourceChange.{Action:Action,Type:ResourceType,LogicalId:LogicalResourceId}}' \
+            --output json
+
+      - name: Execute change set
+        if: steps.wait_changeset.outcome == 'success'
+        env:
+          STACK_NAME: ${{ steps.changeset.outputs.stack_name }}
+          CHANGE_SET_NAME: ${{ steps.changeset.outputs.change_set_name }}
+        run: |
+          aws cloudformation execute-change-set \
+            --stack-name "$STACK_NAME" \
+            --change-set-name "$CHANGE_SET_NAME" \
+            --region eu-north-1
+
+      - name: Wait for stack creation
+        if: steps.wait_changeset.outcome == 'success' && steps.changeset.outputs.change_set_type == 'CREATE'
+        env:
+          STACK_NAME: ${{ steps.changeset.outputs.stack_name }}
+        run: |
+          aws cloudformation wait stack-create-complete \
+            --stack-name "$STACK_NAME" \
+            --region eu-north-1
+
+      - name: Wait for stack update
+        if: steps.wait_changeset.outcome == 'success' && steps.changeset.outputs.change_set_type == 'UPDATE'
+        env:
+          STACK_NAME: ${{ steps.changeset.outputs.stack_name }}
+        run: |
+          aws cloudformation wait stack-update-complete \
+            --stack-name "$STACK_NAME" \
+            --region eu-north-1
+
+      - name: Show deployed stack outputs
+        if: success()
+        env:
+          STACK_NAME: medislot-dev-network
+        run: |
+          aws cloudformation describe-stacks \
+            --stack-name "$STACK_NAME" \
+            --region eu-north-1 \
+            --query 'Stacks[0].{Status:StackStatus,Outputs:Outputs}' \
+            --output json
+
+      - name: Report change set failure
+        if: steps.wait_changeset.outcome == 'failure'
+        env:
+          STACK_NAME: ${{ steps.changeset.outputs.stack_name }}
+          CHANGE_SET_NAME: ${{ steps.changeset.outputs.change_set_name }}
+        run: |
+          aws cloudformation describe-change-set \
+            --stack-name "$STACK_NAME" \
+            --change-set-name "$CHANGE_SET_NAME" \
+            --region eu-north-1 \
+            --query '{Status:Status,Reason:StatusReason}' \
+            --output json
+          exit 1

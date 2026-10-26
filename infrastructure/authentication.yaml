@@ -1,0 +1,395 @@
+
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  MediSlot authentication stack containing registration, login,
+  refresh, logout, JWT authorization, and API Gateway resources.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - test
+      - prod
+
+  LambdaArtifactBucket:
+    Type: String
+    Description: S3 bucket containing packaged Lambda deployment ZIP files.
+
+  RegisterLambdaS3Key:
+    Type: String
+
+  LoginLambdaS3Key:
+    Type: String
+
+  RefreshLambdaS3Key:
+    Type: String
+
+  LogoutLambdaS3Key:
+    Type: String
+
+  AuthorizerLambdaS3Key:
+    Type: String
+
+Resources:
+
+  # ---------------------------------------------------------
+  # REGISTER LAMBDA
+  # ---------------------------------------------------------
+  RegisterFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub medislot-${EnvironmentName}-auth-register
+      Description: Registers a new patient or doctor.
+      Runtime: python3.12
+      Handler: register.lambda_handler
+      Code:
+        S3Bucket: !Ref LambdaArtifactBucket
+        S3Key: !Ref RegisterLambdaS3Key
+      Role:
+        Fn::ImportValue:
+          Fn::Sub: medislot-${EnvironmentName}-AuthLambdaRoleArn
+      Timeout: 15
+      MemorySize: 256
+      Environment:
+        Variables:
+          DB_HOST:
+            Fn::ImportValue:
+              Fn::Sub: medislot-${EnvironmentName}-DatabaseEndpointAddress
+          DB_PORT:
+            Fn::ImportValue:
+              Fn::Sub: medislot-${EnvironmentName}-DatabaseEndpointPort
+          DB_NAME:
+            Fn::ImportValue:
+              Fn::Sub: medislot-${EnvironmentName}-DatabaseName
+          DB_SECRET_ARN:
+            Fn::ImportValue:
+              Fn::Sub: medislot-${EnvironmentName}-DatabaseSecretArn
+
+  # ---------------------------------------------------------
+  # LOGIN LAMBDA
+  # ---------------------------------------------------------
+  LoginFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub medislot-${EnvironmentName}-auth-login
+      Description: Authenticates a user and issues access and refresh tokens.
+      Runtime: python3.12
+      Handler: auth.lambda_handler
+      Code:
+        S3Bucket: !Ref LambdaArtifactBucket
+        S3Key: !Ref LoginLambdaS3Key
+      Role:
+        Fn::ImportValue:
+          Fn::Sub: medislot-${EnvironmentName}-AuthLambdaRoleArn
+      Timeout: 15
+      MemorySize: 256
+      Environment:
+        Variables:
+          DB_HOST:
+            Fn::ImportValue:
+              Fn::Sub: medislot-${EnvironmentName}-DatabaseEndpointAddress
+          DB_PORT:
+            Fn::ImportValue:
+              Fn::Sub: medislot-${EnvironmentName}-DatabaseEndpointPort
+          DB_NAME:
+            Fn::ImportValue:
+              Fn::Sub: medislot-${EnvironmentName}-DatabaseName
+          DB_SECRET_ARN:
+            Fn::ImportValue:
+              Fn::Sub: medislot-${EnvironmentName}-DatabaseSecretArn
+          JWT_SIGNING_SECRET_PARAMETER:
+            Fn::Sub: /medislot/${EnvironmentName}/auth/jwt-signing-secret
+          JWT_ISSUER: medislot
+          REFRESH_TOKENS_TABLE:
+            Fn::ImportValue:
+              Fn::Sub: medislot-${EnvironmentName}-RefreshTokensTableName
+
+  # ---------------------------------------------------------
+  # REFRESH TOKEN LAMBDA
+  # ---------------------------------------------------------
+  RefreshFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub medislot-${EnvironmentName}-auth-refresh
+      Description: Rotates refresh tokens and issues new access tokens.
+      Runtime: python3.12
+      Handler: refresh.lambda_handler
+      Code:
+        S3Bucket: !Ref LambdaArtifactBucket
+        S3Key: !Ref RefreshLambdaS3Key
+      Role:
+        Fn::ImportValue:
+          Fn::Sub: medislot-${EnvironmentName}-AuthLambdaRoleArn
+      Timeout: 15
+      MemorySize: 256
+      Environment:
+        Variables:
+          JWT_SIGNING_SECRET_PARAMETER:
+            Fn::Sub: /medislot/${EnvironmentName}/auth/jwt-signing-secret
+          JWT_ISSUER: medislot
+          REFRESH_TOKENS_TABLE:
+            Fn::ImportValue:
+              Fn::Sub: medislot-${EnvironmentName}-RefreshTokensTableName
+
+  # ---------------------------------------------------------
+  # LOGOUT LAMBDA
+  # ---------------------------------------------------------
+  LogoutFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub medislot-${EnvironmentName}-auth-logout
+      Description: Revokes the access token and removes the refresh token.
+      Runtime: python3.12
+      Handler: logout.lambda_handler
+      Code:
+        S3Bucket: !Ref LambdaArtifactBucket
+        S3Key: !Ref LogoutLambdaS3Key
+      Role:
+        Fn::ImportValue:
+          Fn::Sub: medislot-${EnvironmentName}-AuthLambdaRoleArn
+      Timeout: 15
+      MemorySize: 256
+      Environment:
+        Variables:
+          JWT_SIGNING_SECRET_PARAMETER:
+            Fn::Sub: /medislot/${EnvironmentName}/auth/jwt-signing-secret
+          JWT_ISSUER: medislot
+          REFRESH_TOKENS_TABLE:
+            Fn::ImportValue:
+              Fn::Sub: medislot-${EnvironmentName}-RefreshTokensTableName
+          REVOKED_TOKENS_TABLE:
+            Fn::ImportValue:
+              Fn::Sub: medislot-${EnvironmentName}-RevokedTokensTableName
+
+  # ---------------------------------------------------------
+  # JWT AUTHORIZER LAMBDA
+  # ---------------------------------------------------------
+  AuthorizerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub medislot-${EnvironmentName}-auth-authorizer
+      Description: Validates JWTs and rejects revoked access tokens.
+      Runtime: python3.12
+      Handler: authorizer.lambda_handler
+      Code:
+        S3Bucket: !Ref LambdaArtifactBucket
+        S3Key: !Ref AuthorizerLambdaS3Key
+      Role:
+        Fn::ImportValue:
+          Fn::Sub: medislot-${EnvironmentName}-AuthAuthorizerRoleArn
+      Timeout: 10
+      MemorySize: 256
+      Environment:
+        Variables:
+          JWT_SIGNING_SECRET_PARAMETER:
+            Fn::Sub: /medislot/${EnvironmentName}/auth/jwt-signing-secret
+          JWT_ISSUER: medislot
+          REVOKED_TOKENS_TABLE:
+            Fn::ImportValue:
+              Fn::Sub: medislot-${EnvironmentName}-RevokedTokensTableName
+
+  # ---------------------------------------------------------
+  # API GATEWAY REST API
+  # ---------------------------------------------------------
+  MediSlotRestApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub medislot-${EnvironmentName}-api
+      Description: MediSlot authentication REST API
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+
+  # ---------------------------------------------------------
+  # AUTHORIZATION CONFIGURATION
+  # ---------------------------------------------------------
+  JwtAuthorizer:
+    Type: AWS::ApiGateway::Authorizer
+    Properties:
+      Name: !Sub medislot-${EnvironmentName}-jwt-authorizer
+      RestApiId: !Ref MediSlotRestApi
+      Type: TOKEN
+      IdentitySource: method.request.header.Authorization
+      AuthorizerResultTtlInSeconds: 0
+      AuthorizerUri:
+        Fn::Sub:
+          - arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FunctionArn}/invocations
+          - FunctionArn: !GetAtt AuthorizerFunction.Arn
+      AuthorizerCredentials:
+        Fn::ImportValue:
+          Fn::Sub: medislot-${EnvironmentName}-ApiGatewayInvokeLambdaRoleArn
+
+  # ---------------------------------------------------------
+  # /auth
+  # ---------------------------------------------------------
+  AuthResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref MediSlotRestApi
+      ParentId: !GetAtt MediSlotRestApi.RootResourceId
+      PathPart: auth
+
+  # ---------------------------------------------------------
+  # /auth/register
+  # ---------------------------------------------------------
+  RegisterResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref MediSlotRestApi
+      ParentId: !Ref AuthResource
+      PathPart: register
+
+  RegisterMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref MediSlotRestApi
+      ResourceId: !Ref RegisterResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Credentials:
+          Fn::ImportValue:
+            Fn::Sub: medislot-${EnvironmentName}-ApiGatewayInvokeLambdaRoleArn
+        Uri:
+          Fn::Sub:
+            - arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FunctionArn}/invocations
+            - FunctionArn: !GetAtt RegisterFunction.Arn
+
+  # ---------------------------------------------------------
+  # /auth/login
+  # ---------------------------------------------------------
+  LoginResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref MediSlotRestApi
+      ParentId: !Ref AuthResource
+      PathPart: login
+
+  LoginMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref MediSlotRestApi
+      ResourceId: !Ref LoginResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Credentials:
+          Fn::ImportValue:
+            Fn::Sub: medislot-${EnvironmentName}-ApiGatewayInvokeLambdaRoleArn
+        Uri:
+          Fn::Sub:
+            - arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FunctionArn}/invocations
+            - FunctionArn: !GetAtt LoginFunction.Arn
+
+  # ---------------------------------------------------------
+  # /auth/refresh
+  # ---------------------------------------------------------
+  RefreshResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref MediSlotRestApi
+      ParentId: !Ref AuthResource
+      PathPart: refresh
+
+  RefreshMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref MediSlotRestApi
+      ResourceId: !Ref RefreshResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Credentials:
+          Fn::ImportValue:
+            Fn::Sub: medislot-${EnvironmentName}-ApiGatewayInvokeLambdaRoleArn
+        Uri:
+          Fn::Sub:
+            - arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FunctionArn}/invocations
+            - FunctionArn: !GetAtt RefreshFunction.Arn
+
+  # ---------------------------------------------------------
+  # /auth/logout
+  # ---------------------------------------------------------
+  LogoutResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref MediSlotRestApi
+      ParentId: !Ref AuthResource
+      PathPart: logout
+
+  LogoutMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref MediSlotRestApi
+      ResourceId: !Ref LogoutResource
+      HttpMethod: POST
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref JwtAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Credentials:
+          Fn::ImportValue:
+            Fn::Sub: medislot-${EnvironmentName}-ApiGatewayInvokeLambdaRoleArn
+        Uri:
+          Fn::Sub:
+            - arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FunctionArn}/invocations
+            - FunctionArn: !GetAtt LogoutFunction.Arn
+
+  # ---------------------------------------------------------
+  # API DEPLOYMENT
+  # ---------------------------------------------------------
+  ApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - RegisterMethod
+      - LoginMethod
+      - RefreshMethod
+      - LogoutMethod
+    Properties:
+      RestApiId: !Ref MediSlotRestApi
+      Description: !Sub MediSlot ${EnvironmentName} authentication API deployment
+
+  ApiStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      RestApiId: !Ref MediSlotRestApi
+      DeploymentId: !Ref ApiDeployment
+      StageName: !Ref EnvironmentName
+      Description: !Sub MediSlot ${EnvironmentName} stage
+
+Outputs:
+  RestApiId:
+    Description: MediSlot REST API ID
+    Value: !Ref MediSlotRestApi
+    Export:
+      Name: !Sub medislot-${EnvironmentName}-RestApiId
+
+  RestApiBaseUrl:
+    Description: Base URL for the MediSlot REST API
+    Value: !Sub https://${MediSlotRestApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/${EnvironmentName}
+    Export:
+      Name: !Sub medislot-${EnvironmentName}-RestApiBaseUrl
+
+  RegisterFunctionArn:
+    Value: !GetAtt RegisterFunction.Arn
+
+  LoginFunctionArn:
+    Value: !GetAtt LoginFunction.Arn
+
+  RefreshFunctionArn:
+    Value: !GetAtt RefreshFunction.Arn
+
+  LogoutFunctionArn:
+    Value: !GetAtt LogoutFunction.Arn
+
+  AuthorizerFunctionArn:
+    Value: !GetAtt AuthorizerFunction.Arn

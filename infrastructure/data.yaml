@@ -76,31 +76,49 @@ Resources:
   # raw token. expires_at is Unix epoch seconds for DynamoDB TTL.
   # ------------------------------------------------------------
 
+  
   RefreshTokensTable:
     Type: AWS::DynamoDB::Table
     Properties:
       TableName: !Sub "medislot-${EnvironmentName}-refresh-tokens"
       BillingMode: PAY_PER_REQUEST
+
       AttributeDefinitions:
         - AttributeName: user_id
           AttributeType: S
         - AttributeName: token_id
           AttributeType: S
+        - AttributeName: token_hash
+          AttributeType: S
+
       KeySchema:
         - AttributeName: user_id
           KeyType: HASH
         - AttributeName: token_id
           KeyType: RANGE
+
+      GlobalSecondaryIndexes:
+        - IndexName: RefreshTokenHashIndex
+          KeySchema:
+            - AttributeName: token_hash
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+
       TimeToLiveSpecification:
         AttributeName: expires_at
         Enabled: true
+
       SSESpecification:
         SSEEnabled: true
+
       PointInTimeRecoverySpecification:
         PointInTimeRecoveryEnabled: true
+
       Tags:
         - Key: Environment
           Value: !Ref EnvironmentName
+
 
   # ------------------------------------------------------------
   # DYNAMODB: REVOKED ACCESS TOKENS

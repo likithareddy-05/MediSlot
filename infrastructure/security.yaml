@@ -65,6 +65,8 @@ Resources:
                 Resource:
                   - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/medislot/${EnvironmentName}/auth/jwt-signing-secret
 
+              # Base-table permissions for refresh-token operations.
+              # Includes atomic refresh-token rotation.
               - Sid: ManageRefreshTokens
                 Effect: Allow
                 Action:
@@ -72,9 +74,22 @@ Resources:
                   - dynamodb:PutItem
                   - dynamodb:UpdateItem
                   - dynamodb:DeleteItem
+                  - dynamodb:TransactWriteItems
                 Resource:
                   - !Sub
                     - arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${TableName}
+                    - TableName:
+                        Fn::ImportValue:
+                          !Sub medislot-${EnvironmentName}-RefreshTokensTableName
+
+              # Query the GSI used to look up refresh tokens by hash.
+              - Sid: QueryRefreshTokensByHash
+                Effect: Allow
+                Action:
+                  - dynamodb:Query
+                Resource:
+                  - !Sub
+                    - arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${TableName}/index/RefreshTokenHashIndex
                     - TableName:
                         Fn::ImportValue:
                           !Sub medislot-${EnvironmentName}-RefreshTokensTableName
@@ -190,7 +205,6 @@ Resources:
   # AWS::SSM::Parameter does not support SecureString.
   #
   # Uses Role 1 to keep the stack at three IAM roles.
-  # See security note below.
   # ==================================================
   JwtParameterCreatorFunction:
     Type: AWS::Lambda::Function
@@ -207,7 +221,6 @@ Resources:
           import json
           import secrets
           import urllib.request
-          import urllib.error
 
           ssm = boto3.client("ssm")
 
@@ -285,8 +298,10 @@ Resources:
                           event, context, "FAILED", {}, physical_id
                       )
                   except Exception as response_error:
-                      print("Failed to send CloudFormation response:",
-                            str(response_error))
+                      print(
+                          "Failed to send CloudFormation response:",
+                          str(response_error)
+                      )
                   raise
 
   # ==================================================

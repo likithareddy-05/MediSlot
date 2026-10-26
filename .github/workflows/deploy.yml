@@ -1,3 +1,4 @@
+
 name: MediSlot Infrastructure Deployment
 
 on:
@@ -56,12 +57,12 @@ jobs:
             infrastructure/data.yaml \
             infrastructure/security.yaml \
             infrastructure/authentication.yaml \
-            lambdas/register.py \
-            lambdas/auth.py \
-            lambdas/refresh.py \
-            lambdas/logout.py \
-            lambdas/authorizer.py \
-            lambdas/requirements.txt
+            src/lambdas/register.py \
+            src/lambdas/auth.py \
+            src/lambdas/refresh.py \
+            src/lambdas/logout.py \
+            src/lambdas/authorizer.py \
+            src/lambdas/requirements.txt
           do
             if [[ ! -f "$file" ]]; then
               echo "::error::Required file is missing: $file"
@@ -144,10 +145,10 @@ jobs:
 
             python -m pip install \
               --only-binary=:all: \
-              -r lambdas/requirements.txt \
+              -r src/lambdas/requirements.txt \
               -t "$package_dir"
 
-            cp "lambdas/${source_file}" "$package_dir/"
+            cp "src/lambdas/${source_file}" "$package_dir/"
 
             rm -f "$zip_file"
 
@@ -199,6 +200,7 @@ jobs:
             local -a parameters=("ParameterKey=EnvironmentName,ParameterValue=${ENVIRONMENT_NAME}")
             local -a capabilities=()
             local has_custom_parameters=0
+
             while (($#)); do
               case "$1" in
                 --parameters)
@@ -207,6 +209,7 @@ jobs:
                     has_custom_parameters=1
                   fi
                   shift
+
                   while (($#)) && [[ "$1" != --* ]]; do
                     parameters+=("$1")
                     shift
@@ -214,6 +217,7 @@ jobs:
                   ;;
                 --capabilities)
                   shift
+
                   while (($#)) && [[ "$1" != --* ]]; do
                     capabilities+=("$1")
                     shift
@@ -225,12 +229,15 @@ jobs:
                   ;;
               esac
             done
+
             if [[ "$has_custom_parameters" -eq 1 ]]; then
               local env_parameter_count=0
               local parameter
+
               for parameter in "${parameters[@]}"; do
                 [[ "$parameter" == ParameterKey=EnvironmentName,* ]] && ((env_parameter_count+=1))
               done
+
               if [[ "$env_parameter_count" -ne 1 ]]; then
                 echo "::error::${stack_name} must receive exactly one EnvironmentName parameter."
                 return 2
@@ -245,6 +252,7 @@ jobs:
             echo "--------------------------------------------------"
 
             local describe_error
+
             if describe_error=$(aws cloudformation describe-stacks \
               --stack-name "$stack_name" \
               --region "$AWS_REGION" 2>&1); then
@@ -293,10 +301,12 @@ jobs:
               if [[ "$reason" == *"didn't contain changes"* ||
                     "$reason" == *"No updates are to be performed"* ]]; then
                 echo "No changes required for ${stack_name}."
+
                 aws cloudformation delete-change-set \
                   --stack-name "$stack_name" \
                   --change-set-name "$change_set_name" \
                   --region "$AWS_REGION" || true
+
                 return 0
               fi
 
@@ -435,4 +445,3 @@ jobs:
               --region "$AWS_REGION" \
               --query 'Stacks[0].{Status:StackStatus,Outputs:Outputs}' \
               --output json
-          

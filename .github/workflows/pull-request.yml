@@ -1,3 +1,4 @@
+
 name: Pull Request Validation
 
 on:
@@ -24,7 +25,7 @@ jobs:
 
           test -d .github/workflows
           test -d infrastructure
-          test -d lambdas
+          test -d src/lambdas
           test -d database
           test -f README.md
           test -f .gitignore
@@ -59,12 +60,12 @@ jobs:
           set -euo pipefail
 
           for file in \
-            lambdas/register.py \
-            lambdas/auth.py \
-            lambdas/refresh.py \
-            lambdas/logout.py \
-            lambdas/authorizer.py \
-            lambdas/requirements.txt
+            src/lambdas/register.py \
+            src/lambdas/auth.py \
+            src/lambdas/refresh.py \
+            src/lambdas/logout.py \
+            src/lambdas/authorizer.py \
+            src/lambdas/requirements.txt
           do
             if [[ ! -f "$file" ]]; then
               echo "::error::Missing required Lambda file: $file"

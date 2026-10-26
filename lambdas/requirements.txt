@@ -1,4 +1,0 @@
-
-PyMySQL
-bcrypt
-PyJWT

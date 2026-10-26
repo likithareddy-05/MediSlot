@@ -81,6 +81,37 @@ def get_db_connection():
     )
 
 
+def ensure_users_table(connection):
+    """Create the users table if the initial schema has not been applied yet.
+
+    This idempotent bootstrap prevents first-time registration from failing
+    when a fresh RDS database has been provisioned but schema.sql has not run.
+    The Lambda's database secret must have CREATE TABLE permission.
+    """
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                user_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                email VARCHAR(254) NOT NULL,
+                password_hash VARCHAR(255) NOT NULL,
+                role VARCHAR(10) NOT NULL,
+                account_status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE',
+                created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+                updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
+                    ON UPDATE CURRENT_TIMESTAMP(6),
+                PRIMARY KEY (user_id),
+                UNIQUE KEY uq_users_email (email),
+                KEY idx_users_role_status (role, account_status),
+                CONSTRAINT chk_users_role CHECK (role IN ('DOCTOR', 'PATIENT'))
+            ) ENGINE=InnoDB
+              DEFAULT CHARSET=utf8mb4
+              COLLATE=utf8mb4_0900_ai_ci
+            """
+        )
+    connection.commit()
+
+
 def lambda_handler(event, context):
     """API Gateway Lambda handler for user registration."""
     connection = None
@@ -157,6 +188,10 @@ def lambda_handler(event, context):
         ).decode("utf-8")
 
         connection = get_db_connection()
+
+        # Ensure the initial table exists before the first registration.
+        # CREATE TABLE IF NOT EXISTS is safe to run repeatedly.
+        ensure_users_table(connection)
 
         with connection.cursor() as cursor:
             cursor.execute(

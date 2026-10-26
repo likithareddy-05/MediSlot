@@ -32,6 +32,10 @@ Parameters:
   AuthorizerLambdaS3Key:
     Type: String
 
+  ProfileLambdaS3Key:
+    Type: String
+    Description: S3 key for the authenticated account-details Lambda package.
+
 Resources:
   # ---------------------------------------------------------
   # REGISTER LAMBDA
@@ -236,6 +240,49 @@ Resources:
           ROLE_ROUTE_RULES: '{"GET /doctor/*":"DOCTOR","POST /doctor/*":"DOCTOR","PUT /doctor/*":"DOCTOR","PATCH /doctor/*":"DOCTOR","DELETE /doctor/*":"DOCTOR","GET /patient/*":"PATIENT","POST /patient/*":"PATIENT","PUT /patient/*":"PATIENT","PATCH /patient/*":"PATIENT","DELETE /patient/*":"PATIENT","POST /auth/logout":["DOCTOR","PATIENT"]}'
 
   # ---------------------------------------------------------
+  # AUTHENTICATED ACCOUNT DETAILS LAMBDA
+  # Returns only the current caller's row from the users table.
+  # ---------------------------------------------------------
+  ProfileFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub medislot-${EnvironmentName}-account-profile
+      Description: Returns the authenticated patient's or doctor's account details.
+      Runtime: python3.12
+      Handler: profile.lambda_handler
+      Code:
+        S3Bucket: !Ref LambdaArtifactBucket
+        S3Key: !Ref ProfileLambdaS3Key
+      Role:
+        Fn::ImportValue:
+          Fn::Sub: medislot-${EnvironmentName}-AuthLambdaRoleArn
+      Timeout: 15
+      MemorySize: 256
+      VpcConfig:
+        SecurityGroupIds:
+          - Fn::ImportValue:
+              Fn::Sub: medislot-${EnvironmentName}-LambdaSecurityGroupId
+        SubnetIds:
+          - Fn::ImportValue:
+              Fn::Sub: medislot-${EnvironmentName}-PrivateSubnetAId
+          - Fn::ImportValue:
+              Fn::Sub: medislot-${EnvironmentName}-PrivateSubnetBId
+      Environment:
+        Variables:
+          DB_HOST:
+            Fn::ImportValue:
+              Fn::Sub: medislot-${EnvironmentName}-DatabaseEndpointAddress
+          DB_PORT:
+            Fn::ImportValue:
+              Fn::Sub: medislot-${EnvironmentName}-DatabaseEndpointPort
+          DB_NAME:
+            Fn::ImportValue:
+              Fn::Sub: medislot-${EnvironmentName}-DatabaseName
+          DB_SECRET_ARN:
+            Fn::ImportValue:
+              Fn::Sub: medislot-${EnvironmentName}-DatabaseSecretArn
+
+  # ---------------------------------------------------------
   # API GATEWAY REST API
   # ---------------------------------------------------------
   MediSlotRestApi:
@@ -390,6 +437,78 @@ Resources:
             - FunctionArn: !GetAtt LogoutFunction.Arn
 
   # ---------------------------------------------------------
+  # /patient/me - current authenticated patient's account details
+  # ---------------------------------------------------------
+  PatientResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref MediSlotRestApi
+      ParentId: !GetAtt MediSlotRestApi.RootResourceId
+      PathPart: patient
+
+  PatientMeResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref MediSlotRestApi
+      ParentId: !Ref PatientResource
+      PathPart: me
+
+  PatientMeMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref MediSlotRestApi
+      ResourceId: !Ref PatientMeResource
+      HttpMethod: GET
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref JwtAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Credentials:
+          Fn::ImportValue:
+            Fn::Sub: medislot-${EnvironmentName}-ApiGatewayInvokeLambdaRoleArn
+        Uri:
+          Fn::Sub:
+            - arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FunctionArn}/invocations
+            - FunctionArn: !GetAtt ProfileFunction.Arn
+
+  # ---------------------------------------------------------
+  # /doctor/me - current authenticated doctor's account details
+  # ---------------------------------------------------------
+  DoctorResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref MediSlotRestApi
+      ParentId: !GetAtt MediSlotRestApi.RootResourceId
+      PathPart: doctor
+
+  DoctorMeResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref MediSlotRestApi
+      ParentId: !Ref DoctorResource
+      PathPart: me
+
+  DoctorMeMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref MediSlotRestApi
+      ResourceId: !Ref DoctorMeResource
+      HttpMethod: GET
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref JwtAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Credentials:
+          Fn::ImportValue:
+            Fn::Sub: medislot-${EnvironmentName}-ApiGatewayInvokeLambdaRoleArn
+        Uri:
+          Fn::Sub:
+            - arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FunctionArn}/invocations
+            - FunctionArn: !GetAtt ProfileFunction.Arn
+
+  # ---------------------------------------------------------
   # API DEPLOYMENT
   # ---------------------------------------------------------
   ApiDeployment:
@@ -399,6 +518,8 @@ Resources:
       - LoginMethod
       - RefreshMethod
       - LogoutMethod
+      - PatientMeMethod
+      - DoctorMeMethod
     Properties:
       RestApiId: !Ref MediSlotRestApi
       Description: !Sub MediSlot ${EnvironmentName} authentication API deployment
@@ -438,3 +559,6 @@ Outputs:
 
   AuthorizerFunctionArn:
     Value: !GetAtt AuthorizerFunction.Arn
+
+  ProfileFunctionArn:
+    Value: !GetAtt ProfileFunction.Arn

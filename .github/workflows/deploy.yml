@@ -113,6 +113,7 @@ jobs:
             src/lambdas/refresh.py \
             src/lambdas/logout.py \
             src/lambdas/authorizer.py \
+            src/lambdas/profile.py \
             src/lambdas/requirements.txt
           do
             if [[ ! -f "$file" ]]; then
@@ -223,6 +224,7 @@ jobs:
           package_lambda refresh.py refresh
           package_lambda logout.py logout
           package_lambda authorizer.py authorizer
+          package_lambda profile.py profile
 
           echo "All authentication Lambda packages uploaded."
 
@@ -480,7 +482,8 @@ jobs:
               "ParameterKey=LoginLambdaS3Key,ParameterValue=artifacts/${GITHUB_SHA}/login.zip" \
               "ParameterKey=RefreshLambdaS3Key,ParameterValue=artifacts/${GITHUB_SHA}/refresh.zip" \
               "ParameterKey=LogoutLambdaS3Key,ParameterValue=artifacts/${GITHUB_SHA}/logout.zip" \
-              "ParameterKey=AuthorizerLambdaS3Key,ParameterValue=artifacts/${GITHUB_SHA}/authorizer.zip"
+              "ParameterKey=AuthorizerLambdaS3Key,ParameterValue=artifacts/${GITHUB_SHA}/authorizer.zip" \
+              "ParameterKey=ProfileLambdaS3Key,ParameterValue=artifacts/${GITHUB_SHA}/profile.zip"
 
       # --------------------------------------------------
       # 7. SHOW STACK OUTPUTS

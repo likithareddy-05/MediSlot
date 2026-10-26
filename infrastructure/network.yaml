@@ -1,6 +1,9 @@
+AWSTemplateFormatVersion: "2010-09-09"
 
-AWSTemplateFormatVersion: '2010-09-09'
-Description: MediSlot network foundation with VPC endpoints for private AWS service connectivity
+Description: >
+  MediSlot network foundation with public and private subnets,
+  application security groups, and VPC endpoints for private
+  AWS service connectivity without a NAT Gateway.
 
 Parameters:
   EnvironmentName:
@@ -33,9 +36,10 @@ Parameters:
     Description: CIDR range for private subnet B
 
 Resources:
-  # --------------------------------------------------
+
+  # ============================================================
   # VPC
-  # --------------------------------------------------
+  # ============================================================
 
   MediSlotVPC:
     Type: AWS::EC2::VPC
@@ -45,7 +49,7 @@ Resources:
       EnableDnsHostnames: true
       Tags:
         - Key: Name
-          Value: !Sub 'medislot-${EnvironmentName}-vpc'
+          Value: !Sub "medislot-${EnvironmentName}-vpc"
         - Key: Environment
           Value: !Ref EnvironmentName
         - Key: Project
@@ -56,7 +60,7 @@ Resources:
     Properties:
       Tags:
         - Key: Name
-          Value: !Sub 'medislot-${EnvironmentName}-igw'
+          Value: !Sub "medislot-${EnvironmentName}-igw"
         - Key: Environment
           Value: !Ref EnvironmentName
         - Key: Project
@@ -68,9 +72,9 @@ Resources:
       VpcId: !Ref MediSlotVPC
       InternetGatewayId: !Ref InternetGateway
 
-  # --------------------------------------------------
-  # Subnets
-  # --------------------------------------------------
+  # ============================================================
+  # SUBNETS
+  # ============================================================
 
   PublicSubnet:
     Type: AWS::EC2::Subnet
@@ -79,11 +83,11 @@ Resources:
       CidrBlock: !Ref PublicSubnetCidr
       AvailabilityZone: !Select
         - 0
-        - !GetAZs ''
+        - !GetAZs ""
       MapPublicIpOnLaunch: true
       Tags:
         - Key: Name
-          Value: !Sub 'medislot-${EnvironmentName}-public-subnet'
+          Value: !Sub "medislot-${EnvironmentName}-public-subnet"
         - Key: Environment
           Value: !Ref EnvironmentName
         - Key: Project
@@ -96,11 +100,11 @@ Resources:
       CidrBlock: !Ref PrivateSubnetACidr
       AvailabilityZone: !Select
         - 0
-        - !GetAZs ''
+        - !GetAZs ""
       MapPublicIpOnLaunch: false
       Tags:
         - Key: Name
-          Value: !Sub 'medislot-${EnvironmentName}-private-subnet-a'
+          Value: !Sub "medislot-${EnvironmentName}-private-subnet-a"
         - Key: Environment
           Value: !Ref EnvironmentName
         - Key: Project
@@ -113,19 +117,19 @@ Resources:
       CidrBlock: !Ref PrivateSubnetBCidr
       AvailabilityZone: !Select
         - 1
-        - !GetAZs ''
+        - !GetAZs ""
       MapPublicIpOnLaunch: false
       Tags:
         - Key: Name
-          Value: !Sub 'medislot-${EnvironmentName}-private-subnet-b'
+          Value: !Sub "medislot-${EnvironmentName}-private-subnet-b"
         - Key: Environment
           Value: !Ref EnvironmentName
         - Key: Project
           Value: MediSlot
 
-  # --------------------------------------------------
-  # Route tables
-  # --------------------------------------------------
+  # ============================================================
+  # ROUTE TABLES
+  # ============================================================
 
   PublicRouteTable:
     Type: AWS::EC2::RouteTable
@@ -133,7 +137,7 @@ Resources:
       VpcId: !Ref MediSlotVPC
       Tags:
         - Key: Name
-          Value: !Sub 'medislot-${EnvironmentName}-public-rt'
+          Value: !Sub "medislot-${EnvironmentName}-public-rt"
         - Key: Environment
           Value: !Ref EnvironmentName
         - Key: Project
@@ -159,7 +163,7 @@ Resources:
       VpcId: !Ref MediSlotVPC
       Tags:
         - Key: Name
-          Value: !Sub 'medislot-${EnvironmentName}-private-rt'
+          Value: !Sub "medislot-${EnvironmentName}-private-rt"
         - Key: Environment
           Value: !Ref EnvironmentName
         - Key: Project
@@ -177,9 +181,9 @@ Resources:
       SubnetId: !Ref PrivateSubnetB
       RouteTableId: !Ref PrivateRouteTable
 
-  # --------------------------------------------------
-  # Application security groups
-  # --------------------------------------------------
+  # ============================================================
+  # APPLICATION SECURITY GROUPS
+  # ============================================================
 
   EC2SecurityGroup:
     Type: AWS::EC2::SecurityGroup
@@ -199,7 +203,7 @@ Resources:
           CidrIp: 0.0.0.0/0
       Tags:
         - Key: Name
-          Value: !Sub 'medislot-${EnvironmentName}-ec2-sg'
+          Value: !Sub "medislot-${EnvironmentName}-ec2-sg"
         - Key: Environment
           Value: !Ref EnvironmentName
         - Key: Project
@@ -212,7 +216,7 @@ Resources:
       VpcId: !Ref MediSlotVPC
       Tags:
         - Key: Name
-          Value: !Sub 'medislot-${EnvironmentName}-lambda-sg'
+          Value: !Sub "medislot-${EnvironmentName}-lambda-sg"
         - Key: Environment
           Value: !Ref EnvironmentName
         - Key: Project
@@ -231,16 +235,18 @@ Resources:
           SourceSecurityGroupId: !Ref LambdaSecurityGroup
       Tags:
         - Key: Name
-          Value: !Sub 'medislot-${EnvironmentName}-rds-sg'
+          Value: !Sub "medislot-${EnvironmentName}-rds-sg"
         - Key: Environment
           Value: !Ref EnvironmentName
         - Key: Project
           Value: MediSlot
 
-  # --------------------------------------------------
-  # VPC endpoint security group
-  # Allow HTTPS from backend Lambda functions only
-  # --------------------------------------------------
+  # ============================================================
+  # VPC ENDPOINT SECURITY GROUP
+  # Allow HTTPS from backend Lambda functions to interface
+  # endpoints. The security group retains its default outbound
+  # rules so endpoint responses can return normally.
+  # ============================================================
 
   VPCEndpointSecurityGroup:
     Type: AWS::EC2::SecurityGroup
@@ -255,43 +261,64 @@ Resources:
           SourceSecurityGroupId: !Ref LambdaSecurityGroup
       Tags:
         - Key: Name
-          Value: !Sub 'medislot-${EnvironmentName}-vpc-endpoints-sg'
+          Value: !Sub "medislot-${EnvironmentName}-vpc-endpoints-sg"
         - Key: Environment
           Value: !Ref EnvironmentName
         - Key: Project
           Value: MediSlot
 
-  # --------------------------------------------------
-  # S3 Gateway endpoint
-  # No hourly endpoint charge
-  # --------------------------------------------------
+  # ============================================================
+  # S3 GATEWAY ENDPOINT
+  # Provides private S3 access through the private route table.
+  # ============================================================
 
   S3GatewayEndpoint:
     Type: AWS::EC2::VPCEndpoint
     Properties:
       VpcId: !Ref MediSlotVPC
       VpcEndpointType: Gateway
-      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.s3"
       RouteTableIds:
         - !Ref PrivateRouteTable
       Tags:
         - Key: Name
-          Value: !Sub 'medislot-${EnvironmentName}-s3-endpoint'
+          Value: !Sub "medislot-${EnvironmentName}-s3-endpoint"
         - Key: Environment
           Value: !Ref EnvironmentName
         - Key: Project
           Value: MediSlot
 
-  # --------------------------------------------------
-  # SSM Parameter Store interface endpoint
-  # --------------------------------------------------
+  # ============================================================
+  # DYNAMODB GATEWAY ENDPOINT
+  # Private access to refresh-token, revoked-token, and slot tables.
+  # ============================================================
+
+  DynamoDBGatewayEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref MediSlotVPC
+      VpcEndpointType: Gateway
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.dynamodb"
+      RouteTableIds:
+        - !Ref PrivateRouteTable
+      Tags:
+        - Key: Name
+          Value: !Sub "medislot-${EnvironmentName}-dynamodb-endpoint"
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Project
+          Value: MediSlot
+
+  # ============================================================
+  # SSM PARAMETER STORE INTERFACE ENDPOINT
+  # ============================================================
 
   SSMInterfaceEndpoint:
     Type: AWS::EC2::VPCEndpoint
     Properties:
       VpcId: !Ref MediSlotVPC
       VpcEndpointType: Interface
-      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ssm'
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ssm"
       PrivateDnsEnabled: true
       SubnetIds:
         - !Ref PrivateSubnetA
@@ -300,22 +327,48 @@ Resources:
         - !Ref VPCEndpointSecurityGroup
       Tags:
         - Key: Name
-          Value: !Sub 'medislot-${EnvironmentName}-ssm-endpoint'
+          Value: !Sub "medislot-${EnvironmentName}-ssm-endpoint"
         - Key: Environment
           Value: !Ref EnvironmentName
         - Key: Project
           Value: MediSlot
 
-  # --------------------------------------------------
-  # SNS interface endpoint
-  # --------------------------------------------------
+  # ============================================================
+  # SECRETS MANAGER INTERFACE ENDPOINT
+  # Allows private Lambdas to retrieve RDS credentials.
+  # ============================================================
+
+  SecretsManagerInterfaceEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref MediSlotVPC
+      VpcEndpointType: Interface
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.secretsmanager"
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnetA
+        - !Ref PrivateSubnetB
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub "medislot-${EnvironmentName}-secretsmanager-endpoint"
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Project
+          Value: MediSlot
+
+  # ============================================================
+  # SNS INTERFACE ENDPOINT
+  # Allows private workloads to call SNS APIs.
+  # ============================================================
 
   SNSInterfaceEndpoint:
     Type: AWS::EC2::VPCEndpoint
     Properties:
       VpcId: !Ref MediSlotVPC
       VpcEndpointType: Interface
-      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.sns'
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.sns"
       PrivateDnsEnabled: true
       SubnetIds:
         - !Ref PrivateSubnetA
@@ -324,22 +377,23 @@ Resources:
         - !Ref VPCEndpointSecurityGroup
       Tags:
         - Key: Name
-          Value: !Sub 'medislot-${EnvironmentName}-sns-endpoint'
+          Value: !Sub "medislot-${EnvironmentName}-sns-endpoint"
         - Key: Environment
           Value: !Ref EnvironmentName
         - Key: Project
           Value: MediSlot
 
-  # --------------------------------------------------
-  # EventBridge interface endpoint
-  # --------------------------------------------------
+  # ============================================================
+  # EVENTBRIDGE INTERFACE ENDPOINT
+  # Allows private workloads to call EventBridge APIs.
+  # ============================================================
 
   EventBridgeInterfaceEndpoint:
     Type: AWS::EC2::VPCEndpoint
     Properties:
       VpcId: !Ref MediSlotVPC
       VpcEndpointType: Interface
-      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.events'
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.events"
       PrivateDnsEnabled: true
       SubnetIds:
         - !Ref PrivateSubnetA
@@ -348,22 +402,23 @@ Resources:
         - !Ref VPCEndpointSecurityGroup
       Tags:
         - Key: Name
-          Value: !Sub 'medislot-${EnvironmentName}-events-endpoint'
+          Value: !Sub "medislot-${EnvironmentName}-events-endpoint"
         - Key: Environment
           Value: !Ref EnvironmentName
         - Key: Project
           Value: MediSlot
 
-  # --------------------------------------------------
-  # CloudWatch Logs interface endpoint
-  # --------------------------------------------------
+  # ============================================================
+  # CLOUDWATCH LOGS INTERFACE ENDPOINT
+  # Allows private Lambda functions to send logs to CloudWatch.
+  # ============================================================
 
   CloudWatchLogsInterfaceEndpoint:
     Type: AWS::EC2::VPCEndpoint
     Properties:
       VpcId: !Ref MediSlotVPC
       VpcEndpointType: Interface
-      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.logs'
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.logs"
       PrivateDnsEnabled: true
       SubnetIds:
         - !Ref PrivateSubnetA
@@ -372,40 +427,91 @@ Resources:
         - !Ref VPCEndpointSecurityGroup
       Tags:
         - Key: Name
-          Value: !Sub 'medislot-${EnvironmentName}-logs-endpoint'
+          Value: !Sub "medislot-${EnvironmentName}-logs-endpoint"
         - Key: Environment
           Value: !Ref EnvironmentName
         - Key: Project
           Value: MediSlot
 
-# --------------------------------------------------
-# Outputs
-# --------------------------------------------------
+  # ============================================================
+  # SQS INTERFACE ENDPOINT
+  # Allows private Lambda functions to call SQS APIs without NAT.
+  # ============================================================
+
+  SQSInterfaceEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref MediSlotVPC
+      VpcEndpointType: Interface
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.sqs"
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnetA
+        - !Ref PrivateSubnetB
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub "medislot-${EnvironmentName}-sqs-endpoint"
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Project
+          Value: MediSlot
+
+  # ============================================================
+  # STEP FUNCTIONS INTERFACE ENDPOINT
+  # Allows private Lambda functions to call Step Functions APIs.
+  # ============================================================
+
+  StepFunctionsInterfaceEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref MediSlotVPC
+      VpcEndpointType: Interface
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.states"
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnetA
+        - !Ref PrivateSubnetB
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub "medislot-${EnvironmentName}-step-functions-endpoint"
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Project
+          Value: MediSlot
+
+# ============================================================
+# OUTPUTS
+# ============================================================
 
 Outputs:
+
   VpcId:
     Description: MediSlot VPC ID
     Value: !Ref MediSlotVPC
     Export:
-      Name: !Sub 'medislot-${EnvironmentName}-VpcId'
+      Name: !Sub "medislot-${EnvironmentName}-VpcId"
 
   PublicSubnetId:
     Description: Public subnet ID
     Value: !Ref PublicSubnet
     Export:
-      Name: !Sub 'medislot-${EnvironmentName}-PublicSubnetId'
+      Name: !Sub "medislot-${EnvironmentName}-PublicSubnetId"
 
   PrivateSubnetAId:
     Description: Private subnet A ID
     Value: !Ref PrivateSubnetA
     Export:
-      Name: !Sub 'medislot-${EnvironmentName}-PrivateSubnetAId'
+      Name: !Sub "medislot-${EnvironmentName}-PrivateSubnetAId"
 
   PrivateSubnetBId:
     Description: Private subnet B ID
     Value: !Ref PrivateSubnetB
     Export:
-      Name: !Sub 'medislot-${EnvironmentName}-PrivateSubnetBId'
+      Name: !Sub "medislot-${EnvironmentName}-PrivateSubnetBId"
 
   PublicRouteTableId:
     Description: Public route table ID
@@ -419,33 +525,41 @@ Outputs:
     Description: EC2 security group ID
     Value: !Ref EC2SecurityGroup
     Export:
-      Name: !Sub 'medislot-${EnvironmentName}-EC2SecurityGroupId'
+      Name: !Sub "medislot-${EnvironmentName}-EC2SecurityGroupId"
 
   LambdaSecurityGroupId:
     Description: Lambda security group ID
     Value: !Ref LambdaSecurityGroup
     Export:
-      Name: !Sub 'medislot-${EnvironmentName}-LambdaSecurityGroupId'
+      Name: !Sub "medislot-${EnvironmentName}-LambdaSecurityGroupId"
 
   RDSSecurityGroupId:
     Description: RDS security group ID
     Value: !Ref RDSSecurityGroup
     Export:
-      Name: !Sub 'medislot-${EnvironmentName}-RDSSecurityGroupId'
+      Name: !Sub "medislot-${EnvironmentName}-RDSSecurityGroupId"
 
   VPCEndpointSecurityGroupId:
     Description: Security group used by interface endpoints
     Value: !Ref VPCEndpointSecurityGroup
     Export:
-      Name: !Sub 'medislot-${EnvironmentName}-VPCEndpointSecurityGroupId'
+      Name: !Sub "medislot-${EnvironmentName}-VPCEndpointSecurityGroupId"
 
   S3GatewayEndpointId:
     Description: S3 gateway endpoint ID
     Value: !Ref S3GatewayEndpoint
 
+  DynamoDBGatewayEndpointId:
+    Description: DynamoDB gateway endpoint ID
+    Value: !Ref DynamoDBGatewayEndpoint
+
   SSMInterfaceEndpointId:
     Description: SSM Parameter Store interface endpoint ID
     Value: !Ref SSMInterfaceEndpoint
+
+  SecretsManagerInterfaceEndpointId:
+    Description: Secrets Manager interface endpoint ID
+    Value: !Ref SecretsManagerInterfaceEndpoint
 
   SNSInterfaceEndpointId:
     Description: SNS interface endpoint ID
@@ -458,3 +572,11 @@ Outputs:
   CloudWatchLogsInterfaceEndpointId:
     Description: CloudWatch Logs interface endpoint ID
     Value: !Ref CloudWatchLogsInterfaceEndpoint
+
+  SQSInterfaceEndpointId:
+    Description: SQS interface endpoint ID
+    Value: !Ref SQSInterfaceEndpoint
+
+  StepFunctionsInterfaceEndpointId:
+    Description: Step Functions interface endpoint ID
+    Value: !Ref StepFunctionsInterfaceEndpoint

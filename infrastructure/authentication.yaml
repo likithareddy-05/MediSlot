@@ -1,5 +1,5 @@
-
 AWSTemplateFormatVersion: "2010-09-09"
+
 Description: >
   MediSlot authentication stack containing registration, login,
   refresh, logout, JWT authorization, and API Gateway resources.
@@ -33,7 +33,6 @@ Parameters:
     Type: String
 
 Resources:
-
   # ---------------------------------------------------------
   # REGISTER LAMBDA
   # ---------------------------------------------------------
@@ -52,6 +51,15 @@ Resources:
           Fn::Sub: medislot-${EnvironmentName}-AuthLambdaRoleArn
       Timeout: 15
       MemorySize: 256
+      VpcConfig:
+        SecurityGroupIds:
+          - Fn::ImportValue:
+              Fn::Sub: medislot-${EnvironmentName}-LambdaSecurityGroupId
+        SubnetIds:
+          - Fn::ImportValue:
+              Fn::Sub: medislot-${EnvironmentName}-PrivateSubnetAId
+          - Fn::ImportValue:
+              Fn::Sub: medislot-${EnvironmentName}-PrivateSubnetBId
       Environment:
         Variables:
           DB_HOST:
@@ -85,6 +93,15 @@ Resources:
           Fn::Sub: medislot-${EnvironmentName}-AuthLambdaRoleArn
       Timeout: 15
       MemorySize: 256
+      VpcConfig:
+        SecurityGroupIds:
+          - Fn::ImportValue:
+              Fn::Sub: medislot-${EnvironmentName}-LambdaSecurityGroupId
+        SubnetIds:
+          - Fn::ImportValue:
+              Fn::Sub: medislot-${EnvironmentName}-PrivateSubnetAId
+          - Fn::ImportValue:
+              Fn::Sub: medislot-${EnvironmentName}-PrivateSubnetBId
       Environment:
         Variables:
           DB_HOST:
@@ -124,6 +141,15 @@ Resources:
           Fn::Sub: medislot-${EnvironmentName}-AuthLambdaRoleArn
       Timeout: 15
       MemorySize: 256
+      VpcConfig:
+        SecurityGroupIds:
+          - Fn::ImportValue:
+              Fn::Sub: medislot-${EnvironmentName}-LambdaSecurityGroupId
+        SubnetIds:
+          - Fn::ImportValue:
+              Fn::Sub: medislot-${EnvironmentName}-PrivateSubnetAId
+          - Fn::ImportValue:
+              Fn::Sub: medislot-${EnvironmentName}-PrivateSubnetBId
       Environment:
         Variables:
           JWT_SIGNING_SECRET_PARAMETER:
@@ -151,6 +177,15 @@ Resources:
           Fn::Sub: medislot-${EnvironmentName}-AuthLambdaRoleArn
       Timeout: 15
       MemorySize: 256
+      VpcConfig:
+        SecurityGroupIds:
+          - Fn::ImportValue:
+              Fn::Sub: medislot-${EnvironmentName}-LambdaSecurityGroupId
+        SubnetIds:
+          - Fn::ImportValue:
+              Fn::Sub: medislot-${EnvironmentName}-PrivateSubnetAId
+          - Fn::ImportValue:
+              Fn::Sub: medislot-${EnvironmentName}-PrivateSubnetBId
       Environment:
         Variables:
           JWT_SIGNING_SECRET_PARAMETER:
@@ -181,6 +216,15 @@ Resources:
           Fn::Sub: medislot-${EnvironmentName}-AuthAuthorizerRoleArn
       Timeout: 10
       MemorySize: 256
+      VpcConfig:
+        SecurityGroupIds:
+          - Fn::ImportValue:
+              Fn::Sub: medislot-${EnvironmentName}-LambdaSecurityGroupId
+        SubnetIds:
+          - Fn::ImportValue:
+              Fn::Sub: medislot-${EnvironmentName}-PrivateSubnetAId
+          - Fn::ImportValue:
+              Fn::Sub: medislot-${EnvironmentName}-PrivateSubnetBId
       Environment:
         Variables:
           JWT_SIGNING_SECRET_PARAMETER:
@@ -189,6 +233,7 @@ Resources:
           REVOKED_TOKENS_TABLE:
             Fn::ImportValue:
               Fn::Sub: medislot-${EnvironmentName}-RevokedTokensTableName
+          ROLE_ROUTE_RULES: '{"GET /doctor/*":"DOCTOR","POST /doctor/*":"DOCTOR","PUT /doctor/*":"DOCTOR","PATCH /doctor/*":"DOCTOR","DELETE /doctor/*":"DOCTOR","GET /patient/*":"PATIENT","POST /patient/*":"PATIENT","PUT /patient/*":"PATIENT","PATCH /patient/*":"PATIENT","DELETE /patient/*":"PATIENT","POST /auth/logout":["DOCTOR","PATIENT"]}'
 
   # ---------------------------------------------------------
   # API GATEWAY REST API

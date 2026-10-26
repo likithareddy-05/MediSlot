@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   validate:
-    name: Validate repository
+    name: Validate repository and infrastructure
     runs-on: ubuntu-latest
 
     steps:
@@ -18,12 +18,81 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Check repository structure
+        shell: bash
         run: |
+          set -euo pipefail
+
           test -d .github/workflows
           test -d infrastructure
+          test -d lambdas
+          test -d database
           test -f README.md
           test -f .gitignore
 
-      - name: Check infrastructure templates are present
+          test -f .github/workflows/pull-request.yml
+          test -f .github/workflows/deploy.yml
+
+          echo "Repository structure is valid."
+
+      - name: Check required infrastructure templates
+        shell: bash
         run: |
-          find infrastructure -maxdepth 1 -type f -name '*.yaml' -print
+          set -euo pipefail
+
+          for file in \
+            infrastructure/network.yaml \
+            infrastructure/data.yaml \
+            infrastructure/security.yaml \
+            infrastructure/authentication.yaml
+          do
+            if [[ ! -f "$file" ]]; then
+              echo "::error::Missing required template: $file"
+              exit 1
+            fi
+          done
+
+          echo "All required infrastructure templates are present."
+
+      - name: Check required Lambda files
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for file in \
+            lambdas/register.py \
+            lambdas/auth.py \
+            lambdas/refresh.py \
+            lambdas/logout.py \
+            lambdas/authorizer.py \
+            lambdas/requirements.txt
+          do
+            if [[ ! -f "$file" ]]; then
+              echo "::error::Missing required Lambda file: $file"
+              exit 1
+            fi
+          done
+
+          echo "All required Lambda files are present."
+
+      - name: Check database schema
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -f database/schema.sql
+          echo "Database schema file is present."
+
+      - name: Validate CloudFormation templates
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python -m pip install --disable-pip-version-check cfn-lint
+
+          cfn-lint \
+            infrastructure/network.yaml \
+            infrastructure/data.yaml \
+            infrastructure/security.yaml \
+            infrastructure/authentication.yaml
+
+          echo "CloudFormation template validation completed."

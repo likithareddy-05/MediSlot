@@ -503,3 +503,5 @@ jobs:
               --region "$AWS_REGION" \
               --query 'Stacks[0].{Status:StackStatus,Outputs:Outputs}' \
               --output json
+
+          done

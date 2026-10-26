@@ -250,6 +250,7 @@ jobs:
             # supplied exactly once to CloudFormation.
             local -a parameters=("ParameterKey=EnvironmentName,ParameterValue=${ENVIRONMENT_NAME}")
             local -a capabilities=()
+            local -a capability_args=()
             local has_custom_parameters=0
 
             while (($#)); do
@@ -318,13 +319,19 @@ jobs:
 
             echo "Change set type: ${change_set_type}"
 
+            # AWS CLI requires the --capabilities option before capability values.
+            # Passing CAPABILITY_NAMED_IAM by itself makes the CLI parse it incorrectly.
+            if ((${#capabilities[@]} > 0)); then
+              capability_args=(--capabilities "${capabilities[@]}")
+            fi
+
             aws cloudformation create-change-set \
               --stack-name "$stack_name" \
               --change-set-name "$change_set_name" \
               --change-set-type "$change_set_type" \
               --template-body "file://${template_file}" \
               --parameters "${parameters[@]}" \
-              "${capabilities[@]}" \
+              "${capability_args[@]}" \
               --region "$AWS_REGION"
 
             if ! aws cloudformation wait change-set-create-complete \

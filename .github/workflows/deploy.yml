@@ -1,4 +1,3 @@
-
 name: MediSlot Infrastructure Deployment
 
 on:
@@ -23,7 +22,8 @@ jobs:
     env:
       AWS_REGION: eu-north-1
       ENVIRONMENT_NAME: dev
-      ARTIFACT_BUCKET: ${{ vars.MEDISLOT_ARTIFACT_BUCKET }}
+      # Accepts a repository Variable (preferred) or a Secret with the same name.
+      ARTIFACT_BUCKET: ${{ vars.MEDISLOT_ARTIFACT_BUCKET || secrets.MEDISLOT_ARTIFACT_BUCKET }}
 
     steps:
       # --------------------------------------------------
@@ -42,8 +42,8 @@ jobs:
 
           if [[ -z "${ARTIFACT_BUCKET:-}" ||
                 "$ARTIFACT_BUCKET" == "null" ]]; then
-            echo "::error::Repository variable MEDISLOT_ARTIFACT_BUCKET is missing."
-            echo "Configure it in GitHub repository Settings > Secrets and variables > Actions > Variables."
+            echo "::error::MEDISLOT_ARTIFACT_BUCKET is missing (checked both repository Variables and Secrets)."
+            echo "Create it exactly as MEDISLOT_ARTIFACT_BUCKET in Settings > Secrets and variables > Actions (Variables tab preferred)."
             exit 1
           fi
 

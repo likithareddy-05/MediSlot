@@ -1,3 +1,4 @@
+
 name: MediSlot Infrastructure Deployment
 
 on:
@@ -47,10 +48,60 @@ jobs:
             exit 1
           fi
 
-          if [[ ! "$ARTIFACT_BUCKET" =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]]; then
-            echo "::error::MEDISLOT_ARTIFACT_BUCKET does not look like a valid S3 bucket name."
+          # Remove accidental spaces, tabs, newlines and carriage returns
+          # (a very common copy/paste problem).
+          RAW_BUCKET_LENGTH="${#ARTIFACT_BUCKET}"
+
+          # Keep only visible ASCII characters (drops spaces, tabs, newlines,
+          # carriage returns, non-breaking spaces and zero-width characters),
+          # then drop any surrounding quote marks.
+          ARTIFACT_BUCKET="$(printf '%s' "$ARTIFACT_BUCKET" | LC_ALL=C tr -cd '[:graph:]' | tr -d "\"'")"
+
+          echo "Bucket name length as received: ${RAW_BUCKET_LENGTH}"
+
+          # Give specific hints about the most common mistakes.
+          # Only the length is printed because the value may be masked.
+          echo "Bucket name length after trimming: ${#ARTIFACT_BUCKET}"
+
+          if [[ "$ARTIFACT_BUCKET" == s3://* ]]; then
+            echo "::error::MEDISLOT_ARTIFACT_BUCKET must be the bucket name only, without the s3:// prefix."
             exit 1
           fi
+
+          if [[ "$ARTIFACT_BUCKET" == arn:* ]]; then
+            echo "::error::MEDISLOT_ARTIFACT_BUCKET must be the bucket name only, not an ARN."
+            exit 1
+          fi
+
+          if [[ "$ARTIFACT_BUCKET" == */* ]]; then
+            echo "::error::MEDISLOT_ARTIFACT_BUCKET must not contain a slash (no path or trailing /)."
+            exit 1
+          fi
+
+          if [[ "$ARTIFACT_BUCKET" =~ [A-Z] ]]; then
+            echo "::error::MEDISLOT_ARTIFACT_BUCKET must be lowercase."
+            exit 1
+          fi
+
+          if [[ "$ARTIFACT_BUCKET" == *_* ]]; then
+            echo "::error::MEDISLOT_ARTIFACT_BUCKET must not contain underscores. Use hyphens."
+            exit 1
+          fi
+
+          if (( ${#ARTIFACT_BUCKET} < 3 || ${#ARTIFACT_BUCKET} > 63 )); then
+            echo "::error::MEDISLOT_ARTIFACT_BUCKET must be 3 to 63 characters long."
+            exit 1
+          fi
+
+          if [[ ! "$ARTIFACT_BUCKET" =~ ^[a-z0-9][a-z0-9.-]*[a-z0-9]$ ]]; then
+            echo "Characters received (bucket names are not sensitive):"
+            printf '%s' "$ARTIFACT_BUCKET" | od -An -c
+            echo "::error::MEDISLOT_ARTIFACT_BUCKET may only contain lowercase letters, numbers, dots and hyphens, and must start and end with a letter or number."
+            exit 1
+          fi
+
+          # Make the cleaned value available to all later steps.
+          echo "ARTIFACT_BUCKET=${ARTIFACT_BUCKET}" >> "$GITHUB_ENV"
 
           for file in \
             infrastructure/network.yaml \

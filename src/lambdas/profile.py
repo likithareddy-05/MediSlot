@@ -11,10 +11,45 @@ logger.setLevel(logging.INFO)
 
 secrets_manager = boto3.client("secretsmanager")
 
-DB_HOST = os.environ["DB_HOST"]
-DB_PORT = int(os.environ.get("DB_PORT", "3306"))
-DB_NAME = os.environ["DB_NAME"]
+DB_HOST_PARAMETER = os.environ["DB_HOST_PARAMETER"]
+DB_PORT_PARAMETER = os.environ["DB_PORT_PARAMETER"]
+DB_NAME_PARAMETER = os.environ["DB_NAME_PARAMETER"]
+DB_USERNAME_PARAMETER = os.environ["DB_USERNAME_PARAMETER"]
 DB_SECRET_ARN = os.environ["DB_SECRET_ARN"]
+
+# Cache non-secret database settings for the lifetime of this Lambda environment.
+_db_config = None
+
+
+def get_db_config():
+    """Read database host, port, name, and username from SSM Parameter Store."""
+    global _db_config
+    if _db_config is None:
+        ssm_client = boto3.client("ssm")
+        names = [
+            DB_HOST_PARAMETER,
+            DB_PORT_PARAMETER,
+            DB_NAME_PARAMETER,
+            DB_USERNAME_PARAMETER,
+        ]
+        response = ssm_client.get_parameters(Names=names, WithDecryption=False)
+        values = {item["Name"]: item["Value"] for item in response.get("Parameters", [])}
+        missing = [name for name in names if name not in values]
+        if missing:
+            raise RuntimeError("Missing database configuration SSM parameter(s): " + ", ".join(missing))
+        try:
+            port = int(values[DB_PORT_PARAMETER])
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("Database port SSM parameter must be an integer") from exc
+        if not 1 <= port <= 65535:
+            raise RuntimeError("Database port SSM parameter is outside the valid range")
+        _db_config = {
+            "host": values[DB_HOST_PARAMETER],
+            "port": port,
+            "name": values[DB_NAME_PARAMETER],
+            "username": values[DB_USERNAME_PARAMETER],
+        }
+    return _db_config
 
 
 def response(status_code, body):
@@ -36,21 +71,21 @@ def get_db_credentials():
         raise RuntimeError("Database secret has no SecretString")
 
     credentials = json.loads(secret_string)
-    username = credentials.get("username")
     password = credentials.get("password")
-    if not isinstance(username, str) or not username or not isinstance(password, str) or not password:
-        raise RuntimeError("Database secret must contain username and password")
-    return username, password
+    if not isinstance(password, str) or not password:
+        raise RuntimeError("Database secret must contain a password")
+    return password
 
 
 def get_db_connection():
-    username, password = get_db_credentials()
+    db_config = get_db_config()
+    password = get_db_credentials()
     return pymysql.connect(
-        host=DB_HOST,
-        port=DB_PORT,
-        user=username,
+        host=db_config["host"],
+        port=db_config["port"],
+        user=db_config["username"],
         password=password,
-        database=DB_NAME,
+        database=db_config["name"],
         connect_timeout=5,
         read_timeout=10,
         write_timeout=10,

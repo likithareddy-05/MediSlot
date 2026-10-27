@@ -255,6 +255,55 @@ Resources:
               Bool:
                 aws:SecureTransport: false
 
+  # ------------------------------------------------------------
+  # DATABASE CONNECTION SETTINGS IN SSM PARAMETER STORE
+  # The password remains in the RDS-managed Secrets Manager secret.
+  # ------------------------------------------------------------
+
+  DatabaseHostParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub /medislot/${EnvironmentName}/database/host
+      Type: String
+      Value: !GetAtt MediSlotDatabase.Endpoint.Address
+      Description: Private RDS endpoint hostname
+      Tags:
+        Project: MediSlot
+        Environment: !Ref EnvironmentName
+
+  DatabasePortParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub /medislot/${EnvironmentName}/database/port
+      Type: String
+      Value: !GetAtt MediSlotDatabase.Endpoint.Port
+      Description: RDS MySQL port
+      Tags:
+        Project: MediSlot
+        Environment: !Ref EnvironmentName
+
+  DatabaseNameParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub /medislot/${EnvironmentName}/database/name
+      Type: String
+      Value: medislot
+      Description: MediSlot database name
+      Tags:
+        Project: MediSlot
+        Environment: !Ref EnvironmentName
+
+  DatabaseUsernameParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub /medislot/${EnvironmentName}/database/username
+      Type: String
+      Value: medislotadmin
+      Description: RDS master username; password remains RDS-managed in Secrets Manager
+      Tags:
+        Project: MediSlot
+        Environment: !Ref EnvironmentName
+
 Outputs:
   DatabaseEndpointAddress:
     Description: Private RDS endpoint hostname.

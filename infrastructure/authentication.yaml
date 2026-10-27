@@ -66,18 +66,19 @@ Resources:
               Fn::Sub: medislot-${EnvironmentName}-PrivateSubnetBId
       Environment:
         Variables:
-          DB_HOST:
-            Fn::ImportValue:
-              Fn::Sub: medislot-${EnvironmentName}-DatabaseEndpointAddress
-          DB_PORT:
-            Fn::ImportValue:
-              Fn::Sub: medislot-${EnvironmentName}-DatabaseEndpointPort
-          DB_NAME:
-            Fn::ImportValue:
-              Fn::Sub: medislot-${EnvironmentName}-DatabaseName
+          DB_HOST_PARAMETER:
+            Fn::Sub: /medislot/${EnvironmentName}/database/host
+          DB_PORT_PARAMETER:
+            Fn::Sub: /medislot/${EnvironmentName}/database/port
+          DB_NAME_PARAMETER:
+            Fn::Sub: /medislot/${EnvironmentName}/database/name
+          DB_USERNAME_PARAMETER:
+            Fn::Sub: /medislot/${EnvironmentName}/database/username
           DB_SECRET_ARN:
             Fn::ImportValue:
               Fn::Sub: medislot-${EnvironmentName}-DatabaseSecretArn
+          BCRYPT_WORK_FACTOR_PARAMETER:
+            Fn::Sub: /medislot/${EnvironmentName}/auth/bcrypt-work-factor
 
   # ---------------------------------------------------------
   # LOGIN LAMBDA
@@ -108,15 +109,14 @@ Resources:
               Fn::Sub: medislot-${EnvironmentName}-PrivateSubnetBId
       Environment:
         Variables:
-          DB_HOST:
-            Fn::ImportValue:
-              Fn::Sub: medislot-${EnvironmentName}-DatabaseEndpointAddress
-          DB_PORT:
-            Fn::ImportValue:
-              Fn::Sub: medislot-${EnvironmentName}-DatabaseEndpointPort
-          DB_NAME:
-            Fn::ImportValue:
-              Fn::Sub: medislot-${EnvironmentName}-DatabaseName
+          DB_HOST_PARAMETER:
+            Fn::Sub: /medislot/${EnvironmentName}/database/host
+          DB_PORT_PARAMETER:
+            Fn::Sub: /medislot/${EnvironmentName}/database/port
+          DB_NAME_PARAMETER:
+            Fn::Sub: /medislot/${EnvironmentName}/database/name
+          DB_USERNAME_PARAMETER:
+            Fn::Sub: /medislot/${EnvironmentName}/database/username
           DB_SECRET_ARN:
             Fn::ImportValue:
               Fn::Sub: medislot-${EnvironmentName}-DatabaseSecretArn
@@ -126,6 +126,10 @@ Resources:
           REFRESH_TOKENS_TABLE:
             Fn::ImportValue:
               Fn::Sub: medislot-${EnvironmentName}-RefreshTokensTableName
+          ACCESS_TOKEN_TTL_PARAMETER:
+            Fn::Sub: /medislot/${EnvironmentName}/auth/access-token-ttl-seconds
+          REFRESH_TOKEN_TTL_PARAMETER:
+            Fn::Sub: /medislot/${EnvironmentName}/auth/refresh-token-ttl-seconds
 
   # ---------------------------------------------------------
   # REFRESH TOKEN LAMBDA
@@ -162,6 +166,10 @@ Resources:
           REFRESH_TOKENS_TABLE:
             Fn::ImportValue:
               Fn::Sub: medislot-${EnvironmentName}-RefreshTokensTableName
+          ACCESS_TOKEN_TTL_PARAMETER:
+            Fn::Sub: /medislot/${EnvironmentName}/auth/access-token-ttl-seconds
+          REFRESH_TOKEN_TTL_PARAMETER:
+            Fn::Sub: /medislot/${EnvironmentName}/auth/refresh-token-ttl-seconds
 
   # ---------------------------------------------------------
   # LOGOUT LAMBDA
@@ -269,15 +277,14 @@ Resources:
               Fn::Sub: medislot-${EnvironmentName}-PrivateSubnetBId
       Environment:
         Variables:
-          DB_HOST:
-            Fn::ImportValue:
-              Fn::Sub: medislot-${EnvironmentName}-DatabaseEndpointAddress
-          DB_PORT:
-            Fn::ImportValue:
-              Fn::Sub: medislot-${EnvironmentName}-DatabaseEndpointPort
-          DB_NAME:
-            Fn::ImportValue:
-              Fn::Sub: medislot-${EnvironmentName}-DatabaseName
+          DB_HOST_PARAMETER:
+            Fn::Sub: /medislot/${EnvironmentName}/database/host
+          DB_PORT_PARAMETER:
+            Fn::Sub: /medislot/${EnvironmentName}/database/port
+          DB_NAME_PARAMETER:
+            Fn::Sub: /medislot/${EnvironmentName}/database/name
+          DB_USERNAME_PARAMETER:
+            Fn::Sub: /medislot/${EnvironmentName}/database/username
           DB_SECRET_ARN:
             Fn::ImportValue:
               Fn::Sub: medislot-${EnvironmentName}-DatabaseSecretArn

@@ -34,8 +34,10 @@ JWT_ISSUER = os.environ.get("JWT_ISSUER", "medislot")
 
 REFRESH_TOKENS_TABLE = os.environ["REFRESH_TOKENS_TABLE"]
 
-ACCESS_TOKEN_TTL = 15 * 60
-REFRESH_TOKEN_TTL = 7 * 24 * 60 * 60
+ACCESS_TOKEN_TTL_PARAMETER = os.environ["ACCESS_TOKEN_TTL_PARAMETER"]
+REFRESH_TOKEN_TTL_PARAMETER = os.environ["REFRESH_TOKEN_TTL_PARAMETER"]
+ACCESS_TOKEN_TTL = None
+REFRESH_TOKEN_TTL = None
 
 REFRESH_TOKEN_INDEX = "RefreshTokenHashIndex"
 
@@ -48,6 +50,19 @@ _jwt_signing_secret = None
 # --------------------------------------------------
 # HTTP response helper
 # --------------------------------------------------
+
+def get_integer_parameter(name, minimum, maximum):
+    """Read and validate a numeric runtime setting from SSM Parameter Store."""
+    result = ssm.get_parameter(Name=name, WithDecryption=False)
+    raw_value = result["Parameter"]["Value"]
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"SSM parameter {name} must contain an integer") from exc
+    if not minimum <= value <= maximum:
+        raise RuntimeError(f"SSM parameter {name} is outside its allowed range")
+    return value
+
 
 def response(status_code, body):
     return {
@@ -166,7 +181,16 @@ def find_refresh_token(token_hash):
 # --------------------------------------------------
 
 def lambda_handler(event, context):
+    global ACCESS_TOKEN_TTL, REFRESH_TOKEN_TTL
     try:
+        # Load current token lifetimes from SSM for this invocation.
+        ACCESS_TOKEN_TTL = get_integer_parameter(
+            ACCESS_TOKEN_TTL_PARAMETER, minimum=60, maximum=86400
+        )
+        REFRESH_TOKEN_TTL = get_integer_parameter(
+            REFRESH_TOKEN_TTL_PARAMETER, minimum=300, maximum=2592000
+        )
+
         # Parse the incoming request body.
         body = event.get("body")
 

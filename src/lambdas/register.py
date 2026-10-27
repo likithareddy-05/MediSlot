@@ -13,11 +13,63 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 secrets_manager = boto3.client("secretsmanager")
+ssm = boto3.client("ssm")
 
-DB_HOST = os.environ["DB_HOST"]
-DB_PORT = int(os.environ.get("DB_PORT", "3306"))
-DB_NAME = os.environ["DB_NAME"]
+DB_HOST_PARAMETER = os.environ["DB_HOST_PARAMETER"]
+DB_PORT_PARAMETER = os.environ["DB_PORT_PARAMETER"]
+DB_NAME_PARAMETER = os.environ["DB_NAME_PARAMETER"]
+DB_USERNAME_PARAMETER = os.environ["DB_USERNAME_PARAMETER"]
 DB_SECRET_ARN = os.environ["DB_SECRET_ARN"]
+
+# Cache non-secret database settings for the lifetime of this Lambda environment.
+_db_config = None
+
+
+def get_db_config():
+    """Read database host, port, name, and username from SSM Parameter Store."""
+    global _db_config
+    if _db_config is None:
+        ssm_client = boto3.client("ssm")
+        names = [
+            DB_HOST_PARAMETER,
+            DB_PORT_PARAMETER,
+            DB_NAME_PARAMETER,
+            DB_USERNAME_PARAMETER,
+        ]
+        response = ssm_client.get_parameters(Names=names, WithDecryption=False)
+        values = {item["Name"]: item["Value"] for item in response.get("Parameters", [])}
+        missing = [name for name in names if name not in values]
+        if missing:
+            raise RuntimeError("Missing database configuration SSM parameter(s): " + ", ".join(missing))
+        try:
+            port = int(values[DB_PORT_PARAMETER])
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("Database port SSM parameter must be an integer") from exc
+        if not 1 <= port <= 65535:
+            raise RuntimeError("Database port SSM parameter is outside the valid range")
+        _db_config = {
+            "host": values[DB_HOST_PARAMETER],
+            "port": port,
+            "name": values[DB_NAME_PARAMETER],
+            "username": values[DB_USERNAME_PARAMETER],
+        }
+    return _db_config
+BCRYPT_WORK_FACTOR_PARAMETER = os.environ["BCRYPT_WORK_FACTOR_PARAMETER"]
+
+
+def get_bcrypt_work_factor():
+    """Read and validate the bcrypt work factor from SSM."""
+    result = boto3.client("ssm").get_parameter(
+        Name=BCRYPT_WORK_FACTOR_PARAMETER, WithDecryption=False
+    )
+    raw_value = result["Parameter"]["Value"]
+    try:
+        rounds = int(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("SSM bcrypt work factor must be an integer") from exc
+    if not 12 <= rounds <= 15:
+        raise RuntimeError("SSM bcrypt work factor must be between 12 and 15")
+    return rounds
 
 
 def response(status_code, body):
@@ -46,32 +98,23 @@ def get_db_credentials():
 
     credentials = json.loads(secret_string)
 
-    username = credentials.get("username")
     password = credentials.get("password")
-
-    if (
-        not isinstance(username, str)
-        or not username
-        or not isinstance(password, str)
-        or not password
-    ):
-        raise RuntimeError(
-            "Database secret must contain username and password"
-        )
-
-    return username, password
+    if not isinstance(password, str) or not password:
+        raise RuntimeError("Database secret must contain a password")
+    return password
 
 
 def get_db_connection():
     """Connect to the RDS MySQL database."""
-    username, password = get_db_credentials()
+    db_config = get_db_config()
+    password = get_db_credentials()
 
     return pymysql.connect(
-        host=DB_HOST,
-        port=DB_PORT,
-        user=username,
+        host=db_config["host"],
+        port=db_config["port"],
+        user=db_config["username"],
         password=password,
-        database=DB_NAME,
+        database=db_config["name"],
         connect_timeout=5,
         read_timeout=10,
         write_timeout=10,
@@ -79,37 +122,6 @@ def get_db_connection():
         autocommit=False,
         charset="utf8mb4"
     )
-
-
-def ensure_users_table(connection):
-    """Create the users table if the initial schema has not been applied yet.
-
-    This idempotent bootstrap prevents first-time registration from failing
-    when a fresh RDS database has been provisioned but schema.sql has not run.
-    The Lambda's database secret must have CREATE TABLE permission.
-    """
-    with connection.cursor() as cursor:
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS users (
-                user_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-                email VARCHAR(254) NOT NULL,
-                password_hash VARCHAR(255) NOT NULL,
-                role VARCHAR(10) NOT NULL,
-                account_status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE',
-                created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-                updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
-                    ON UPDATE CURRENT_TIMESTAMP(6),
-                PRIMARY KEY (user_id),
-                UNIQUE KEY uq_users_email (email),
-                KEY idx_users_role_status (role, account_status),
-                CONSTRAINT chk_users_role CHECK (role IN ('DOCTOR', 'PATIENT'))
-            ) ENGINE=InnoDB
-              DEFAULT CHARSET=utf8mb4
-              COLLATE=utf8mb4_0900_ai_ci
-            """
-        )
-    connection.commit()
 
 
 def lambda_handler(event, context):
@@ -181,17 +193,14 @@ def lambda_handler(event, context):
                 "message": "Password exceeds the supported length"
             })
 
-        # Hash the password before storing it.
+        # Read the configured bcrypt work factor and hash the password.
+        bcrypt_work_factor = get_bcrypt_work_factor()
         password_hash = bcrypt.hashpw(
             password.encode("utf-8"),
-            bcrypt.gensalt(rounds=12)
+            bcrypt.gensalt(rounds=bcrypt_work_factor)
         ).decode("utf-8")
 
         connection = get_db_connection()
-
-        # Ensure the initial table exists before the first registration.
-        # CREATE TABLE IF NOT EXISTS is safe to run repeatedly.
-        ensure_users_table(connection)
 
         with connection.cursor() as cursor:
             cursor.execute(

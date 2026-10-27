@@ -23,10 +23,45 @@ secretsmanager = boto3.client("secretsmanager")
 dynamodb = boto3.resource("dynamodb")
 
 # Database configuration
-DB_HOST = os.environ["DB_HOST"]
-DB_PORT = int(os.environ.get("DB_PORT", "3306"))
-DB_NAME = os.environ["DB_NAME"]
+DB_HOST_PARAMETER = os.environ["DB_HOST_PARAMETER"]
+DB_PORT_PARAMETER = os.environ["DB_PORT_PARAMETER"]
+DB_NAME_PARAMETER = os.environ["DB_NAME_PARAMETER"]
+DB_USERNAME_PARAMETER = os.environ["DB_USERNAME_PARAMETER"]
 DB_SECRET_ARN = os.environ["DB_SECRET_ARN"]
+
+# Cache non-secret database settings for the lifetime of this Lambda environment.
+_db_config = None
+
+
+def get_db_config():
+    """Read database host, port, name, and username from SSM Parameter Store."""
+    global _db_config
+    if _db_config is None:
+        ssm_client = boto3.client("ssm")
+        names = [
+            DB_HOST_PARAMETER,
+            DB_PORT_PARAMETER,
+            DB_NAME_PARAMETER,
+            DB_USERNAME_PARAMETER,
+        ]
+        response = ssm_client.get_parameters(Names=names, WithDecryption=False)
+        values = {item["Name"]: item["Value"] for item in response.get("Parameters", [])}
+        missing = [name for name in names if name not in values]
+        if missing:
+            raise RuntimeError("Missing database configuration SSM parameter(s): " + ", ".join(missing))
+        try:
+            port = int(values[DB_PORT_PARAMETER])
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("Database port SSM parameter must be an integer") from exc
+        if not 1 <= port <= 65535:
+            raise RuntimeError("Database port SSM parameter is outside the valid range")
+        _db_config = {
+            "host": values[DB_HOST_PARAMETER],
+            "port": port,
+            "name": values[DB_NAME_PARAMETER],
+            "username": values[DB_USERNAME_PARAMETER],
+        }
+    return _db_config
 
 # Authentication configuration
 JWT_SIGNING_SECRET_PARAMETER = os.environ[
@@ -34,8 +69,10 @@ JWT_SIGNING_SECRET_PARAMETER = os.environ[
 ]
 JWT_ISSUER = os.environ.get("JWT_ISSUER", "medislot")
 
-ACCESS_TOKEN_TTL = 15 * 60
-REFRESH_TOKEN_TTL = 7 * 24 * 60 * 60
+ACCESS_TOKEN_TTL_PARAMETER = os.environ["ACCESS_TOKEN_TTL_PARAMETER"]
+REFRESH_TOKEN_TTL_PARAMETER = os.environ["REFRESH_TOKEN_TTL_PARAMETER"]
+ACCESS_TOKEN_TTL = None
+REFRESH_TOKEN_TTL = None
 
 REFRESH_TOKENS_TABLE = os.environ["REFRESH_TOKENS_TABLE"]
 refresh_tokens_table = dynamodb.Table(REFRESH_TOKENS_TABLE)
@@ -43,6 +80,19 @@ refresh_tokens_table = dynamodb.Table(REFRESH_TOKENS_TABLE)
 # Cache secrets in the warm Lambda execution environment.
 _db_credentials = None
 _jwt_signing_secret = None
+
+
+def get_integer_parameter(name, minimum, maximum):
+    """Read and validate a numeric runtime setting from SSM Parameter Store."""
+    result = ssm.get_parameter(Name=name, WithDecryption=False)
+    raw_value = result["Parameter"]["Value"]
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"SSM parameter {name} must contain an integer") from exc
+    if not minimum <= value <= maximum:
+        raise RuntimeError(f"SSM parameter {name} is outside its allowed range")
+    return value
 
 
 def response(status_code, body):
@@ -76,18 +126,11 @@ def get_db_credentials():
 
         credentials = json.loads(secret_string)
 
-        username = credentials.get("username")
         password = credentials.get("password")
+        if not isinstance(password, str) or not password:
+            raise RuntimeError("RDS credentials secret is missing password")
 
-        if not username or not isinstance(password, str) or not password:
-            raise RuntimeError(
-                "RDS credentials secret is missing username or password"
-            )
-
-        _db_credentials = {
-            "username": username,
-            "password": password
-        }
+        _db_credentials = {"password": password}
 
     return _db_credentials
 
@@ -114,14 +157,15 @@ def get_jwt_signing_secret():
 
 def get_db_connection():
     """Connect to RDS MySQL."""
+    db_config = get_db_config()
     credentials = get_db_credentials()
 
     return pymysql.connect(
-        host=DB_HOST,
-        port=DB_PORT,
-        user=credentials["username"],
+        host=db_config["host"],
+        port=db_config["port"],
+        user=db_config["username"],
         password=credentials["password"],
-        database=DB_NAME,
+        database=db_config["name"],
         connect_timeout=5,
         read_timeout=10,
         write_timeout=10,
@@ -135,7 +179,16 @@ def lambda_handler(event, context):
     """API Gateway Lambda handler for user login."""
     connection = None
 
+    global ACCESS_TOKEN_TTL, REFRESH_TOKEN_TTL
     try:
+        # Load current token lifetimes from SSM for this invocation.
+        ACCESS_TOKEN_TTL = get_integer_parameter(
+            ACCESS_TOKEN_TTL_PARAMETER, minimum=60, maximum=86400
+        )
+        REFRESH_TOKEN_TTL = get_integer_parameter(
+            REFRESH_TOKEN_TTL_PARAMETER, minimum=300, maximum=2592000
+        )
+
         # Parse the incoming request body.
         body = event.get("body")
 

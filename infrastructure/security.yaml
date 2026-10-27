@@ -63,6 +63,29 @@ Resources:
                 Resource:
                   - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/medislot/${EnvironmentName}/auth/jwt-signing-secret
 
+              # Read runtime authentication configuration from SSM.
+              - Sid: ReadAuthenticationConfiguration
+                Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                Resource:
+                  - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/medislot/${EnvironmentName}/auth/access-token-ttl-seconds
+                  - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/medislot/${EnvironmentName}/auth/refresh-token-ttl-seconds
+                  - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/medislot/${EnvironmentName}/auth/bcrypt-work-factor
+
+              # Read database connection settings from SSM.
+              # The database password remains in Secrets Manager.
+              - Sid: ReadDatabaseConnectionConfiguration
+                Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                Resource:
+                  - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/medislot/${EnvironmentName}/database/host
+                  - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/medislot/${EnvironmentName}/database/port
+                  - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/medislot/${EnvironmentName}/database/name
+                  - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/medislot/${EnvironmentName}/database/username
+
               # The JWT parameter creator custom resource uses
               # this shared role to create and delete the secret.
               # These permissions are consequently also available
@@ -212,7 +235,6 @@ Resources:
                   - !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:medislot-${EnvironmentName}-auth-*
                   - !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:medislot-${EnvironmentName}-user-*
                   - !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:medislot-${EnvironmentName}-appointment-*
-                  - !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:medislot-${EnvironmentName}-account-profile
 
       Tags:
         - Key: Project
@@ -348,6 +370,39 @@ Resources:
     Properties:
       ServiceToken: !GetAtt JwtParameterCreatorFunction.Arn
       ParameterName: !Sub /medislot/${EnvironmentName}/auth/jwt-signing-secret
+
+  AccessTokenTtlParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub /medislot/${EnvironmentName}/auth/access-token-ttl-seconds
+      Type: String
+      Value: "900"
+      Description: Access JWT lifetime in seconds (15 minutes by default)
+      Tags:
+        Project: MediSlot
+        Environment: !Ref EnvironmentName
+
+  RefreshTokenTtlParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub /medislot/${EnvironmentName}/auth/refresh-token-ttl-seconds
+      Type: String
+      Value: "604800"
+      Description: Refresh token lifetime in seconds (7 days by default)
+      Tags:
+        Project: MediSlot
+        Environment: !Ref EnvironmentName
+
+  BcryptWorkFactorParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub /medislot/${EnvironmentName}/auth/bcrypt-work-factor
+      Type: String
+      Value: "12"
+      Description: bcrypt password hashing work factor; minimum supported value is 12
+      Tags:
+        Project: MediSlot
+        Environment: !Ref EnvironmentName
 
 Outputs:
 

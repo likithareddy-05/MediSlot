@@ -235,6 +235,7 @@ Resources:
                   - !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:medislot-${EnvironmentName}-auth-*
                   - !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:medislot-${EnvironmentName}-user-*
                   - !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:medislot-${EnvironmentName}-appointment-*
+                  - !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:medislot-${EnvironmentName}-account-*
 
       Tags:
         - Key: Project

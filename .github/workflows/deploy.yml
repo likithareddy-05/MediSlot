@@ -156,6 +156,12 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Validate Lambda Python syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m compileall -q src/lambdas
+
       - name: Package and upload Lambda artifacts
         env:
           ARTIFACT_BUCKET: ${{ steps.assets.outputs.bucket }}
@@ -164,8 +170,6 @@ jobs:
           set -euo pipefail
 
           python -m pip install --upgrade pip
-          python -m pip install zip
-
           mkdir -p build/lambdas
 
           package_lambda() {

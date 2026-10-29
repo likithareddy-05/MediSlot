@@ -1,4 +1,3 @@
-
 name: MediSlot Infrastructure Deployment
 
 on:
@@ -54,13 +53,16 @@ jobs:
             infrastructure/data.yaml \
             infrastructure/security.yaml \
             infrastructure/authentication.yaml \
+            infrastructure/schema-init.yaml \
             src/lambdas/auth_handler.py \
             src/lambdas/register.py \
             src/lambdas/refresh.py \
             src/lambdas/logout.py \
             src/lambdas/authorizer.py \
             src/lambdas/profile.py \
-            src/lambdas/requirements.txt
+            src/lambdas/schema_init.py \
+            src/lambdas/requirements.txt \
+            database/schema.sql
           do
             if [[ ! -f "$file" ]]; then
               echo "::error::Required file is missing: $file"
@@ -86,7 +88,8 @@ jobs:
             infrastructure/network.yaml \
             infrastructure/data.yaml \
             infrastructure/security.yaml \
-            infrastructure/authentication.yaml
+            infrastructure/authentication.yaml \
+            infrastructure/schema-init.yaml
           do
             echo "Validating ${template}"
 
@@ -207,18 +210,49 @@ jobs:
             echo "Uploaded ${s3_key}"
           }
 
-          # One authentication Lambda with all authentication operations.
+          # Existing authentication Lambda.
           package_lambda auth \
             auth_handler.py \
             register.py \
             refresh.py \
             logout.py
 
-          # Separate Lambda for JWT authorization.
+          # Existing JWT authorizer Lambda.
           package_lambda authorizer authorizer.py
 
-          # Separate Lambda for user profile requests.
+          # Existing profile Lambda.
           package_lambda profile profile.py
+
+          # One-time database schema initializer.
+          # It needs PyMySQL and the SQL file, not the full app dependencies.
+          SCHEMA_DIR="build/schema-init"
+          SCHEMA_ZIP="build/lambdas/schema-init.zip"
+          SCHEMA_KEY="artifacts/${GITHUB_SHA}/schema-init.zip"
+
+          rm -rf "$SCHEMA_DIR"
+          mkdir -p "$SCHEMA_DIR"
+
+          python -m pip install \
+            --only-binary=:all: \
+            PyMySQL \
+            -t "$SCHEMA_DIR"
+
+          cp src/lambdas/schema_init.py "$SCHEMA_DIR/"
+          cp database/schema.sql "$SCHEMA_DIR/"
+
+          rm -f "$SCHEMA_ZIP"
+
+          (
+            cd "$SCHEMA_DIR"
+            zip -qr "../lambdas/schema-init.zip" .
+          )
+
+          aws s3 cp \
+            "$SCHEMA_ZIP" \
+            "s3://${ARTIFACT_BUCKET}/${SCHEMA_KEY}" \
+            --region "$AWS_REGION"
+
+          echo "Uploaded ${SCHEMA_KEY}"
 
       - name: Deploy authentication API stack
         env:
@@ -240,13 +274,37 @@ jobs:
             --region "$AWS_REGION" \
             --no-fail-on-empty-changeset
 
-      - name: Show API outputs
+      - name: Deploy temporary schema initializer stack
+        env:
+          ARTIFACT_BUCKET: ${{ steps.assets.outputs.bucket }}
         shell: bash
         run: |
           set -euo pipefail
 
-          aws cloudformation describe-stacks \
-            --stack-name "medislot-${ENVIRONMENT_NAME}-authentication" \
-            --query "Stacks[0].Outputs" \
-            --output table \
-            --region "$AWS_REGION"
+          aws cloudformation deploy \
+            --stack-name "medislot-${ENVIRONMENT_NAME}-schema-init" \
+            --template-file infrastructure/schema-init.yaml \
+            --parameter-overrides \
+              "EnvironmentName=${ENVIRONMENT_NAME}" \
+              "LambdaArtifactBucket=${ARTIFACT_BUCKET}" \
+              "SchemaInitLambdaS3Key=artifacts/${GITHUB_SHA}/schema-init.zip" \
+            --region "$AWS_REGION" \
+            --no-fail-on-empty-changeset
+
+      - name: Show API and schema initializer outputs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for stack in \
+            "medislot-${ENVIRONMENT_NAME}-authentication" \
+            "medislot-${ENVIRONMENT_NAME}-schema-init"
+          do
+            echo "Outputs for ${stack}"
+
+            aws cloudformation describe-stacks \
+              --stack-name "$stack" \
+              --query "Stacks[0].Outputs" \
+              --output table \
+              --region "$AWS_REGION"
+          done

@@ -1,0 +1,64 @@
+
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Temporary MediSlot database schema initializer.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - test
+      - prod
+
+  LambdaArtifactBucket:
+    Type: String
+    Description: Existing MediSlot assets bucket.
+
+  SchemaInitLambdaS3Key:
+    Type: String
+    Description: S3 key for the schema initializer ZIP.
+
+Resources:
+  SchemaInitFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "medislot-${EnvironmentName}-schema-init"
+      Description: One-time database schema initialization
+      Runtime: python3.12
+      Handler: schema_init.lambda_handler
+      Role:
+        Fn::ImportValue:
+          !Sub "medislot-${EnvironmentName}-AuthLambdaRoleArn"
+      Code:
+        S3Bucket: !Ref LambdaArtifactBucket
+        S3Key: !Ref SchemaInitLambdaS3Key
+      Timeout: 60
+      MemorySize: 256
+      VpcConfig:
+        SecurityGroupIds:
+          - Fn::ImportValue:
+              !Sub "medislot-${EnvironmentName}-LambdaSecurityGroupId"
+        SubnetIds:
+          - Fn::ImportValue:
+              !Sub "medislot-${EnvironmentName}-PrivateSubnetAId"
+          - Fn::ImportValue:
+              !Sub "medislot-${EnvironmentName}-PrivateSubnetBId"
+      Environment:
+        Variables:
+          ENVIRONMENT_NAME: !Ref EnvironmentName
+          DB_SECRET_ARN:
+            Fn::ImportValue:
+              !Sub "medislot-${EnvironmentName}-DatabaseSecretArn"
+      Tags:
+        - Key: Project
+          Value: MediSlot
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Purpose
+          Value: TemporarySchemaInitialization
+
+Outputs:
+  SchemaInitFunctionName:
+    Description: Temporary schema initializer function name.
+    Value: !Ref SchemaInitFunction

@@ -8,7 +8,6 @@ Description: >
 Parameters:
   EnvironmentName:
     Type: String
-    Default: dev
     AllowedValues:
       - dev
       - test
@@ -243,9 +242,7 @@ Resources:
 
   # ============================================================
   # VPC ENDPOINT SECURITY GROUP
-  # Allow HTTPS from backend Lambda functions to interface
-  # endpoints. The security group retains its default outbound
-  # rules so endpoint responses can return normally.
+  # Allows HTTPS from Lambda functions to interface endpoints.
   # ============================================================
 
   VPCEndpointSecurityGroup:
@@ -290,7 +287,7 @@ Resources:
 
   # ============================================================
   # DYNAMODB GATEWAY ENDPOINT
-  # Private access to refresh-token, revoked-token, and slot tables.
+  # Private access to refresh-token and slot-coordination tables.
   # ============================================================
 
   DynamoDBGatewayEndpoint:

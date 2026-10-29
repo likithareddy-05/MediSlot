@@ -17,17 +17,9 @@ Parameters:
     Type: String
     Description: S3 bucket containing packaged Lambda deployment ZIP files.
 
-  RegisterLambdaS3Key:
+  AuthLambdaS3Key:
     Type: String
-
-  LoginLambdaS3Key:
-    Type: String
-
-  RefreshLambdaS3Key:
-    Type: String
-
-  LogoutLambdaS3Key:
-    Type: String
+    Description: S3 key for the consolidated register/login/refresh/logout Lambda package.
 
   AuthorizerLambdaS3Key:
     Type: String
@@ -38,18 +30,19 @@ Parameters:
 
 Resources:
   # ---------------------------------------------------------
-  # REGISTER LAMBDA
+  # CONSOLIDATED AUTH LAMBDA
+  # Routes register/login/refresh/logout internally by method + path.
   # ---------------------------------------------------------
-  RegisterFunction:
+  AuthFunction:
     Type: AWS::Lambda::Function
     Properties:
-      FunctionName: !Sub medislot-${EnvironmentName}-auth-register
-      Description: Registers a new patient or doctor.
+      FunctionName: !Sub medislot-${EnvironmentName}-auth
+      Description: Handles registration, login, refresh, and logout.
       Runtime: python3.12
-      Handler: register.lambda_handler
+      Handler: auth_handler.lambda_handler
       Code:
         S3Bucket: !Ref LambdaArtifactBucket
-        S3Key: !Ref RegisterLambdaS3Key
+        S3Key: !Ref AuthLambdaS3Key
       Role:
         Fn::ImportValue:
           Fn::Sub: medislot-${EnvironmentName}-AuthLambdaRoleArn
@@ -66,149 +59,21 @@ Resources:
               Fn::Sub: medislot-${EnvironmentName}-PrivateSubnetBId
       Environment:
         Variables:
-          DB_HOST_PARAMETER:
-            Fn::Sub: /medislot/${EnvironmentName}/database/host
-          DB_PORT_PARAMETER:
-            Fn::Sub: /medislot/${EnvironmentName}/database/port
-          DB_NAME_PARAMETER:
-            Fn::Sub: /medislot/${EnvironmentName}/database/name
-          DB_USERNAME_PARAMETER:
-            Fn::Sub: /medislot/${EnvironmentName}/database/username
+          DB_HOST_PARAMETER: !Sub /medislot/${EnvironmentName}/database/host
+          DB_PORT_PARAMETER: !Sub /medislot/${EnvironmentName}/database/port
+          DB_NAME_PARAMETER: !Sub /medislot/${EnvironmentName}/database/name
+          DB_USERNAME_PARAMETER: !Sub /medislot/${EnvironmentName}/database/username
           DB_SECRET_ARN:
             Fn::ImportValue:
               Fn::Sub: medislot-${EnvironmentName}-DatabaseSecretArn
-          BCRYPT_WORK_FACTOR_PARAMETER:
-            Fn::Sub: /medislot/${EnvironmentName}/auth/bcrypt-work-factor
-
-  # ---------------------------------------------------------
-  # LOGIN LAMBDA
-  # ---------------------------------------------------------
-  LoginFunction:
-    Type: AWS::Lambda::Function
-    Properties:
-      FunctionName: !Sub medislot-${EnvironmentName}-auth-login
-      Description: Authenticates a user and issues access and refresh tokens.
-      Runtime: python3.12
-      Handler: auth.lambda_handler
-      Code:
-        S3Bucket: !Ref LambdaArtifactBucket
-        S3Key: !Ref LoginLambdaS3Key
-      Role:
-        Fn::ImportValue:
-          Fn::Sub: medislot-${EnvironmentName}-AuthLambdaRoleArn
-      Timeout: 15
-      MemorySize: 256
-      VpcConfig:
-        SecurityGroupIds:
-          - Fn::ImportValue:
-              Fn::Sub: medislot-${EnvironmentName}-LambdaSecurityGroupId
-        SubnetIds:
-          - Fn::ImportValue:
-              Fn::Sub: medislot-${EnvironmentName}-PrivateSubnetAId
-          - Fn::ImportValue:
-              Fn::Sub: medislot-${EnvironmentName}-PrivateSubnetBId
-      Environment:
-        Variables:
-          DB_HOST_PARAMETER:
-            Fn::Sub: /medislot/${EnvironmentName}/database/host
-          DB_PORT_PARAMETER:
-            Fn::Sub: /medislot/${EnvironmentName}/database/port
-          DB_NAME_PARAMETER:
-            Fn::Sub: /medislot/${EnvironmentName}/database/name
-          DB_USERNAME_PARAMETER:
-            Fn::Sub: /medislot/${EnvironmentName}/database/username
-          DB_SECRET_ARN:
-            Fn::ImportValue:
-              Fn::Sub: medislot-${EnvironmentName}-DatabaseSecretArn
-          JWT_SIGNING_SECRET_PARAMETER:
-            Fn::Sub: /medislot/${EnvironmentName}/auth/jwt-signing-secret
+          BCRYPT_WORK_FACTOR_PARAMETER: !Sub /medislot/${EnvironmentName}/auth/bcrypt-work-factor
+          JWT_SIGNING_SECRET_PARAMETER: !Sub /medislot/${EnvironmentName}/auth/jwt-signing-secret
           JWT_ISSUER: medislot
           REFRESH_TOKENS_TABLE:
             Fn::ImportValue:
               Fn::Sub: medislot-${EnvironmentName}-RefreshTokensTableName
-          ACCESS_TOKEN_TTL_PARAMETER:
-            Fn::Sub: /medislot/${EnvironmentName}/auth/access-token-ttl-seconds
-          REFRESH_TOKEN_TTL_PARAMETER:
-            Fn::Sub: /medislot/${EnvironmentName}/auth/refresh-token-ttl-seconds
-
-  # ---------------------------------------------------------
-  # REFRESH TOKEN LAMBDA
-  # ---------------------------------------------------------
-  RefreshFunction:
-    Type: AWS::Lambda::Function
-    Properties:
-      FunctionName: !Sub medislot-${EnvironmentName}-auth-refresh
-      Description: Rotates refresh tokens and issues new access tokens.
-      Runtime: python3.12
-      Handler: refresh.lambda_handler
-      Code:
-        S3Bucket: !Ref LambdaArtifactBucket
-        S3Key: !Ref RefreshLambdaS3Key
-      Role:
-        Fn::ImportValue:
-          Fn::Sub: medislot-${EnvironmentName}-AuthLambdaRoleArn
-      Timeout: 15
-      MemorySize: 256
-      VpcConfig:
-        SecurityGroupIds:
-          - Fn::ImportValue:
-              Fn::Sub: medislot-${EnvironmentName}-LambdaSecurityGroupId
-        SubnetIds:
-          - Fn::ImportValue:
-              Fn::Sub: medislot-${EnvironmentName}-PrivateSubnetAId
-          - Fn::ImportValue:
-              Fn::Sub: medislot-${EnvironmentName}-PrivateSubnetBId
-      Environment:
-        Variables:
-          JWT_SIGNING_SECRET_PARAMETER:
-            Fn::Sub: /medislot/${EnvironmentName}/auth/jwt-signing-secret
-          JWT_ISSUER: medislot
-          REFRESH_TOKENS_TABLE:
-            Fn::ImportValue:
-              Fn::Sub: medislot-${EnvironmentName}-RefreshTokensTableName
-          ACCESS_TOKEN_TTL_PARAMETER:
-            Fn::Sub: /medislot/${EnvironmentName}/auth/access-token-ttl-seconds
-          REFRESH_TOKEN_TTL_PARAMETER:
-            Fn::Sub: /medislot/${EnvironmentName}/auth/refresh-token-ttl-seconds
-
-  # ---------------------------------------------------------
-  # LOGOUT LAMBDA
-  # ---------------------------------------------------------
-  LogoutFunction:
-    Type: AWS::Lambda::Function
-    Properties:
-      FunctionName: !Sub medislot-${EnvironmentName}-auth-logout
-      Description: Revokes the access token and removes the refresh token.
-      Runtime: python3.12
-      Handler: logout.lambda_handler
-      Code:
-        S3Bucket: !Ref LambdaArtifactBucket
-        S3Key: !Ref LogoutLambdaS3Key
-      Role:
-        Fn::ImportValue:
-          Fn::Sub: medislot-${EnvironmentName}-AuthLambdaRoleArn
-      Timeout: 15
-      MemorySize: 256
-      VpcConfig:
-        SecurityGroupIds:
-          - Fn::ImportValue:
-              Fn::Sub: medislot-${EnvironmentName}-LambdaSecurityGroupId
-        SubnetIds:
-          - Fn::ImportValue:
-              Fn::Sub: medislot-${EnvironmentName}-PrivateSubnetAId
-          - Fn::ImportValue:
-              Fn::Sub: medislot-${EnvironmentName}-PrivateSubnetBId
-      Environment:
-        Variables:
-          JWT_SIGNING_SECRET_PARAMETER:
-            Fn::Sub: /medislot/${EnvironmentName}/auth/jwt-signing-secret
-          JWT_ISSUER: medislot
-          REFRESH_TOKENS_TABLE:
-            Fn::ImportValue:
-              Fn::Sub: medislot-${EnvironmentName}-RefreshTokensTableName
-          REVOKED_TOKENS_TABLE:
-            Fn::ImportValue:
-              Fn::Sub: medislot-${EnvironmentName}-RevokedTokensTableName
+          ACCESS_TOKEN_TTL_PARAMETER: !Sub /medislot/${EnvironmentName}/auth/access-token-ttl-seconds
+          REFRESH_TOKEN_TTL_PARAMETER: !Sub /medislot/${EnvironmentName}/auth/refresh-token-ttl-seconds
 
   # ---------------------------------------------------------
   # JWT AUTHORIZER LAMBDA
@@ -217,7 +82,7 @@ Resources:
     Type: AWS::Lambda::Function
     Properties:
       FunctionName: !Sub medislot-${EnvironmentName}-auth-authorizer
-      Description: Validates JWTs and rejects revoked access tokens.
+      Description: Validates JWT signature, issuer, expiry, and role without a denylist.
       Runtime: python3.12
       Handler: authorizer.lambda_handler
       Code:
@@ -242,9 +107,6 @@ Resources:
           JWT_SIGNING_SECRET_PARAMETER:
             Fn::Sub: /medislot/${EnvironmentName}/auth/jwt-signing-secret
           JWT_ISSUER: medislot
-          REVOKED_TOKENS_TABLE:
-            Fn::ImportValue:
-              Fn::Sub: medislot-${EnvironmentName}-RevokedTokensTableName
           ROLE_ROUTE_RULES: '{"GET /doctor/*":"DOCTOR","POST /doctor/*":"DOCTOR","PUT /doctor/*":"DOCTOR","PATCH /doctor/*":"DOCTOR","DELETE /doctor/*":"DOCTOR","GET /patient/*":"PATIENT","POST /patient/*":"PATIENT","PUT /patient/*":"PATIENT","PATCH /patient/*":"PATIENT","DELETE /patient/*":"PATIENT","POST /auth/logout":["DOCTOR","PATIENT"]}'
 
   # ---------------------------------------------------------
@@ -356,7 +218,7 @@ Resources:
         Uri:
           Fn::Sub:
             - arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FunctionArn}/invocations
-            - FunctionArn: !GetAtt RegisterFunction.Arn
+            - FunctionArn: !GetAtt AuthFunction.Arn
 
   # ---------------------------------------------------------
   # /auth/login
@@ -384,7 +246,7 @@ Resources:
         Uri:
           Fn::Sub:
             - arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FunctionArn}/invocations
-            - FunctionArn: !GetAtt LoginFunction.Arn
+            - FunctionArn: !GetAtt AuthFunction.Arn
 
   # ---------------------------------------------------------
   # /auth/refresh
@@ -412,7 +274,7 @@ Resources:
         Uri:
           Fn::Sub:
             - arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FunctionArn}/invocations
-            - FunctionArn: !GetAtt RefreshFunction.Arn
+            - FunctionArn: !GetAtt AuthFunction.Arn
 
   # ---------------------------------------------------------
   # /auth/logout
@@ -441,7 +303,7 @@ Resources:
         Uri:
           Fn::Sub:
             - arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FunctionArn}/invocations
-            - FunctionArn: !GetAtt LogoutFunction.Arn
+            - FunctionArn: !GetAtt AuthFunction.Arn
 
   # ---------------------------------------------------------
   # /patient/me - current authenticated patient's account details
@@ -552,17 +414,8 @@ Outputs:
     Export:
       Name: !Sub medislot-${EnvironmentName}-RestApiBaseUrl
 
-  RegisterFunctionArn:
-    Value: !GetAtt RegisterFunction.Arn
-
-  LoginFunctionArn:
-    Value: !GetAtt LoginFunction.Arn
-
-  RefreshFunctionArn:
-    Value: !GetAtt RefreshFunction.Arn
-
-  LogoutFunctionArn:
-    Value: !GetAtt LogoutFunction.Arn
+  AuthFunctionArn:
+    Value: !GetAtt AuthFunction.Arn
 
   AuthorizerFunctionArn:
     Value: !GetAtt AuthorizerFunction.Arn

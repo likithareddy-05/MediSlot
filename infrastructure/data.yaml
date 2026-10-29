@@ -121,34 +121,6 @@ Resources:
 
 
   # ------------------------------------------------------------
-  # DYNAMODB: REVOKED ACCESS TOKENS
-  # Use JWT jti as the partition key. TTL eventually removes old
-  # entries; authorization must still reject expired JWTs itself.
-  # ------------------------------------------------------------
-
-  RevokedTokensTable:
-    Type: AWS::DynamoDB::Table
-    Properties:
-      TableName: !Sub "medislot-${EnvironmentName}-revoked-tokens"
-      BillingMode: PAY_PER_REQUEST
-      AttributeDefinitions:
-        - AttributeName: jti
-          AttributeType: S
-      KeySchema:
-        - AttributeName: jti
-          KeyType: HASH
-      TimeToLiveSpecification:
-        AttributeName: expires_at
-        Enabled: true
-      SSESpecification:
-        SSEEnabled: true
-      PointInTimeRecoverySpecification:
-        PointInTimeRecoveryEnabled: true
-      Tags:
-        - Key: Environment
-          Value: !Ref EnvironmentName
-
-  # ------------------------------------------------------------
   # DYNAMODB: SLOT COORDINATION
   # Conditional writes will protect slot capacity from overbooking.
   # ------------------------------------------------------------
@@ -332,11 +304,6 @@ Outputs:
     Value: !Ref RefreshTokensTable
     Export:
       Name: !Sub "medislot-${EnvironmentName}-RefreshTokensTableName"
-
-  RevokedTokensTableName:
-    Value: !Ref RevokedTokensTable
-    Export:
-      Name: !Sub "medislot-${EnvironmentName}-RevokedTokensTableName"
 
   SlotStateTableName:
     Value: !Ref SlotStateTable

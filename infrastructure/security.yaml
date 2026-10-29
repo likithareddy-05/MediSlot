@@ -1,31 +1,30 @@
 AWSTemplateFormatVersion: "2010-09-09"
 
 Description: >
-  MediSlot security stack with three IAM roles and a JWT SecureString
-  parameter in AWS Systems Manager Parameter Store.
+  MediSlot security stack. Creates least-privilege execution roles for the
+  consolidated Auth Lambda, JWT Authorizer, API Gateway, and JWT secret
+  custom-resource Lambda. Creates JWT runtime configuration in SSM.
 
 Parameters:
   EnvironmentName:
     Type: String
-    Default: dev
     AllowedValues:
       - dev
       - test
       - prod
-    Description: MediSlot deployment environment
+    Description: Explicit MediSlot deployment environment. Supply this value during deployment.
 
 Resources:
-
-  # ==================================================
-  # ROLE 1: Shared Authentication Lambda Execution Role
-  # Used by Register, Login, Refresh, Logout, and the
-  # temporary JWT parameter creator custom-resource Lambda.
-  # ==================================================
+  # --------------------------------------------------
+  # Auth Lambda execution role
+  # Used by the consolidated Auth Lambda for register,
+  # login, refresh and logout.
+  # --------------------------------------------------
   AuthLambdaRole:
     Type: AWS::IAM::Role
     Properties:
       RoleName: !Sub medislot-${EnvironmentName}-auth-lambda-role
-      Description: Shared execution role for MediSlot authentication Lambdas
+      Description: Execution role for the MediSlot consolidated Auth Lambda
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -35,18 +34,14 @@ Resources:
                 - lambda.amazonaws.com
             Action:
               - sts:AssumeRole
-
       ManagedPolicyArns:
         - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
         - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
-
       Policies:
-        - PolicyName: MediSlotAuthResourceAccess
+        - PolicyName: MediSlotAuthRuntimeAccess
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
-
-              # Read RDS credentials from Secrets Manager.
               - Sid: ReadDatabaseSecret
                 Effect: Allow
                 Action:
@@ -55,7 +50,6 @@ Resources:
                   Fn::ImportValue:
                     !Sub medislot-${EnvironmentName}-DatabaseSecretArn
 
-              # Read the JWT signing secret.
               - Sid: ReadJwtSigningSecret
                 Effect: Allow
                 Action:
@@ -63,7 +57,6 @@ Resources:
                 Resource:
                   - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/medislot/${EnvironmentName}/auth/jwt-signing-secret
 
-              # Read runtime authentication configuration from SSM.
               - Sid: ReadAuthenticationConfiguration
                 Effect: Allow
                 Action:
@@ -73,8 +66,6 @@ Resources:
                   - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/medislot/${EnvironmentName}/auth/refresh-token-ttl-seconds
                   - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/medislot/${EnvironmentName}/auth/bcrypt-work-factor
 
-              # Read database connection settings from SSM.
-              # The database password remains in Secrets Manager.
               - Sid: ReadDatabaseConnectionConfiguration
                 Effect: Allow
                 Action:
@@ -86,71 +77,37 @@ Resources:
                   - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/medislot/${EnvironmentName}/database/name
                   - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/medislot/${EnvironmentName}/database/username
 
-              # The JWT parameter creator custom resource uses
-              # this shared role to create and delete the secret.
-              # These permissions are consequently also available
-              # to the authentication Lambdas using this role.
-              - Sid: ManageJwtSigningParameter
-                Effect: Allow
-                Action:
-                  - ssm:PutParameter
-                  - ssm:DeleteParameter
-                Resource:
-                  - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/medislot/${EnvironmentName}/auth/jwt-signing-secret
-
-              # Read, create, delete, and atomically rotate
-              # refresh-token records.
-              - Sid: ManageRefreshTokens
+              # Refresh tokens are tracked in DynamoDB. Access JWTs are
+              # stateless and are not written to a denylist or allowlist.
+              - Sid: ManageRefreshTokenRecords
                 Effect: Allow
                 Action:
                   - dynamodb:GetItem
                   - dynamodb:PutItem
-                  - dynamodb:UpdateItem
                   - dynamodb:DeleteItem
-                  - dynamodb:TransactWriteItems
+                  - dynamodb:Query
                 Resource:
                   - !Sub
                     - arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${TableName}
                     - TableName:
                         Fn::ImportValue:
                           !Sub medislot-${EnvironmentName}-RefreshTokensTableName
-
-              # Find refresh tokens by their SHA-256 hash
-              # using the RefreshTokenHashIndex GSI.
-              - Sid: QueryRefreshTokensByHash
-                Effect: Allow
-                Action:
-                  - dynamodb:Query
-                Resource:
                   - !Sub
                     - arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${TableName}/index/RefreshTokenHashIndex
                     - TableName:
                         Fn::ImportValue:
                           !Sub medislot-${EnvironmentName}-RefreshTokensTableName
-
-              # Logout writes revoked JWT IDs. The authorizer
-              # checks the same table before accepting a token.
-              - Sid: ManageRevokedTokens
-                Effect: Allow
-                Action:
-                  - dynamodb:GetItem
-                  - dynamodb:PutItem
-                Resource:
-                  - !Sub
-                    - arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${TableName}
-                    - TableName:
-                        Fn::ImportValue:
-                          !Sub medislot-${EnvironmentName}-RevokedTokensTableName
-
       Tags:
         - Key: Project
           Value: MediSlot
         - Key: Environment
           Value: !Ref EnvironmentName
 
-  # ==================================================
-  # ROLE 2: JWT Lambda Authorizer Execution Role
-  # ==================================================
+  # --------------------------------------------------
+  # JWT Authorizer execution role
+  # Validates JWTs statelessly. It does not read a
+  # revoked-token table or active-access-token table.
+  # --------------------------------------------------
   AuthAuthorizerRole:
     Type: AWS::IAM::Role
     Properties:
@@ -165,53 +122,36 @@ Resources:
                 - lambda.amazonaws.com
             Action:
               - sts:AssumeRole
-
       ManagedPolicyArns:
         - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
         - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
-
       Policies:
-        - PolicyName: MediSlotAuthorizerResourceAccess
+        - PolicyName: MediSlotAuthorizerRuntimeAccess
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
-
-              # Read the JWT signing secret to verify signatures.
               - Sid: ReadJwtSigningSecret
                 Effect: Allow
                 Action:
                   - ssm:GetParameter
                 Resource:
                   - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/medislot/${EnvironmentName}/auth/jwt-signing-secret
-
-              # Check whether the presented JWT has been revoked.
-              - Sid: CheckRevokedTokens
-                Effect: Allow
-                Action:
-                  - dynamodb:GetItem
-                Resource:
-                  - !Sub
-                    - arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${TableName}
-                    - TableName:
-                        Fn::ImportValue:
-                          !Sub medislot-${EnvironmentName}-RevokedTokensTableName
-
       Tags:
         - Key: Project
           Value: MediSlot
         - Key: Environment
           Value: !Ref EnvironmentName
 
-  # ==================================================
-  # ROLE 3: API Gateway Invocation Role
-  # Allows API Gateway to invoke the configured MediSlot
-  # authentication, user, and appointment Lambda functions.
-  # ==================================================
+  # --------------------------------------------------
+  # API Gateway invocation role
+  # Restrict invocation to the actual Lambda functions
+  # declared by the consolidated authentication template.
+  # --------------------------------------------------
   ApiGatewayInvokeLambdaRole:
     Type: AWS::IAM::Role
     Properties:
       RoleName: !Sub medislot-${EnvironmentName}-apigateway-invoke-lambda-role
-      Description: Allows API Gateway to invoke MediSlot Lambda integrations
+      Description: Allows API Gateway to invoke MediSlot API Lambda integrations and authorizer
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -221,37 +161,77 @@ Resources:
                 - apigateway.amazonaws.com
             Action:
               - sts:AssumeRole
-
       Policies:
-        - PolicyName: MediSlotInvokeLambdaIntegrations
+        - PolicyName: MediSlotInvokeSpecificLambdas
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
-              - Sid: InvokeMediSlotLambdas
+              - Sid: InvokeAuthLambda
                 Effect: Allow
                 Action:
                   - lambda:InvokeFunction
                 Resource:
-                  - !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:medislot-${EnvironmentName}-auth-*
-                  - !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:medislot-${EnvironmentName}-user-*
-                  - !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:medislot-${EnvironmentName}-appointment-*
-                  - !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:medislot-${EnvironmentName}-account-*
-
+                  - !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:medislot-${EnvironmentName}-auth
+              - Sid: InvokeAuthorizerLambda
+                Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:medislot-${EnvironmentName}-auth-authorizer
+              - Sid: InvokeAccountProfileLambda
+                Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:medislot-${EnvironmentName}-account-profile
       Tags:
         - Key: Project
           Value: MediSlot
         - Key: Environment
           Value: !Ref EnvironmentName
 
-  # ==================================================
-  # JWT SIGNING SECRET CREATOR
-  # Creates a SecureString parameter using a generated
-  # cryptographically secure random secret.
-  #
-  # This custom-resource Lambda is intentionally not
-  # attached to the VPC so it can send its CloudFormation
-  # response to the presigned ResponseURL.
-  # ==================================================
+  # --------------------------------------------------
+  # Dedicated role for the CloudFormation custom
+  # resource that creates the JWT signing SecureString.
+  # This role is NOT shared with runtime Auth Lambda.
+  # The function stays outside the VPC to send the
+  # CloudFormation response to its presigned ResponseURL.
+  # --------------------------------------------------
+  JwtParameterCreatorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub medislot-${EnvironmentName}-jwt-parameter-creator-role
+      Description: Least-privilege role for creating the JWT signing parameter
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ManageOnlyJwtSigningParameter
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ReadCreateAndDeleteJwtSigningParameter
+                Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:PutParameter
+                  - ssm:DeleteParameter
+                Resource:
+                  - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/medislot/${EnvironmentName}/auth/jwt-signing-secret
+      Tags:
+        - Key: Project
+          Value: MediSlot
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
   JwtParameterCreatorFunction:
     Type: AWS::Lambda::Function
     Properties:
@@ -259,7 +239,7 @@ Resources:
       Description: Creates the MediSlot JWT signing secret in SSM Parameter Store
       Runtime: python3.12
       Handler: index.handler
-      Role: !GetAtt AuthLambdaRole.Arn
+      Role: !GetAtt JwtParameterCreatorRole.Arn
       Timeout: 30
       MemorySize: 128
       Code:
@@ -282,7 +262,6 @@ Resources:
                   "NoEcho": True,
                   "Data": data
               }
-
               encoded = json.dumps(body).encode("utf-8")
               request = urllib.request.Request(
                   event["ResponseURL"],
@@ -293,14 +272,12 @@ Resources:
                   },
                   method="PUT"
               )
-
               with urllib.request.urlopen(request, timeout=10) as response:
                   response.read()
 
           def handler(event, context):
               props = event.get("ResourceProperties", {})
               name = props.get("ParameterName")
-
               if not name:
                   raise ValueError("ParameterName is required")
 
@@ -310,23 +287,20 @@ Resources:
               )
 
               try:
-                  if event["RequestType"] == "Delete":
+                  request_type = event["RequestType"]
+
+                  # Keep the secret stable across stack updates. On deletion,
+                  # remove the parameter owned by this custom resource.
+                  if request_type == "Delete":
                       try:
                           ssm.delete_parameter(Name=name)
                       except ssm.exceptions.ParameterNotFound:
                           pass
-
-                      send_response(
-                          event, context, "SUCCESS", {}, physical_id
-                      )
+                      send_response(event, context, "SUCCESS", {}, physical_id)
                       return
 
-                  # Keep an existing secret stable across stack updates.
                   try:
-                      ssm.get_parameter(
-                          Name=name,
-                          WithDecryption=False
-                      )
+                      ssm.get_parameter(Name=name, WithDecryption=False)
                   except ssm.exceptions.ParameterNotFound:
                       secret = secrets.token_urlsafe(48)
                       ssm.put_parameter(
@@ -344,26 +318,14 @@ Resources:
                       {"ParameterName": name},
                       physical_id
                   )
-
               except Exception as exc:
-                  print(
-                      "JWT parameter custom resource failed:",
-                      str(exc)
-                  )
+                  print("JWT parameter custom resource failed:", str(exc))
                   try:
-                      send_response(
-                          event, context, "FAILED", {}, physical_id
-                      )
+                      send_response(event, context, "FAILED", {}, physical_id)
                   except Exception as response_error:
-                      print(
-                          "Failed to send CloudFormation response:",
-                          str(response_error)
-                      )
+                      print("Failed to send CloudFormation response:", str(response_error))
                   raise
 
-  # ==================================================
-  # SSM SECURESTRING CUSTOM RESOURCE
-  # ==================================================
   JwtSigningSecretParameter:
     Type: Custom::JwtSigningSecret
     DependsOn:
@@ -378,7 +340,7 @@ Resources:
       Name: !Sub /medislot/${EnvironmentName}/auth/access-token-ttl-seconds
       Type: String
       Value: "900"
-      Description: Access JWT lifetime in seconds (15 minutes by default)
+      Description: Access JWT lifetime in seconds (15 minutes)
       Tags:
         Project: MediSlot
         Environment: !Ref EnvironmentName
@@ -389,7 +351,7 @@ Resources:
       Name: !Sub /medislot/${EnvironmentName}/auth/refresh-token-ttl-seconds
       Type: String
       Value: "604800"
-      Description: Refresh token lifetime in seconds (7 days by default)
+      Description: Refresh token lifetime in seconds (7 days, fixed from login)
       Tags:
         Project: MediSlot
         Environment: !Ref EnvironmentName
@@ -400,27 +362,26 @@ Resources:
       Name: !Sub /medislot/${EnvironmentName}/auth/bcrypt-work-factor
       Type: String
       Value: "12"
-      Description: bcrypt password hashing work factor; minimum supported value is 12
+      Description: bcrypt password hashing work factor
       Tags:
         Project: MediSlot
         Environment: !Ref EnvironmentName
 
 Outputs:
-
   AuthLambdaRoleArn:
-    Description: Shared authentication Lambda execution role ARN
+    Description: Execution role ARN for the consolidated Auth Lambda
     Value: !GetAtt AuthLambdaRole.Arn
     Export:
       Name: !Sub medislot-${EnvironmentName}-AuthLambdaRoleArn
 
   AuthAuthorizerRoleArn:
-    Description: JWT authorizer Lambda execution role ARN
+    Description: Execution role ARN for the JWT Authorizer Lambda
     Value: !GetAtt AuthAuthorizerRole.Arn
     Export:
       Name: !Sub medislot-${EnvironmentName}-AuthAuthorizerRoleArn
 
   ApiGatewayInvokeLambdaRoleArn:
-    Description: API Gateway Lambda invocation role ARN
+    Description: API Gateway invocation role ARN
     Value: !GetAtt ApiGatewayInvokeLambdaRole.Arn
     Export:
       Name: !Sub medislot-${EnvironmentName}-ApiGatewayInvokeLambdaRoleArn

@@ -1,9 +1,8 @@
 import os
 import json
-import time
 import fnmatch
 import logging
-
+import time
 import boto3
 import jwt
 
@@ -14,13 +13,10 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 ssm = boto3.client("ssm")
-dynamodb = boto3.resource("dynamodb")
-
 JWT_SIGNING_SECRET_PARAMETER = os.environ[
     "JWT_SIGNING_SECRET_PARAMETER"
 ]
 JWT_ISSUER = os.environ.get("JWT_ISSUER", "medislot")
-REVOKED_TOKENS_TABLE = os.environ["REVOKED_TOKENS_TABLE"]
 
 # Values can be a single role or a list of allowed roles.
 # Example:
@@ -61,8 +57,6 @@ for route_pattern, required_roles in ROLE_ROUTE_RULES.items():
         )
 
     ROLE_ROUTE_RULES[route_pattern] = required_roles
-
-revoked_tokens_table = dynamodb.Table(REVOKED_TOKENS_TABLE)
 
 _jwt_secret = None
 
@@ -164,30 +158,6 @@ def decode_access_token(token):
         raise jwt.InvalidTokenError("Issued-at time is in the future")
 
     return claims
-
-
-def is_token_revoked(jti):
-    """Check whether the access token ID exists in the denylist."""
-    result = revoked_tokens_table.get_item(
-        Key={"jti": jti},
-        ConsistentRead=True
-    )
-
-    item = result.get("Item")
-
-    if not item:
-        return False
-
-    expires_at = item.get("expires_at")
-
-    # Fail closed for malformed revocation records.
-    if (
-        isinstance(expires_at, bool)
-        or not isinstance(expires_at, (int, float))
-    ):
-        return True
-
-    return expires_at > int(time.time())
 
 
 def get_method_and_path(event):
@@ -322,14 +292,6 @@ def lambda_handler(event, context):
 
     try:
         claims = decode_access_token(token)
-
-        if is_token_revoked(claims["jti"]):
-            logger.info(json.dumps({
-                "event": "revoked_access_token_rejected",
-                "request_id": request_id,
-                "user_id": claims["sub"]
-            }))
-            raise Exception("Unauthorized")
 
         if not role_is_allowed(claims, event):
             logger.info(json.dumps({

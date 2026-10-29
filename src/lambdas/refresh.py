@@ -1,11 +1,9 @@
 import os
 import json
 import time
-import uuid
 import hashlib
-import secrets
 import logging
-
+import uuid
 import boto3
 import jwt
 
@@ -35,9 +33,7 @@ JWT_ISSUER = os.environ.get("JWT_ISSUER", "medislot")
 REFRESH_TOKENS_TABLE = os.environ["REFRESH_TOKENS_TABLE"]
 
 ACCESS_TOKEN_TTL_PARAMETER = os.environ["ACCESS_TOKEN_TTL_PARAMETER"]
-REFRESH_TOKEN_TTL_PARAMETER = os.environ["REFRESH_TOKEN_TTL_PARAMETER"]
 ACCESS_TOKEN_TTL = None
-REFRESH_TOKEN_TTL = None
 
 REFRESH_TOKEN_INDEX = "RefreshTokenHashIndex"
 
@@ -187,9 +183,6 @@ def lambda_handler(event, context):
         ACCESS_TOKEN_TTL = get_integer_parameter(
             ACCESS_TOKEN_TTL_PARAMETER, minimum=60, maximum=86400
         )
-        REFRESH_TOKEN_TTL = get_integer_parameter(
-            REFRESH_TOKEN_TTL_PARAMETER, minimum=300, maximum=2592000
-        )
 
         # Parse the incoming request body.
         body = event.get("body")
@@ -269,65 +262,9 @@ def lambda_handler(event, context):
                 {"message": "Invalid or expired refresh token"}
             )
 
-        # Create the replacement refresh token.
-        new_refresh_token = secrets.token_urlsafe(48)
-        new_refresh_hash = hash_refresh_token(
-            new_refresh_token
-        )
-        new_token_id = str(uuid.uuid4())
-        new_refresh_expiry = now + REFRESH_TOKEN_TTL
-
-        new_access_token = create_access_token(
-            user_id,
-            role,
-            now
-        )
-
-        # Atomically invalidate the old refresh token and save
-        # the replacement. The condition prevents the old token
-        # from being successfully rotated more than once.
-        dynamodb_client.transact_write_items(
-            TransactItems=[
-                {
-                    "Delete": {
-                        "TableName": REFRESH_TOKENS_TABLE,
-                        "Key": {
-                            "user_id": {"S": user_id},
-                            "token_id": {"S": old_token_id}
-                        },
-                        "ConditionExpression": (
-                            "token_hash = :old_hash "
-                            "AND expires_at > :now"
-                        ),
-                        "ExpressionAttributeValues": {
-                            ":old_hash": {"S": old_hash},
-                            ":now": {"N": str(now)}
-                        }
-                    }
-                },
-                {
-                    "Put": {
-                        "TableName": REFRESH_TOKENS_TABLE,
-                        "Item": {
-                            "user_id": {"S": user_id},
-                            "token_id": {"S": new_token_id},
-                            "token_hash": {
-                                "S": new_refresh_hash
-                            },
-                            "expires_at": {
-                                "N": str(new_refresh_expiry)
-                            },
-                            "created_at": {"N": str(now)},
-                            "role": {"S": role}
-                        },
-                        "ConditionExpression": (
-                            "attribute_not_exists(user_id) "
-                            "AND attribute_not_exists(token_id)"
-                        )
-                    }
-                }
-            ]
-        )
+        # Refresh tokens are fixed-lifetime credentials. Do not rotate them
+        # or extend their expiry: only issue a new short-lived access JWT.
+        new_access_token = create_access_token(user_id, role, now)
 
         logger.info(json.dumps({
             "event": "refresh_success",
@@ -342,9 +279,7 @@ def lambda_handler(event, context):
                 "message": "Token refreshed successfully",
                 "token_type": "Bearer",
                 "access_token": new_access_token,
-                "expires_in": ACCESS_TOKEN_TTL,
-                "refresh_token": new_refresh_token,
-                "refresh_expires_in": REFRESH_TOKEN_TTL
+                "expires_in": ACCESS_TOKEN_TTL
             }
         )
 

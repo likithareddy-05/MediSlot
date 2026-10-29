@@ -108,7 +108,19 @@ def lambda_handler(event, context):
             return response(401, {"message": "Unauthorized"})
 
         # Keep the URL and JWT role aligned even if route rules are changed later.
-        path = event.get("path", "")
+        # Prefer API Gateway's configured resource path. If unavailable, use
+        # the request resource path; only fall back to the invocation path last.
+        request_context = event.get("requestContext") or {}
+        path = (
+            event.get("resource")
+            or request_context.get("resourcePath")
+            or event.get("path")
+            or ""
+        )
+        path = "/" + path.lstrip("/")
+        stage = request_context.get("stage")
+        if isinstance(stage, str) and stage and path.startswith(f"/{stage}/"):
+            path = path[len(stage) + 1:]
         expected_role = {
             "/patient/me": "PATIENT",
             "/doctor/me": "DOCTOR"

@@ -1,4 +1,3 @@
-
 PyMySQL
 bcrypt
 PyJWT

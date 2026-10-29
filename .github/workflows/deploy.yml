@@ -9,7 +9,7 @@ permissions:
   id-token: write
 
 concurrency:
-  group: medislot-infrastructure-dev
+  group: medislot-infrastructure-${{ vars.ENVIRONMENT_NAME }}
   cancel-in-progress: false
 
 jobs:
@@ -17,99 +17,45 @@ jobs:
     name: Deploy MediSlot Infrastructure
     runs-on: ubuntu-latest
 
-    # Development deployments are permitted only from feature.
+    # Deploy only when manually triggered from the feature branch.
     if: github.ref == 'refs/heads/feature'
 
     env:
-      AWS_REGION: eu-north-1
-      ENVIRONMENT_NAME: dev
-      # Accepts a repository Variable (preferred) or a Secret with the same name.
-      ARTIFACT_BUCKET: ${{ vars.MEDISLOT_ARTIFACT_BUCKET || secrets.MEDISLOT_ARTIFACT_BUCKET }}
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      ENVIRONMENT_NAME: ${{ vars.ENVIRONMENT_NAME }}
+      AWS_ROLE_TO_ASSUME: ${{ secrets.AWS_ROLE_ARN }}
 
     steps:
-      # --------------------------------------------------
-      # 1. CHECKOUT
-      # --------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # --------------------------------------------------
-      # 2. CHECK CONFIGURATION BEFORE ANY AWS CHANGES
-      # --------------------------------------------------
       - name: Validate deployment configuration
         shell: bash
         run: |
           set -euo pipefail
 
-          if [[ -z "${ARTIFACT_BUCKET:-}" ||
-                "$ARTIFACT_BUCKET" == "null" ]]; then
-            echo "::error::MEDISLOT_ARTIFACT_BUCKET is missing (checked both repository Variables and Secrets)."
-            echo "Create it exactly as MEDISLOT_ARTIFACT_BUCKET in Settings > Secrets and variables > Actions (Variables tab preferred)."
-            exit 1
-          fi
+          for name in AWS_REGION ENVIRONMENT_NAME AWS_ROLE_TO_ASSUME; do
+            if [[ -z "${!name:-}" || "${!name}" == "null" ]]; then
+              echo "::error::Missing GitHub Actions configuration: ${name}"
+              exit 1
+            fi
+          done
 
-          # Remove accidental spaces, tabs, newlines and carriage returns
-          # (a very common copy/paste problem).
-          RAW_BUCKET_LENGTH="${#ARTIFACT_BUCKET}"
-
-          # Keep only visible ASCII characters (drops spaces, tabs, newlines,
-          # carriage returns, non-breaking spaces and zero-width characters),
-          # then drop any surrounding quote marks.
-          ARTIFACT_BUCKET="$(printf '%s' "$ARTIFACT_BUCKET" | LC_ALL=C tr -cd '[:graph:]' | tr -d "\"'")"
-
-          echo "Bucket name length as received: ${RAW_BUCKET_LENGTH}"
-
-          # Give specific hints about the most common mistakes.
-          # Only the length is printed because the value may be masked.
-          echo "Bucket name length after trimming: ${#ARTIFACT_BUCKET}"
-
-          if [[ "$ARTIFACT_BUCKET" == s3://* ]]; then
-            echo "::error::MEDISLOT_ARTIFACT_BUCKET must be the bucket name only, without the s3:// prefix."
-            exit 1
-          fi
-
-          if [[ "$ARTIFACT_BUCKET" == arn:* ]]; then
-            echo "::error::MEDISLOT_ARTIFACT_BUCKET must be the bucket name only, not an ARN."
-            exit 1
-          fi
-
-          if [[ "$ARTIFACT_BUCKET" == */* ]]; then
-            echo "::error::MEDISLOT_ARTIFACT_BUCKET must not contain a slash (no path or trailing /)."
-            exit 1
-          fi
-
-          if [[ "$ARTIFACT_BUCKET" =~ [A-Z] ]]; then
-            echo "::error::MEDISLOT_ARTIFACT_BUCKET must be lowercase."
-            exit 1
-          fi
-
-          if [[ "$ARTIFACT_BUCKET" == *_* ]]; then
-            echo "::error::MEDISLOT_ARTIFACT_BUCKET must not contain underscores. Use hyphens."
-            exit 1
-          fi
-
-          if (( ${#ARTIFACT_BUCKET} < 3 || ${#ARTIFACT_BUCKET} > 63 )); then
-            echo "::error::MEDISLOT_ARTIFACT_BUCKET must be 3 to 63 characters long."
-            exit 1
-          fi
-
-          if [[ ! "$ARTIFACT_BUCKET" =~ ^[a-z0-9][a-z0-9.-]*[a-z0-9]$ ]]; then
-            echo "Characters received (bucket names are not sensitive):"
-            printf '%s' "$ARTIFACT_BUCKET" | od -An -c
-            echo "::error::MEDISLOT_ARTIFACT_BUCKET may only contain lowercase letters, numbers, dots and hyphens, and must start and end with a letter or number."
-            exit 1
-          fi
-
-          # Make the cleaned value available to all later steps.
-          echo "ARTIFACT_BUCKET=${ARTIFACT_BUCKET}" >> "$GITHUB_ENV"
+          case "$ENVIRONMENT_NAME" in
+            dev|test|prod) ;;
+            *)
+              echo "::error::ENVIRONMENT_NAME must be dev, test, or prod."
+              exit 1
+              ;;
+          esac
 
           for file in \
             infrastructure/network.yaml \
             infrastructure/data.yaml \
             infrastructure/security.yaml \
             infrastructure/authentication.yaml \
+            src/lambdas/auth_handler.py \
             src/lambdas/register.py \
-            src/lambdas/auth.py \
             src/lambdas/refresh.py \
             src/lambdas/logout.py \
             src/lambdas/authorizer.py \
@@ -122,26 +68,15 @@ jobs:
             fi
           done
 
-          echo "Deployment configuration and required files are present."
-
-      # --------------------------------------------------
-      # 3. CONFIGURE AWS THROUGH GITHUB OIDC
-      # --------------------------------------------------
-      - name: Configure AWS credentials using OIDC
+      - name: Configure AWS credentials using GitHub OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::201261380083:role/MediSlotGitHubActionsRole
-          aws-region: eu-north-1
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
 
       - name: Verify AWS identity
-        shell: bash
-        run: |
-          set -euo pipefail
-          aws sts get-caller-identity --region "$AWS_REGION"
+        run: aws sts get-caller-identity --region "$AWS_REGION"
 
-      # --------------------------------------------------
-      # 4. VALIDATE ALL CLOUDFORMATION TEMPLATES
-      # --------------------------------------------------
       - name: Validate CloudFormation templates
         shell: bash
         run: |
@@ -153,44 +88,93 @@ jobs:
             infrastructure/security.yaml \
             infrastructure/authentication.yaml
           do
-            echo "Validating $template"
+            echo "Validating ${template}"
 
             aws cloudformation validate-template \
               --template-body "file://${template}" \
-              --region "$AWS_REGION" \
-              >/dev/null
-
-            echo "$template passed CloudFormation template validation."
+              --region "$AWS_REGION" >/dev/null
           done
 
-      # --------------------------------------------------
-      # 5. PACKAGE AND UPLOAD LAMBDAS BEFORE STACK CHANGES
-      # This catches package/dependency/bucket permission errors
-      # before modifying any CloudFormation stacks.
-      # --------------------------------------------------
+      - name: Deploy network, data and security stacks
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          deploy_stack() {
+            local stack_name="$1"
+            local template_file="$2"
+            shift 2
+
+            echo "Deploying CloudFormation stack: ${stack_name}"
+
+            aws cloudformation deploy \
+              --stack-name "$stack_name" \
+              --template-file "$template_file" \
+              --parameter-overrides \
+                "EnvironmentName=${ENVIRONMENT_NAME}" "$@" \
+              --capabilities CAPABILITY_NAMED_IAM \
+              --region "$AWS_REGION" \
+              --no-fail-on-empty-changeset
+          }
+
+          deploy_stack \
+            "medislot-${ENVIRONMENT_NAME}-network" \
+            infrastructure/network.yaml
+
+          deploy_stack \
+            "medislot-${ENVIRONMENT_NAME}-data" \
+            infrastructure/data.yaml
+
+          deploy_stack \
+            "medislot-${ENVIRONMENT_NAME}-security" \
+            infrastructure/security.yaml
+
+      - name: Resolve CloudFormation-created assets bucket
+        id: assets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          STACK_NAME="medislot-${ENVIRONMENT_NAME}-data"
+
+          ASSETS_BUCKET="$(aws cloudformation describe-stacks \
+            --stack-name "$STACK_NAME" \
+            --query "Stacks[0].Outputs[?OutputKey=='AssetsBucketName'].OutputValue | [0]" \
+            --output text \
+            --region "$AWS_REGION")"
+
+          if [[ -z "$ASSETS_BUCKET" || "$ASSETS_BUCKET" == "None" ]]; then
+            echo "::error::AssetsBucketName output was not found in ${STACK_NAME}."
+            exit 1
+          fi
+
+          echo "bucket=${ASSETS_BUCKET}" >> "$GITHUB_OUTPUT"
+          echo "CloudFormation assets bucket resolved successfully."
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Package and upload authentication Lambdas
+      - name: Package and upload Lambda artifacts
+        env:
+          ARTIFACT_BUCKET: ${{ steps.assets.outputs.bucket }}
         shell: bash
         run: |
           set -euo pipefail
 
-          python --version
           python -m pip install --upgrade pip
+          python -m pip install zip
 
           mkdir -p build/lambdas
 
           package_lambda() {
-            local source_file="$1"
-            local package_name="$2"
+            local package_name="$1"
+            shift
+
             local package_dir="build/${package_name}"
             local zip_file="build/lambdas/${package_name}.zip"
             local s3_key="artifacts/${GITHUB_SHA}/${package_name}.zip"
-
-            echo "Packaging ${source_file}"
 
             rm -rf "$package_dir"
             mkdir -p "$package_dir"
@@ -200,7 +184,9 @@ jobs:
               -r src/lambdas/requirements.txt \
               -t "$package_dir"
 
-            cp "src/lambdas/${source_file}" "$package_dir/"
+            for source_file in "$@"; do
+              cp "src/lambdas/${source_file}" "$package_dir/"
+            done
 
             rm -f "$zip_file"
 
@@ -208,8 +194,6 @@ jobs:
               cd "$package_dir"
               zip -qr "../lambdas/${package_name}.zip" .
             )
-
-            echo "Uploading ${package_name}.zip"
 
             aws s3 cp \
               "$zip_file" \
@@ -219,292 +203,46 @@ jobs:
             echo "Uploaded ${s3_key}"
           }
 
-          package_lambda register.py register
-          package_lambda auth.py login
-          package_lambda refresh.py refresh
-          package_lambda logout.py logout
-          package_lambda authorizer.py authorizer
-          package_lambda profile.py profile
+          # One authentication Lambda with all authentication operations.
+          package_lambda auth \
+            auth_handler.py \
+            register.py \
+            refresh.py \
+            logout.py
 
-          echo "All authentication Lambda packages uploaded."
+          # Separate Lambda for JWT authorization.
+          package_lambda authorizer authorizer.py
 
-      # --------------------------------------------------
-      # 6. REUSABLE CLOUDFORMATION CHANGE SET DEPLOYMENT
-      # Handles create, update, and no-change outcomes.
-      # --------------------------------------------------
-      - name: Deploy infrastructure stacks
+          # Separate Lambda for user profile requests.
+          package_lambda profile profile.py
+
+      - name: Deploy authentication API stack
+        env:
+          ARTIFACT_BUCKET: ${{ steps.assets.outputs.bucket }}
         shell: bash
         run: |
           set -euo pipefail
 
-          deploy_stack() {
-            local stack_name="$1"
-            local template_file="$2"
-            local change_set_name
-            local change_set_type
-            local status
-            local reason
-            local waiter_failed=0
+          aws cloudformation deploy \
+            --stack-name "medislot-${ENVIRONMENT_NAME}-authentication" \
+            --template-file infrastructure/authentication.yaml \
+            --parameter-overrides \
+              "EnvironmentName=${ENVIRONMENT_NAME}" \
+              "LambdaArtifactBucket=${ARTIFACT_BUCKET}" \
+              "AuthLambdaS3Key=artifacts/${GITHUB_SHA}/auth.zip" \
+              "AuthorizerLambdaS3Key=artifacts/${GITHUB_SHA}/authorizer.zip" \
+              "ProfileLambdaS3Key=artifacts/${GITHUB_SHA}/profile.zip" \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --region "$AWS_REGION" \
+            --no-fail-on-empty-changeset
 
-            shift 2
-
-            # Parse optional parameters/capabilities so --parameters is
-            # supplied exactly once to CloudFormation.
-            local -a parameters=("ParameterKey=EnvironmentName,ParameterValue=${ENVIRONMENT_NAME}")
-            local -a capabilities=()
-            local -a capability_args=()
-            local has_custom_parameters=0
-
-            while (($#)); do
-              case "$1" in
-                --parameters)
-                  if [[ "$has_custom_parameters" -eq 0 ]]; then
-                    parameters=()
-                    has_custom_parameters=1
-                  fi
-                  shift
-
-                  while (($#)) && [[ "$1" != --* ]]; do
-                    parameters+=("$1")
-                    shift
-                  done
-                  ;;
-                --capabilities)
-                  shift
-
-                  while (($#)) && [[ "$1" != --* ]]; do
-                    capabilities+=("$1")
-                    shift
-                  done
-                  ;;
-                *)
-                  echo "::error::Unsupported deploy_stack argument: $1"
-                  return 2
-                  ;;
-              esac
-            done
-
-            if [[ "$has_custom_parameters" -eq 1 ]]; then
-              local env_parameter_count=0
-              local parameter
-
-              for parameter in "${parameters[@]}"; do
-                [[ "$parameter" == ParameterKey=EnvironmentName,* ]] && ((env_parameter_count+=1))
-              done
-
-              if [[ "$env_parameter_count" -ne 1 ]]; then
-                echo "::error::${stack_name} must receive exactly one EnvironmentName parameter."
-                return 2
-              fi
-            fi
-
-            change_set_name="${stack_name}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-
-            echo "--------------------------------------------------"
-            echo "Preparing ${stack_name}"
-            echo "Template: ${template_file}"
-            echo "--------------------------------------------------"
-
-            local describe_error
-
-            if describe_error=$(aws cloudformation describe-stacks \
-              --stack-name "$stack_name" \
-              --region "$AWS_REGION" 2>&1); then
-              change_set_type="UPDATE"
-            elif [[ "$describe_error" == *"does not exist" ||
-                    "$describe_error" == *"not exist" ]]; then
-              change_set_type="CREATE"
-            else
-              echo "::error::Could not determine whether ${stack_name} exists: ${describe_error}"
-              return 1
-            fi
-
-            echo "Change set type: ${change_set_type}"
-
-            # AWS CLI requires the --capabilities option before capability values.
-            # Passing CAPABILITY_NAMED_IAM by itself makes the CLI parse it incorrectly.
-            if ((${#capabilities[@]} > 0)); then
-              capability_args=(--capabilities "${capabilities[@]}")
-            fi
-
-            aws cloudformation create-change-set \
-              --stack-name "$stack_name" \
-              --change-set-name "$change_set_name" \
-              --change-set-type "$change_set_type" \
-              --template-body "file://${template_file}" \
-              --parameters "${parameters[@]}" \
-              "${capability_args[@]}" \
-              --region "$AWS_REGION"
-
-            if ! aws cloudformation wait change-set-create-complete \
-              --stack-name "$stack_name" \
-              --change-set-name "$change_set_name" \
-              --region "$AWS_REGION"; then
-              waiter_failed=1
-            fi
-
-            status=$(aws cloudformation describe-change-set \
-              --stack-name "$stack_name" \
-              --change-set-name "$change_set_name" \
-              --region "$AWS_REGION" \
-              --query 'Status' \
-              --output text)
-
-            reason=$(aws cloudformation describe-change-set \
-              --stack-name "$stack_name" \
-              --change-set-name "$change_set_name" \
-              --region "$AWS_REGION" \
-              --query 'StatusReason' \
-              --output text)
-
-            if [[ "$status" == "FAILED" ]]; then
-              if [[ "$reason" == *"didn't contain changes"* ||
-                    "$reason" == *"No updates are to be performed"* ]]; then
-                echo "No changes required for ${stack_name}."
-
-                aws cloudformation delete-change-set \
-                  --stack-name "$stack_name" \
-                  --change-set-name "$change_set_name" \
-                  --region "$AWS_REGION" || true
-
-                return 0
-              fi
-
-              echo "::error::Change set failed for ${stack_name}: ${reason}"
-              return 1
-            fi
-
-            if [[ "$waiter_failed" -ne 0 ||
-                  "$status" != "CREATE_COMPLETE" ]]; then
-              echo "::error::Unexpected change set status for ${stack_name}: ${status}"
-              echo "Reason: ${reason}"
-              return 1
-            fi
-
-            echo "Planned changes for ${stack_name}:"
-
-            aws cloudformation describe-change-set \
-              --stack-name "$stack_name" \
-              --change-set-name "$change_set_name" \
-              --region "$AWS_REGION" \
-              --query 'Changes[*].ResourceChange.{Action:Action,Type:ResourceType,LogicalId:LogicalResourceId,Replacement:Replacement}' \
-              --output table
-
-            echo "Executing change set for ${stack_name}"
-
-            aws cloudformation execute-change-set \
-              --stack-name "$stack_name" \
-              --change-set-name "$change_set_name" \
-              --region "$AWS_REGION"
-
-            if [[ "$change_set_type" == "CREATE" ]]; then
-              aws cloudformation wait stack-create-complete \
-                --stack-name "$stack_name" \
-                --region "$AWS_REGION"
-            else
-              aws cloudformation wait stack-update-complete \
-                --stack-name "$stack_name" \
-                --region "$AWS_REGION"
-            fi
-
-            local final_status
-
-            final_status=$(aws cloudformation describe-stacks \
-              --stack-name "$stack_name" \
-              --region "$AWS_REGION" \
-              --query 'Stacks[0].StackStatus' \
-              --output text)
-
-            if [[ "$final_status" != "CREATE_COMPLETE" &&
-                  "$final_status" != "UPDATE_COMPLETE" ]]; then
-              echo "::error::Unexpected final status for ${stack_name}: ${final_status}"
-              return 1
-            fi
-
-            echo "${stack_name} completed with status ${final_status}."
-          }
-
-          # --------------------------------------------------
-          # STACK 1: NETWORK
-          # --------------------------------------------------
-          deploy_stack \
-            "medislot-${ENVIRONMENT_NAME}-network" \
-            "infrastructure/network.yaml"
-
-          # Verify exports required by the data stack.
-          for export_name in \
-            "medislot-${ENVIRONMENT_NAME}-PrivateSubnetAId" \
-            "medislot-${ENVIRONMENT_NAME}-PrivateSubnetBId" \
-            "medislot-${ENVIRONMENT_NAME}-RDSSecurityGroupId"
-          do
-            found=$(aws cloudformation list-exports \
-              --region "$AWS_REGION" \
-              --query "Exports[?Name=='${export_name}'].Name | [0]" \
-              --output text)
-
-            if [[ "$found" != "$export_name" ]]; then
-              echo "::error::Required network export is missing: ${export_name}"
-              exit 1
-            fi
-          done
-
-          echo "Required network exports are available."
-
-          # --------------------------------------------------
-          # STACK 2: DATA
-          # --------------------------------------------------
-          deploy_stack \
-            "medislot-${ENVIRONMENT_NAME}-data" \
-            "infrastructure/data.yaml"
-
-          # --------------------------------------------------
-          # STACK 3: SECURITY
-          # Contains named IAM roles, so CAPABILITY_NAMED_IAM
-          # is required.
-          # --------------------------------------------------
-          deploy_stack \
-            "medislot-${ENVIRONMENT_NAME}-security" \
-            "infrastructure/security.yaml" \
-            --capabilities CAPABILITY_NAMED_IAM
-
-          # --------------------------------------------------
-          # STACK 4: AUTHENTICATION
-          # Lambda artifacts were uploaded before stack changes.
-          # --------------------------------------------------
-          deploy_stack \
-            "medislot-${ENVIRONMENT_NAME}-authentication" \
-            "infrastructure/authentication.yaml" \
-            --capabilities CAPABILITY_IAM \
-            --parameters \
-              "ParameterKey=EnvironmentName,ParameterValue=${ENVIRONMENT_NAME}" \
-              "ParameterKey=LambdaArtifactBucket,ParameterValue=${ARTIFACT_BUCKET}" \
-              "ParameterKey=RegisterLambdaS3Key,ParameterValue=artifacts/${GITHUB_SHA}/register.zip" \
-              "ParameterKey=LoginLambdaS3Key,ParameterValue=artifacts/${GITHUB_SHA}/login.zip" \
-              "ParameterKey=RefreshLambdaS3Key,ParameterValue=artifacts/${GITHUB_SHA}/refresh.zip" \
-              "ParameterKey=LogoutLambdaS3Key,ParameterValue=artifacts/${GITHUB_SHA}/logout.zip" \
-              "ParameterKey=AuthorizerLambdaS3Key,ParameterValue=artifacts/${GITHUB_SHA}/authorizer.zip" \
-              "ParameterKey=ProfileLambdaS3Key,ParameterValue=artifacts/${GITHUB_SHA}/profile.zip"
-
-      # --------------------------------------------------
-      # 7. SHOW STACK OUTPUTS
-      # --------------------------------------------------
-      - name: Show deployed stack outputs
-        if: success()
+      - name: Show API outputs
         shell: bash
         run: |
           set -euo pipefail
 
-          for stack in network data security authentication; do
-            stack_name="medislot-${ENVIRONMENT_NAME}-${stack}"
-
-            echo "--------------------------------------------------"
-            echo "Stack: ${stack_name}"
-            echo "--------------------------------------------------"
-
-            aws cloudformation describe-stacks \
-              --stack-name "$stack_name" \
-              --region "$AWS_REGION" \
-              --query 'Stacks[0].{Status:StackStatus,Outputs:Outputs}' \
-              --output json
-
-          done
+          aws cloudformation describe-stacks \
+            --stack-name "medislot-${ENVIRONMENT_NAME}-authentication" \
+            --query "Stacks[0].Outputs" \
+            --output table \
+            --region "$AWS_REGION"

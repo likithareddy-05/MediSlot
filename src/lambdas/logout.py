@@ -21,10 +21,8 @@ JWT_SIGNING_SECRET_PARAMETER = os.environ["JWT_SIGNING_SECRET_PARAMETER"]
 JWT_ISSUER = os.environ.get("JWT_ISSUER", "medislot")
 
 REFRESH_TOKENS_TABLE = os.environ["REFRESH_TOKENS_TABLE"]
-REVOKED_TOKENS_TABLE = os.environ["REVOKED_TOKENS_TABLE"]
 
 refresh_tokens_table = dynamodb.Table(REFRESH_TOKENS_TABLE)
-revoked_tokens_table = dynamodb.Table(REVOKED_TOKENS_TABLE)
 
 _jwt_secret = None
 
@@ -289,31 +287,8 @@ def lambda_handler(event, context):
             )
 
         user_id = claims["sub"]
-        token_id = claims["jti"]
-        token_expiry = int(claims["exp"])
 
-        # Revoke the current access token. The Lambda authorizer
-        # must check RevokedTokensTable for every protected request.
-        #
-        # A conditional put makes repeated logout attempts for the
-        # same jti safe without overwriting an existing record.
-        try:
-            revoked_tokens_table.put_item(
-                Item={
-                    "jti": token_id,
-                    "expires_at": token_expiry
-                },
-                ConditionExpression="attribute_not_exists(jti)"
-            )
-        except ClientError as exc:
-            error_code = exc.response.get("Error", {}).get("Code")
-
-            if error_code != "ConditionalCheckFailedException":
-                raise
-
-            # This access token has already been revoked.
-
-        # Revoke the supplied refresh token belonging to this user.
+        # Delete the refresh-token record; access JWTs expire naturally.
         revoke_refresh_token(refresh_token, user_id)
 
         logger.info("Logout completed for user_id=%s", user_id)

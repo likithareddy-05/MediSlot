@@ -28,6 +28,10 @@ Parameters:
     Type: String
     Description: S3 key for the authenticated account-details Lambda package.
 
+  DoctorDomainLambdaS3Key:
+    Type: String
+    Description: S3 key for the doctor-domain API and slot materialiser package.
+
 Resources:
   # ---------------------------------------------------------
   # CONSOLIDATED AUTH LAMBDA
@@ -150,6 +154,124 @@ Resources:
           DB_SECRET_ARN:
             Fn::ImportValue:
               Fn::Sub: medislot-${EnvironmentName}-DatabaseSecretArn
+
+  # ---------------------------------------------------------
+  # MILESTONE 3 DOCTOR DOMAIN API + MATERIALISER
+  # Existing authentication/profile functions remain unchanged.
+  # ---------------------------------------------------------
+  DoctorDomainFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub medislot-${EnvironmentName}-doctor-domain
+      Description: Doctor profile, consultations, availability, blackouts, schedule and slot materialisation.
+      Runtime: python3.12
+      Handler: doctor_domain.lambda_handler
+      Code:
+        S3Bucket: !Ref LambdaArtifactBucket
+        S3Key: !Ref DoctorDomainLambdaS3Key
+      Role:
+        Fn::ImportValue:
+          Fn::Sub: medislot-${EnvironmentName}-AuthLambdaRoleArn
+      Timeout: 60
+      MemorySize: 512
+      VpcConfig:
+        SecurityGroupIds:
+          - Fn::ImportValue:
+              Fn::Sub: medislot-${EnvironmentName}-LambdaSecurityGroupId
+        SubnetIds:
+          - Fn::ImportValue:
+              Fn::Sub: medislot-${EnvironmentName}-PrivateSubnetAId
+          - Fn::ImportValue:
+              Fn::Sub: medislot-${EnvironmentName}-PrivateSubnetBId
+      Environment:
+        Variables:
+          DB_HOST_PARAMETER: !Sub /medislot/${EnvironmentName}/database/host
+          DB_PORT_PARAMETER: !Sub /medislot/${EnvironmentName}/database/port
+          DB_NAME_PARAMETER: !Sub /medislot/${EnvironmentName}/database/name
+          DB_USERNAME_PARAMETER: !Sub /medislot/${EnvironmentName}/database/username
+          DB_SECRET_ARN:
+            Fn::ImportValue:
+              Fn::Sub: medislot-${EnvironmentName}-DatabaseSecretArn
+          SLOT_STATE_TABLE:
+            Fn::ImportValue:
+              Fn::Sub: medislot-${EnvironmentName}-SlotStateTableName
+          ASSETS_BUCKET:
+            Fn::ImportValue:
+              Fn::Sub: medislot-${EnvironmentName}-AssetsBucketName
+
+  DoctorDomainMaterializerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub medislot-${EnvironmentName}-slot-materializer
+      Description: Daily idempotent rolling 30-day doctor slot materialisation.
+      Runtime: python3.12
+      Handler: doctor_domain.materializer_handler
+      Code:
+        S3Bucket: !Ref LambdaArtifactBucket
+        S3Key: !Ref DoctorDomainLambdaS3Key
+      Role:
+        Fn::ImportValue:
+          Fn::Sub: medislot-${EnvironmentName}-AuthLambdaRoleArn
+      Timeout: 300
+      MemorySize: 512
+      VpcConfig:
+        SecurityGroupIds:
+          - Fn::ImportValue:
+              Fn::Sub: medislot-${EnvironmentName}-LambdaSecurityGroupId
+        SubnetIds:
+          - Fn::ImportValue:
+              Fn::Sub: medislot-${EnvironmentName}-PrivateSubnetAId
+          - Fn::ImportValue:
+              Fn::Sub: medislot-${EnvironmentName}-PrivateSubnetBId
+      Environment:
+        Variables:
+          DB_HOST_PARAMETER: !Sub /medislot/${EnvironmentName}/database/host
+          DB_PORT_PARAMETER: !Sub /medislot/${EnvironmentName}/database/port
+          DB_NAME_PARAMETER: !Sub /medislot/${EnvironmentName}/database/name
+          DB_USERNAME_PARAMETER: !Sub /medislot/${EnvironmentName}/database/username
+          DB_SECRET_ARN:
+            Fn::ImportValue:
+              Fn::Sub: medislot-${EnvironmentName}-DatabaseSecretArn
+          SLOT_STATE_TABLE:
+            Fn::ImportValue:
+              Fn::Sub: medislot-${EnvironmentName}-SlotStateTableName
+          ASSETS_BUCKET:
+            Fn::ImportValue:
+              Fn::Sub: medislot-${EnvironmentName}-AssetsBucketName
+
+  SlotMaterializerScheduleRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeSlotMaterializer
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt DoctorDomainMaterializerFunction.Arn
+
+  SlotMaterializerSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: !Sub medislot-${EnvironmentName}-slot-materializer-daily
+      Description: Materialize the next rolling 30 days of doctor slots daily.
+      FlexibleTimeWindow:
+        Mode: OFF
+      ScheduleExpression: cron(0 1 * * ? *)
+      ScheduleExpressionTimezone: UTC
+      State: ENABLED
+      Target:
+        Arn: !GetAtt DoctorDomainMaterializerFunction.Arn
+        RoleArn: !GetAtt SlotMaterializerScheduleRole.Arn
+        Input: '{}'
 
   # ---------------------------------------------------------
   # API GATEWAY REST API
@@ -378,6 +500,56 @@ Resources:
             - FunctionArn: !GetAtt ProfileFunction.Arn
 
   # ---------------------------------------------------------
+  # /doctor/{proxy+} - Milestone 3 authenticated doctor domain API
+  # Existing /doctor/me method above remains mapped to account-profile.
+  # ---------------------------------------------------------
+  DoctorProxyResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref MediSlotRestApi
+      ParentId: !Ref DoctorResource
+      PathPart: "{proxy+}"
+
+  DoctorProxyOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref MediSlotRestApi
+      ResourceId: !Ref DoctorProxyResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Credentials:
+          Fn::ImportValue:
+            Fn::Sub: medislot-${EnvironmentName}-ApiGatewayInvokeLambdaRoleArn
+        Uri:
+          Fn::Sub:
+            - arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FunctionArn}/invocations
+            - FunctionArn: !GetAtt DoctorDomainFunction.Arn
+
+  DoctorProxyMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref MediSlotRestApi
+      ResourceId: !Ref DoctorProxyResource
+      HttpMethod: ANY
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref JwtAuthorizer
+      RequestParameters:
+        method.request.path.proxy: true
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Credentials:
+          Fn::ImportValue:
+            Fn::Sub: medislot-${EnvironmentName}-ApiGatewayInvokeLambdaRoleArn
+        Uri:
+          Fn::Sub:
+            - arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FunctionArn}/invocations
+            - FunctionArn: !GetAtt DoctorDomainFunction.Arn
+
+  # ---------------------------------------------------------
   # API DEPLOYMENT
   # ---------------------------------------------------------
   ApiDeployment:
@@ -389,9 +561,11 @@ Resources:
       - LogoutMethod
       - PatientMeMethod
       - DoctorMeMethod
+      - DoctorProxyMethod
+      - DoctorProxyOptionsMethod
     Properties:
       RestApiId: !Ref MediSlotRestApi
-      Description: !Sub MediSlot ${EnvironmentName} authentication API deployment
+      Description: !Sub MediSlot ${EnvironmentName} authentication and doctor-domain API deployment v3
 
   ApiStage:
     Type: AWS::ApiGateway::Stage
@@ -422,3 +596,9 @@ Outputs:
 
   ProfileFunctionArn:
     Value: !GetAtt ProfileFunction.Arn
+
+  DoctorDomainFunctionArn:
+    Value: !GetAtt DoctorDomainFunction.Arn
+
+  SlotMaterializerFunctionArn:
+    Value: !GetAtt DoctorDomainMaterializerFunction.Arn

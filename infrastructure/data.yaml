@@ -133,9 +133,22 @@ Resources:
       AttributeDefinitions:
         - AttributeName: slot_id
           AttributeType: S
+        - AttributeName: doctor_id
+          AttributeType: S
+        - AttributeName: slot_date
+          AttributeType: S
       KeySchema:
         - AttributeName: slot_id
           KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: DoctorDateIndex
+          KeySchema:
+            - AttributeName: doctor_id
+              KeyType: HASH
+            - AttributeName: slot_date
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
       SSESpecification:
         SSEEnabled: true
       PointInTimeRecoverySpecification:
@@ -196,6 +209,19 @@ Resources:
       BucketName: !Sub "medislot-${EnvironmentName}-${AWS::AccountId}-${AWS::Region}-assets"
       VersioningConfiguration:
         Status: Enabled
+      CorsConfiguration:
+        CorsRules:
+          - AllowedOrigins:
+              - "*"
+            AllowedMethods:
+              - PUT
+              - GET
+              - HEAD
+            AllowedHeaders:
+              - "*"
+            ExposedHeaders:
+              - ETag
+            MaxAge: 3000
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:

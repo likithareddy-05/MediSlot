@@ -209,3 +209,73 @@ CREATE TABLE IF NOT EXISTS doctors (
 -- ============================================================
 -- END OF INITIAL AUTHENTICATION SCHEMA
 -- ============================================================
+-- ============================================================
+-- MILESTONE 3: DOCTOR DOMAIN (additive; preserves Milestone 2)
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS doctor_profile_assets (
+    doctor_id BIGINT UNSIGNED NOT NULL,
+    photo_key VARCHAR(512) NOT NULL,
+    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+    PRIMARY KEY (doctor_id),
+    CONSTRAINT fk_doctor_profile_assets_doctor FOREIGN KEY (doctor_id)
+        REFERENCES doctors (doctor_id) ON UPDATE RESTRICT ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS consultation_types (
+    consultation_type_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    doctor_id BIGINT UNSIGNED NOT NULL,
+    consultation_name VARCHAR(100) NOT NULL,
+    duration_minutes SMALLINT UNSIGNED NOT NULL,
+    fee DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+    slot_capacity SMALLINT UNSIGNED NOT NULL DEFAULT 1,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+    PRIMARY KEY (consultation_type_id),
+    UNIQUE KEY uq_consultation_doctor_name (doctor_id, consultation_name),
+    KEY idx_consultation_doctor_active (doctor_id, is_active),
+    CONSTRAINT fk_consultation_types_doctor FOREIGN KEY (doctor_id)
+        REFERENCES doctors (doctor_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    CONSTRAINT chk_consultation_duration CHECK (duration_minutes BETWEEN 5 AND 240),
+    CONSTRAINT chk_consultation_fee CHECK (fee >= 0),
+    CONSTRAINT chk_consultation_capacity CHECK (slot_capacity BETWEEN 1 AND 50)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS availability_patterns (
+    availability_pattern_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    doctor_id BIGINT UNSIGNED NOT NULL,
+    consultation_type_id BIGINT UNSIGNED NULL,
+    weekday TINYINT UNSIGNED NOT NULL COMMENT 'Monday=0 through Sunday=6',
+    start_time TIME NOT NULL,
+    end_time TIME NOT NULL,
+    timezone_name VARCHAR(64) NOT NULL COMMENT 'IANA timezone, e.g. America/New_York',
+    effective_from DATE NOT NULL,
+    effective_to DATE NULL,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+    PRIMARY KEY (availability_pattern_id),
+    KEY idx_availability_doctor_weekday (doctor_id, weekday, is_active),
+    CONSTRAINT fk_availability_doctor FOREIGN KEY (doctor_id)
+        REFERENCES doctors (doctor_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    CONSTRAINT fk_availability_consultation FOREIGN KEY (consultation_type_id)
+        REFERENCES consultation_types (consultation_type_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    CONSTRAINT chk_availability_weekday CHECK (weekday BETWEEN 0 AND 6),
+    CONSTRAINT chk_availability_time CHECK (start_time < end_time),
+    CONSTRAINT chk_availability_dates CHECK (effective_to IS NULL OR effective_to >= effective_from)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS doctor_blackouts (
+    blackout_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    doctor_id BIGINT UNSIGNED NOT NULL,
+    blackout_date DATE NOT NULL,
+    reason VARCHAR(255) NULL,
+    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    PRIMARY KEY (blackout_id),
+    UNIQUE KEY uq_doctor_blackout_date (doctor_id, blackout_date),
+    KEY idx_blackout_date (blackout_date),
+    CONSTRAINT fk_doctor_blackouts_doctor FOREIGN KEY (doctor_id)
+        REFERENCES doctors (doctor_id) ON UPDATE RESTRICT ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;

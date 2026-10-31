@@ -61,7 +61,11 @@ jobs:
             src/lambdas/authorizer.py \
             src/lambdas/profile.py \
             src/lambdas/schema_init.py \
+            src/lambdas/doctor_domain.py \
+            src/lambdas/slot_time.py \
             src/lambdas/requirements.txt \
+            tests/test_dst_materializer.py \
+            tests/test_slot_idempotency.py \
             database/schema.sql
           do
             if [[ ! -f "$file" ]]; then
@@ -163,7 +167,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python -m compileall -q src/lambdas
+          python -m compileall -q src/lambdas tests
+          python -m unittest discover -s tests -v
 
       - name: Package and upload Lambda artifacts
         env:
@@ -223,6 +228,9 @@ jobs:
           # Existing profile Lambda.
           package_lambda profile profile.py
 
+          # Milestone 3 doctor-domain API and scheduled slot materialiser.
+          package_lambda doctor-domain doctor_domain.py slot_time.py
+
           # One-time database schema initializer.
           # It needs PyMySQL and the SQL file, not the full app dependencies.
           SCHEMA_DIR="build/schema-init"
@@ -270,6 +278,7 @@ jobs:
               "AuthLambdaS3Key=artifacts/${GITHUB_SHA}/auth.zip" \
               "AuthorizerLambdaS3Key=artifacts/${GITHUB_SHA}/authorizer.zip" \
               "ProfileLambdaS3Key=artifacts/${GITHUB_SHA}/profile.zip" \
+              "DoctorDomainLambdaS3Key=artifacts/${GITHUB_SHA}/doctor-domain.zip" \
             --capabilities CAPABILITY_NAMED_IAM \
             --region "$AWS_REGION" \
             --no-fail-on-empty-changeset

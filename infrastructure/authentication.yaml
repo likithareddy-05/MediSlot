@@ -264,7 +264,7 @@ Resources:
       Name: !Sub medislot-${EnvironmentName}-slot-materializer-daily
       Description: Materialize the next rolling 30 days of doctor slots daily.
       FlexibleTimeWindow:
-        Mode: OFF
+        Mode: "OFF"
       ScheduleExpression: cron(0 1 * * ? *)
       ScheduleExpressionTimezone: UTC
       State: ENABLED

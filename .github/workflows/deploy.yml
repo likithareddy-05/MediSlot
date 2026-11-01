@@ -54,7 +54,10 @@ jobs:
             infrastructure/security.yaml \
             infrastructure/authentication.yaml \
             infrastructure/schema-init.yaml \
-            infrastructure/web.yaml \
+            infrastructure/dashboard.yaml \
+            dashboard/app.py \
+            dashboard/doctor_dashboard.html \
+            dashboard/requirements.txt \
             src/lambdas/auth_handler.py \
             src/lambdas/register.py \
             src/lambdas/refresh.py \
@@ -63,12 +66,10 @@ jobs:
             src/lambdas/profile.py \
             src/lambdas/schema_init.py \
             src/lambdas/doctor_domain.py \
-            src/lambdas/slot_materializer.py \
             src/lambdas/slot_time.py \
             src/lambdas/requirements.txt \
-            web/app.py \
-            web/templates/portal.html \
-            tests/test_slot_time.py \
+            tests/test_dst_materializer.py \
+            tests/test_slot_idempotency.py \
             database/schema.sql
           do
             if [[ ! -f "$file" ]]; then
@@ -97,7 +98,7 @@ jobs:
             infrastructure/security.yaml \
             infrastructure/authentication.yaml \
             infrastructure/schema-init.yaml \
-            infrastructure/web.yaml
+            infrastructure/dashboard.yaml
           do
             echo "Validating ${template}"
 
@@ -171,10 +172,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python -m compileall -q src/lambdas
-
-      - name: Run unit tests
-        run: python -m unittest discover -s tests -v
+          python -m compileall -q src/lambdas tests
+          python -m unittest discover -s tests -v
 
       - name: Package and upload Lambda artifacts
         env:
@@ -234,9 +233,8 @@ jobs:
           # Existing profile Lambda.
           package_lambda profile profile.py
 
-          # Milestone 3 doctor APIs and daily materialiser.
-          package_lambda doctor-domain doctor_domain.py
-          package_lambda slot-materializer slot_materializer.py slot_time.py
+          # Milestone 3 doctor-domain API and scheduled slot materialiser.
+          package_lambda doctor-domain doctor_domain.py slot_time.py
 
           # One-time database schema initializer.
           # It needs PyMySQL and the SQL file, not the full app dependencies.
@@ -269,20 +267,26 @@ jobs:
 
           echo "Uploaded ${SCHEMA_KEY}"
 
-      - name: Package and upload Flask doctor web application
-        env:
-          ARTIFACT_BUCKET: ${{ steps.assets.outputs.bucket }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p build/web
-          cp web/app.py web/requirements.txt build/web/
-          mkdir -p build/web/templates
-          cp web/templates/portal.html build/web/templates/
-          (cd build/web && zip -qr ../medislot-web.zip .)
-          aws s3 cp build/medislot-web.zip \
-            "s3://${ARTIFACT_BUCKET}/artifacts/${GITHUB_SHA}/medislot-web.zip" \
+          # Package the single-file doctor dashboard and its Flask host.
+          DASHBOARD_DIR="build/dashboard-package"
+          DASHBOARD_ZIP="build/dashboard.zip"
+          DASHBOARD_KEY="artifacts/${GITHUB_SHA}/dashboard.zip"
+
+          rm -rf "$DASHBOARD_DIR"
+          mkdir -p "$DASHBOARD_DIR"
+          cp -R dashboard "$DASHBOARD_DIR/"
+          rm -f "$DASHBOARD_ZIP"
+          (
+            cd "$DASHBOARD_DIR"
+            zip -qr "../dashboard.zip" dashboard
+          )
+
+          aws s3 cp \
+            "$DASHBOARD_ZIP" \
+            "s3://${ARTIFACT_BUCKET}/${DASHBOARD_KEY}" \
             --region "$AWS_REGION"
+
+          echo "Uploaded ${DASHBOARD_KEY}"
 
       - name: Deploy authentication API stack
         env:
@@ -301,7 +305,6 @@ jobs:
               "AuthorizerLambdaS3Key=artifacts/${GITHUB_SHA}/authorizer.zip" \
               "ProfileLambdaS3Key=artifacts/${GITHUB_SHA}/profile.zip" \
               "DoctorDomainLambdaS3Key=artifacts/${GITHUB_SHA}/doctor-domain.zip" \
-              "SlotMaterializerLambdaS3Key=artifacts/${GITHUB_SHA}/slot-materializer.zip" \
             --capabilities CAPABILITY_NAMED_IAM \
             --region "$AWS_REGION" \
             --no-fail-on-empty-changeset
@@ -323,48 +326,44 @@ jobs:
             --region "$AWS_REGION" \
             --no-fail-on-empty-changeset
 
-      - name: Initialize additive database schema
+      - name: Resolve authentication API base URL
+        id: api
         shell: bash
         run: |
           set -euo pipefail
-          aws lambda invoke \
-            --function-name "medislot-${ENVIRONMENT_NAME}-schema-init" \
-            --payload '{"confirm":"INITIALIZE_MEDISLOT_SCHEMA"}' \
-            --cli-binary-format raw-in-base64-out \
-            --region "$AWS_REGION" \
-            /tmp/schema-init-response.json
-          cat /tmp/schema-init-response.json
+          API_BASE_URL="$(aws cloudformation describe-stacks \
+            --stack-name "medislot-${ENVIRONMENT_NAME}-authentication" \
+            --query "Stacks[0].Outputs[?OutputKey=='RestApiBaseUrl'].OutputValue | [0]" \
+            --output text \
+            --region "$AWS_REGION")"
+          if [[ -z "$API_BASE_URL" || "$API_BASE_URL" == "None" ]]; then
+            echo "::error::RestApiBaseUrl output was not found in the authentication stack."
+            exit 1
+          fi
+          echo "url=${API_BASE_URL}" >> "$GITHUB_OUTPUT"
 
-      - name: Materialize initial 30-day doctor slot window
-        shell: bash
-        run: |
-          set -euo pipefail
-          aws lambda invoke \
-            --function-name "medislot-${ENVIRONMENT_NAME}-slot-materializer" \
-            --payload '{}' \
-            --cli-binary-format raw-in-base64-out \
-            --region "$AWS_REGION" \
-            /tmp/slot-materializer-response.json
-          cat /tmp/slot-materializer-response.json
-
-      - name: Deploy EC2 Flask doctor portal
+      - name: Deploy EC2 dashboard host
         env:
           ARTIFACT_BUCKET: ${{ steps.assets.outputs.bucket }}
+          API_BASE_URL: ${{ steps.api.outputs.url }}
         shell: bash
         run: |
           set -euo pipefail
+
           aws cloudformation deploy \
-            --stack-name "medislot-${ENVIRONMENT_NAME}-web" \
-            --template-file infrastructure/web.yaml \
+            --stack-name "medislot-${ENVIRONMENT_NAME}-dashboard" \
+            --template-file infrastructure/dashboard.yaml \
             --parameter-overrides \
               "EnvironmentName=${ENVIRONMENT_NAME}" \
-              "WebArtifactBucket=${ARTIFACT_BUCKET}" \
-              "WebArtifactKey=artifacts/${GITHUB_SHA}/medislot-web.zip" \
+              "DashboardArtifactBucket=${ARTIFACT_BUCKET}" \
+              "DashboardArtifactS3Key=artifacts/${GITHUB_SHA}/dashboard.zip" \
+              "ApiBaseUrl=${API_BASE_URL}" \
+              "InstanceType=t3.micro" \
             --capabilities CAPABILITY_NAMED_IAM \
             --region "$AWS_REGION" \
             --no-fail-on-empty-changeset
 
-      - name: Show API and schema initializer outputs
+      - name: Show deployment outputs
         shell: bash
         run: |
           set -euo pipefail
@@ -372,7 +371,7 @@ jobs:
           for stack in \
             "medislot-${ENVIRONMENT_NAME}-authentication" \
             "medislot-${ENVIRONMENT_NAME}-schema-init" \
-            "medislot-${ENVIRONMENT_NAME}-web"
+            "medislot-${ENVIRONMENT_NAME}-dashboard"
           do
             echo "Outputs for ${stack}"
 

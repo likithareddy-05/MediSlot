@@ -209,21 +209,18 @@ CREATE TABLE IF NOT EXISTS doctors (
 -- ============================================================
 -- END OF INITIAL AUTHENTICATION SCHEMA
 -- ============================================================
-
 -- ============================================================
--- MILESTONE 3: DOCTOR DOMAIN (additive migration; no existing table changes)
+-- MILESTONE 3: DOCTOR DOMAIN (additive; preserves Milestone 2)
 -- ============================================================
 
-CREATE TABLE IF NOT EXISTS doctor_settings (
+CREATE TABLE IF NOT EXISTS doctor_profile_assets (
     doctor_id BIGINT UNSIGNED NOT NULL,
-    home_timezone VARCHAR(64) NOT NULL DEFAULT 'Asia/Kolkata',
-    photo_key VARCHAR(512) NULL,
+    photo_key VARCHAR(512) NOT NULL,
     created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
-        ON UPDATE CURRENT_TIMESTAMP(6),
+    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
     PRIMARY KEY (doctor_id),
-    CONSTRAINT fk_doctor_settings_doctor FOREIGN KEY (doctor_id)
-        REFERENCES doctors (doctor_id) ON DELETE RESTRICT
+    CONSTRAINT fk_doctor_profile_assets_doctor FOREIGN KEY (doctor_id)
+        REFERENCES doctors (doctor_id) ON UPDATE RESTRICT ON DELETE RESTRICT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE IF NOT EXISTS consultation_types (
@@ -231,41 +228,43 @@ CREATE TABLE IF NOT EXISTS consultation_types (
     doctor_id BIGINT UNSIGNED NOT NULL,
     consultation_name VARCHAR(100) NOT NULL,
     duration_minutes SMALLINT UNSIGNED NOT NULL,
-    fee DECIMAL(10,2) NOT NULL,
+    fee DECIMAL(10,2) NOT NULL DEFAULT 0.00,
     slot_capacity SMALLINT UNSIGNED NOT NULL DEFAULT 1,
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
     created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
-        ON UPDATE CURRENT_TIMESTAMP(6),
+    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
     PRIMARY KEY (consultation_type_id),
     UNIQUE KEY uq_consultation_doctor_name (doctor_id, consultation_name),
     KEY idx_consultation_doctor_active (doctor_id, is_active),
-    CONSTRAINT fk_consultation_doctor FOREIGN KEY (doctor_id)
-        REFERENCES doctors (doctor_id) ON DELETE RESTRICT,
-    CONSTRAINT chk_consultation_duration CHECK (duration_minutes BETWEEN 5 AND 480),
+    CONSTRAINT fk_consultation_types_doctor FOREIGN KEY (doctor_id)
+        REFERENCES doctors (doctor_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    CONSTRAINT chk_consultation_duration CHECK (duration_minutes BETWEEN 5 AND 240),
     CONSTRAINT chk_consultation_fee CHECK (fee >= 0),
-    CONSTRAINT chk_consultation_capacity CHECK (slot_capacity BETWEEN 1 AND 100)
+    CONSTRAINT chk_consultation_capacity CHECK (slot_capacity BETWEEN 1 AND 50)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE IF NOT EXISTS availability_patterns (
     availability_pattern_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     doctor_id BIGINT UNSIGNED NOT NULL,
-    day_of_week TINYINT UNSIGNED NOT NULL COMMENT 'ISO weekday: Monday=1 ... Sunday=7',
+    consultation_type_id BIGINT UNSIGNED NULL,
+    weekday TINYINT UNSIGNED NOT NULL COMMENT 'Monday=0 through Sunday=6',
     start_time TIME NOT NULL,
     end_time TIME NOT NULL,
-    consultation_type_id BIGINT UNSIGNED NOT NULL,
+    timezone_name VARCHAR(64) NOT NULL COMMENT 'IANA timezone, e.g. America/New_York',
+    effective_from DATE NOT NULL,
+    effective_to DATE NULL,
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
     created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
-        ON UPDATE CURRENT_TIMESTAMP(6),
+    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
     PRIMARY KEY (availability_pattern_id),
-    KEY idx_availability_doctor_day (doctor_id, day_of_week, is_active),
+    KEY idx_availability_doctor_weekday (doctor_id, weekday, is_active),
     CONSTRAINT fk_availability_doctor FOREIGN KEY (doctor_id)
-        REFERENCES doctors (doctor_id) ON DELETE RESTRICT,
+        REFERENCES doctors (doctor_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
     CONSTRAINT fk_availability_consultation FOREIGN KEY (consultation_type_id)
-        REFERENCES consultation_types (consultation_type_id) ON DELETE RESTRICT,
-    CONSTRAINT chk_availability_day CHECK (day_of_week BETWEEN 1 AND 7),
-    CONSTRAINT chk_availability_time CHECK (end_time > start_time)
+        REFERENCES consultation_types (consultation_type_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    CONSTRAINT chk_availability_weekday CHECK (weekday BETWEEN 0 AND 6),
+    CONSTRAINT chk_availability_time CHECK (start_time < end_time),
+    CONSTRAINT chk_availability_dates CHECK (effective_to IS NULL OR effective_to >= effective_from)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE IF NOT EXISTS doctor_blackouts (
@@ -276,12 +275,17 @@ CREATE TABLE IF NOT EXISTS doctor_blackouts (
     created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
     PRIMARY KEY (blackout_id),
     UNIQUE KEY uq_doctor_blackout_date (doctor_id, blackout_date),
-    CONSTRAINT fk_blackout_doctor FOREIGN KEY (doctor_id)
-        REFERENCES doctors (doctor_id) ON DELETE RESTRICT
+    KEY idx_blackout_date (blackout_date),
+    CONSTRAINT fk_doctor_blackouts_doctor FOREIGN KEY (doctor_id)
+        REFERENCES doctors (doctor_id) ON UPDATE RESTRICT ON DELETE RESTRICT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
--- Minimal appointment shape used by the doctor day-view/outcome APIs.
--- Booking workflow can populate these rows in a later milestone.
+-- ============================================================
+-- MILESTONE 3: APPOINTMENTS AND REFUND LEDGER (additive)
+-- Minimal appointment shape used by the doctor day-view and outcome APIs.
+-- The patient booking workflow populates these rows in a later milestone.
+-- ============================================================
+
 CREATE TABLE IF NOT EXISTS appointments (
     appointment_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     doctor_id BIGINT UNSIGNED NOT NULL,
@@ -293,22 +297,20 @@ CREATE TABLE IF NOT EXISTS appointments (
     scheduled_start_utc DATETIME(6) NOT NULL,
     scheduled_end_utc DATETIME(6) NOT NULL,
     created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
-        ON UPDATE CURRENT_TIMESTAMP(6),
+    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
     PRIMARY KEY (appointment_id),
     UNIQUE KEY uq_appointment_slot_patient (slot_id, patient_id),
     KEY idx_appointments_doctor_start (doctor_id, scheduled_start_utc),
     KEY idx_appointments_doctor_status (doctor_id, status),
     CONSTRAINT fk_appointment_doctor FOREIGN KEY (doctor_id)
-        REFERENCES doctors (doctor_id) ON DELETE RESTRICT,
+        REFERENCES doctors (doctor_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
     CONSTRAINT fk_appointment_patient FOREIGN KEY (patient_id)
-        REFERENCES patients (patient_id) ON DELETE RESTRICT,
+        REFERENCES patients (patient_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
     CONSTRAINT fk_appointment_consultation FOREIGN KEY (consultation_type_id)
-        REFERENCES consultation_types (consultation_type_id) ON DELETE RESTRICT,
+        REFERENCES consultation_types (consultation_type_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
     CONSTRAINT chk_appointment_status CHECK (status IN ('BOOKED','CANCELLED','COMPLETED','NO_SHOW')),
     CONSTRAINT chk_appointment_outcome CHECK (outcome IS NULL OR outcome IN ('COMPLETED','NO_SHOW'))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
-
 
 CREATE TABLE IF NOT EXISTS refund_ledger (
     refund_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -319,16 +321,15 @@ CREATE TABLE IF NOT EXISTS refund_ledger (
     refund_status VARCHAR(20) NOT NULL DEFAULT 'PENDING',
     reason VARCHAR(255) NOT NULL DEFAULT 'DOCTOR_SLOT_CANCELLED',
     created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
-        ON UPDATE CURRENT_TIMESTAMP(6),
+    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
     PRIMARY KEY (refund_id),
     UNIQUE KEY uq_refund_appointment (appointment_id),
     CONSTRAINT fk_refund_appointment FOREIGN KEY (appointment_id)
-        REFERENCES appointments (appointment_id) ON DELETE RESTRICT,
+        REFERENCES appointments (appointment_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
     CONSTRAINT fk_refund_patient FOREIGN KEY (patient_id)
-        REFERENCES patients (patient_id) ON DELETE RESTRICT,
+        REFERENCES patients (patient_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
     CONSTRAINT fk_refund_doctor FOREIGN KEY (doctor_id)
-        REFERENCES doctors (doctor_id) ON DELETE RESTRICT,
+        REFERENCES doctors (doctor_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
     CONSTRAINT chk_refund_amount CHECK (refund_amount >= 0),
     CONSTRAINT chk_refund_status CHECK (refund_status IN ('PENDING','PROCESSING','REFUNDED','FAILED'))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;

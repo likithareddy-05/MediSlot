@@ -1,3 +1,4 @@
+
 AWSTemplateFormatVersion: "2010-09-09"
 
 Description: >
@@ -242,13 +243,13 @@ Resources:
 
   # ============================================================
   # VPC ENDPOINT SECURITY GROUP
-  # Allows HTTPS from Lambda functions to interface endpoints.
+  # Allows HTTPS from Lambda and dashboard EC2.
   # ============================================================
 
   VPCEndpointSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: Allow HTTPS from MediSlot Lambda functions to interface endpoints
+      GroupDescription: Allow HTTPS from MediSlot Lambda and dashboard EC2 to interface endpoints
       VpcId: !Ref MediSlotVPC
       SecurityGroupIngress:
         - Description: HTTPS from backend Lambda security group
@@ -256,6 +257,13 @@ Resources:
           FromPort: 443
           ToPort: 443
           SourceSecurityGroupId: !Ref LambdaSecurityGroup
+
+        - Description: HTTPS from dashboard EC2 security group
+          IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          SourceSecurityGroupId: !Ref EC2SecurityGroup
+
       Tags:
         - Key: Name
           Value: !Sub "medislot-${EnvironmentName}-vpc-endpoints-sg"
@@ -266,7 +274,6 @@ Resources:
 
   # ============================================================
   # S3 GATEWAY ENDPOINT
-  # Provides private S3 access through the private route table.
   # ============================================================
 
   S3GatewayEndpoint:
@@ -287,7 +294,6 @@ Resources:
 
   # ============================================================
   # DYNAMODB GATEWAY ENDPOINT
-  # Private access to refresh-token and slot-coordination tables.
   # ============================================================
 
   DynamoDBGatewayEndpoint:
@@ -331,8 +337,32 @@ Resources:
           Value: MediSlot
 
   # ============================================================
+  # SSM MESSAGES INTERFACE ENDPOINT
+  # Required for Session Manager interactive sessions.
+  # ============================================================
+
+  SSMMessagesInterfaceEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref MediSlotVPC
+      VpcEndpointType: Interface
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ssmmessages"
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnetA
+        - !Ref PrivateSubnetB
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub "medislot-${EnvironmentName}-ssmmessages-endpoint"
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Project
+          Value: MediSlot
+
+  # ============================================================
   # SECRETS MANAGER INTERFACE ENDPOINT
-  # Allows private Lambdas to retrieve RDS credentials.
   # ============================================================
 
   SecretsManagerInterfaceEndpoint:
@@ -357,7 +387,6 @@ Resources:
 
   # ============================================================
   # SNS INTERFACE ENDPOINT
-  # Allows private workloads to call SNS APIs.
   # ============================================================
 
   SNSInterfaceEndpoint:
@@ -382,7 +411,6 @@ Resources:
 
   # ============================================================
   # EVENTBRIDGE INTERFACE ENDPOINT
-  # Allows private workloads to call EventBridge APIs.
   # ============================================================
 
   EventBridgeInterfaceEndpoint:
@@ -407,7 +435,6 @@ Resources:
 
   # ============================================================
   # CLOUDWATCH LOGS INTERFACE ENDPOINT
-  # Allows private Lambda functions to send logs to CloudWatch.
   # ============================================================
 
   CloudWatchLogsInterfaceEndpoint:
@@ -432,7 +459,6 @@ Resources:
 
   # ============================================================
   # SQS INTERFACE ENDPOINT
-  # Allows private Lambda functions to call SQS APIs without NAT.
   # ============================================================
 
   SQSInterfaceEndpoint:
@@ -457,7 +483,6 @@ Resources:
 
   # ============================================================
   # STEP FUNCTIONS INTERFACE ENDPOINT
-  # Allows private Lambda functions to call Step Functions APIs.
   # ============================================================
 
   StepFunctionsInterfaceEndpoint:
@@ -483,21 +508,6 @@ Resources:
 # ============================================================
 # OUTPUTS
 # ============================================================
-
-  # Lambda interface endpoint lets private doctor-domain Lambdas invoke the
-  # slot materialiser without a NAT Gateway.
-  LambdaInterfaceEndpoint:
-    Type: AWS::EC2::VPCEndpoint
-    Properties:
-      VpcId: !Ref MediSlotVPC
-      VpcEndpointType: Interface
-      ServiceName: !Sub com.amazonaws.${AWS::Region}.lambda
-      PrivateDnsEnabled: true
-      SubnetIds:
-        - !Ref PrivateSubnetA
-        - !Ref PrivateSubnetB
-      SecurityGroupIds:
-        - !Ref VPCEndpointSecurityGroup
 
 Outputs:
 
@@ -557,10 +567,6 @@ Outputs:
     Export:
       Name: !Sub "medislot-${EnvironmentName}-VPCEndpointSecurityGroupId"
 
-  LambdaInterfaceEndpointId:
-    Description: Lambda API interface endpoint used by private Lambdas
-    Value: !Ref LambdaInterfaceEndpoint
-
   S3GatewayEndpointId:
     Description: S3 gateway endpoint ID
     Value: !Ref S3GatewayEndpoint
@@ -572,6 +578,10 @@ Outputs:
   SSMInterfaceEndpointId:
     Description: SSM Parameter Store interface endpoint ID
     Value: !Ref SSMInterfaceEndpoint
+
+  SSMMessagesInterfaceEndpointId:
+    Description: Systems Manager messaging endpoint ID
+    Value: !Ref SSMMessagesInterfaceEndpoint
 
   SecretsManagerInterfaceEndpointId:
     Description: Secrets Manager interface endpoint ID

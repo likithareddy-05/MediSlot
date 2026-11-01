@@ -204,9 +204,27 @@ def _handle_api(event, context):
                 return response(200, {"consultation_types": cur.fetchall()})
             if path == "/consultation-types" and method == "POST":
                 name = _required(body, "consultation_name")
+                consultation_rules = {
+                    "Quick Consult": (15, 1),
+                    "Standard Consult": (30, 1),
+                    "Detailed Consult": (60, 1),
+                    "Health Camp Session": (60, None),
+                }
+                if name not in consultation_rules:
+                    raise ValueError("Choose one of the four approved consultation types")
                 duration, fee, capacity = int(_required(body, "duration_minutes")), float(_required(body, "fee")), int(_required(body, "slot_capacity"))
-                if not 5 <= duration <= 240 or fee < 0 or not 1 <= capacity <= 50:
-                    raise ValueError("duration_minutes must be 5-240, fee >= 0 and slot_capacity 1-50")
+                required_duration, fixed_capacity = consultation_rules[name]
+                if duration != required_duration:
+                    raise ValueError(f"{name} duration must be {required_duration} minutes")
+                if fee < 0:
+                    raise ValueError("fee must be zero or greater")
+                if fixed_capacity is not None and capacity != fixed_capacity:
+                    raise ValueError(f"{name} slot capacity must be 1")
+                if fixed_capacity is None and not 2 <= capacity <= 10:
+                    raise ValueError("Health Camp Session capacity must be between 2 and 10")
+                cur.execute("SELECT 1 FROM consultation_types WHERE doctor_id=%s AND consultation_name=%s LIMIT 1", (doctor_id,name))
+                if cur.fetchone():
+                    raise ValueError("This consultation type already exists in your account")
                 cur.execute("INSERT INTO consultation_types (doctor_id,consultation_name,duration_minutes,fee,slot_capacity,is_active) VALUES (%s,%s,%s,%s,%s,1)", (doctor_id,name,duration,fee,capacity))
                 conn.commit()
                 return response(201, {"message": "Consultation type created", "consultation_type_id": cur.lastrowid})
@@ -215,12 +233,25 @@ def _handle_api(event, context):
             if match and method in {"PUT", "PATCH"}:
                 fields = {k: body[k] for k in ("consultation_name", "duration_minutes", "fee", "slot_capacity", "is_active") if k in body}
                 if not fields: raise ValueError("Provide consultation fields to update")
+                cur.execute("SELECT consultation_name,duration_minutes,slot_capacity FROM consultation_types WHERE consultation_type_id=%s AND doctor_id=%s", (int(match.group(1)),doctor_id))
+                current = cur.fetchone()
+                if not current: return response(404, {"message": "Consultation type not found"})
                 for k in ("duration_minutes", "slot_capacity"):
                     if k in fields: fields[k] = int(fields[k])
                 if "fee" in fields: fields["fee"] = float(fields["fee"])
-                if "duration_minutes" in fields and not 5 <= fields["duration_minutes"] <= 240: raise ValueError("duration_minutes must be 5-240")
-                if "slot_capacity" in fields and not 1 <= fields["slot_capacity"] <= 50: raise ValueError("slot_capacity must be 1-50")
+                name = fields.get("consultation_name", current["consultation_name"])
+                rules = {"Quick Consult": (15, 1), "Standard Consult": (30, 1), "Detailed Consult": (60, 1), "Health Camp Session": (60, None)}
+                if name not in rules: raise ValueError("Choose one of the four approved consultation types")
+                duration = fields.get("duration_minutes", int(current["duration_minutes"]))
+                capacity = fields.get("slot_capacity", int(current["slot_capacity"]))
+                required_duration, fixed_capacity = rules[name]
+                if duration != required_duration: raise ValueError(f"{name} duration must be {required_duration} minutes")
+                if fixed_capacity is not None and capacity != fixed_capacity: raise ValueError(f"{name} slot capacity must be 1")
+                if fixed_capacity is None and not 2 <= capacity <= 10: raise ValueError("Health Camp Session capacity must be between 2 and 10")
                 if "fee" in fields and fields["fee"] < 0: raise ValueError("fee cannot be negative")
+                if "consultation_name" in fields:
+                    cur.execute("SELECT 1 FROM consultation_types WHERE doctor_id=%s AND consultation_name=%s AND consultation_type_id<>%s LIMIT 1", (doctor_id,name,int(match.group(1))))
+                    if cur.fetchone(): raise ValueError("This consultation type already exists in your account")
                 cur.execute("UPDATE consultation_types SET " + ",".join(f"{k}=%s" for k in fields) + " WHERE consultation_type_id=%s AND doctor_id=%s", list(fields.values())+[int(match.group(1)),doctor_id])
                 if cur.rowcount == 0: return response(404, {"message": "Consultation type not found"})
                 conn.commit(); return response(200, {"message": "Consultation type updated"})

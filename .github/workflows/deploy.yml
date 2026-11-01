@@ -54,6 +54,10 @@ jobs:
             infrastructure/security.yaml \
             infrastructure/authentication.yaml \
             infrastructure/schema-init.yaml \
+            infrastructure/dashboard.yaml \
+            dashboard/app.py \
+            dashboard/doctor_dashboard.html \
+            dashboard/requirements.txt \
             src/lambdas/auth_handler.py \
             src/lambdas/register.py \
             src/lambdas/refresh.py \
@@ -93,7 +97,8 @@ jobs:
             infrastructure/data.yaml \
             infrastructure/security.yaml \
             infrastructure/authentication.yaml \
-            infrastructure/schema-init.yaml
+            infrastructure/schema-init.yaml \
+            infrastructure/dashboard.yaml
           do
             echo "Validating ${template}"
 
@@ -262,6 +267,27 @@ jobs:
 
           echo "Uploaded ${SCHEMA_KEY}"
 
+          # Package the single-file doctor dashboard and its Flask host.
+          DASHBOARD_DIR="build/dashboard-package"
+          DASHBOARD_ZIP="build/dashboard.zip"
+          DASHBOARD_KEY="artifacts/${GITHUB_SHA}/dashboard.zip"
+
+          rm -rf "$DASHBOARD_DIR"
+          mkdir -p "$DASHBOARD_DIR"
+          cp -R dashboard "$DASHBOARD_DIR/"
+          rm -f "$DASHBOARD_ZIP"
+          (
+            cd "$DASHBOARD_DIR"
+            zip -qr "../dashboard.zip" dashboard
+          )
+
+          aws s3 cp \
+            "$DASHBOARD_ZIP" \
+            "s3://${ARTIFACT_BUCKET}/${DASHBOARD_KEY}" \
+            --region "$AWS_REGION"
+
+          echo "Uploaded ${DASHBOARD_KEY}"
+
       - name: Deploy authentication API stack
         env:
           ARTIFACT_BUCKET: ${{ steps.assets.outputs.bucket }}
@@ -300,14 +326,34 @@ jobs:
             --region "$AWS_REGION" \
             --no-fail-on-empty-changeset
 
-      - name: Show API and schema initializer outputs
+      - name: Deploy EC2 dashboard host
+        env:
+          ARTIFACT_BUCKET: ${{ steps.assets.outputs.bucket }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          aws cloudformation deploy \
+            --stack-name "medislot-${ENVIRONMENT_NAME}-dashboard" \
+            --template-file infrastructure/dashboard.yaml \
+            --parameter-overrides \
+              "EnvironmentName=${ENVIRONMENT_NAME}" \
+              "DashboardArtifactBucket=${ARTIFACT_BUCKET}" \
+              "DashboardArtifactS3Key=artifacts/${GITHUB_SHA}/dashboard.zip" \
+              "InstanceType=t3.micro" \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --region "$AWS_REGION" \
+            --no-fail-on-empty-changeset
+
+      - name: Show deployment outputs
         shell: bash
         run: |
           set -euo pipefail
 
           for stack in \
             "medislot-${ENVIRONMENT_NAME}-authentication" \
-            "medislot-${ENVIRONMENT_NAME}-schema-init"
+            "medislot-${ENVIRONMENT_NAME}-schema-init" \
+            "medislot-${ENVIRONMENT_NAME}-dashboard"
           do
             echo "Outputs for ${stack}"
 

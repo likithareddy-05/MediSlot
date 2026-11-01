@@ -90,6 +90,27 @@ def bff_session():
     return jsonify({"authenticated": True, "csrf_token": session["csrf_token"], "user": session.get("user", {})})
 
 
+@app.post("/bff/register")
+def bff_register():
+    """Register a doctor through the existing API Gateway auth/register route."""
+    if not _csrf_valid():
+        return jsonify({"message": "Your session expired. Refresh the page and try again."}), 403
+
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify({"message": "Invalid registration data."}), 400
+
+    # This portal creates doctor accounts only; the browser cannot choose another role.
+    payload["role"] = "DOCTOR"
+    try:
+        response = _api_call("auth/register", "POST", body=payload)
+    except requests.RequestException:
+        app.logger.exception("Doctor registration API request failed")
+        return jsonify({"message": "Unable to reach the registration service. Please try again."}), 502
+
+    return _json_response(response)
+
+
 @app.post("/bff/login")
 def bff_login():
     if not _csrf_valid():

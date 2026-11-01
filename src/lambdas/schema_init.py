@@ -79,14 +79,14 @@ def lambda_handler(event, context):
                 SELECT TABLE_NAME
                 FROM information_schema.tables
                 WHERE TABLE_SCHEMA = %s
-                  AND TABLE_NAME IN ('users', 'patients', 'doctors')
+                  AND TABLE_NAME IN ('users', 'patients', 'doctors', 'doctor_settings', 'consultation_types', 'availability_patterns', 'doctor_blackouts', 'appointments', 'refund_ledger')
                 ORDER BY TABLE_NAME
                 """,
                 (database,),
             )
             tables = [row[0] for row in cursor.fetchall()]
 
-        expected = {"users", "patients", "doctors"}
+        expected = {"users", "patients", "doctors", "doctor_settings", "consultation_types", "availability_patterns", "doctor_blackouts", "appointments", "refund_ledger"}
         missing = sorted(expected - set(tables))
 
         if missing:

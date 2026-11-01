@@ -54,6 +54,7 @@ jobs:
             infrastructure/security.yaml \
             infrastructure/authentication.yaml \
             infrastructure/schema-init.yaml \
+            infrastructure/web.yaml \
             src/lambdas/auth_handler.py \
             src/lambdas/register.py \
             src/lambdas/refresh.py \
@@ -61,7 +62,13 @@ jobs:
             src/lambdas/authorizer.py \
             src/lambdas/profile.py \
             src/lambdas/schema_init.py \
+            src/lambdas/doctor_domain.py \
+            src/lambdas/slot_materializer.py \
+            src/lambdas/slot_time.py \
             src/lambdas/requirements.txt \
+            web/app.py \
+            web/templates/portal.html \
+            tests/test_slot_time.py \
             database/schema.sql
           do
             if [[ ! -f "$file" ]]; then
@@ -89,7 +96,8 @@ jobs:
             infrastructure/data.yaml \
             infrastructure/security.yaml \
             infrastructure/authentication.yaml \
-            infrastructure/schema-init.yaml
+            infrastructure/schema-init.yaml \
+            infrastructure/web.yaml
           do
             echo "Validating ${template}"
 
@@ -165,6 +173,9 @@ jobs:
           set -euo pipefail
           python -m compileall -q src/lambdas
 
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v
+
       - name: Package and upload Lambda artifacts
         env:
           ARTIFACT_BUCKET: ${{ steps.assets.outputs.bucket }}
@@ -223,6 +234,10 @@ jobs:
           # Existing profile Lambda.
           package_lambda profile profile.py
 
+          # Milestone 3 doctor APIs and daily materialiser.
+          package_lambda doctor-domain doctor_domain.py
+          package_lambda slot-materializer slot_materializer.py slot_time.py
+
           # One-time database schema initializer.
           # It needs PyMySQL and the SQL file, not the full app dependencies.
           SCHEMA_DIR="build/schema-init"
@@ -254,6 +269,21 @@ jobs:
 
           echo "Uploaded ${SCHEMA_KEY}"
 
+      - name: Package and upload Flask doctor web application
+        env:
+          ARTIFACT_BUCKET: ${{ steps.assets.outputs.bucket }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/web
+          cp web/app.py web/requirements.txt build/web/
+          mkdir -p build/web/templates
+          cp web/templates/portal.html build/web/templates/
+          (cd build/web && zip -qr ../medislot-web.zip .)
+          aws s3 cp build/medislot-web.zip \
+            "s3://${ARTIFACT_BUCKET}/artifacts/${GITHUB_SHA}/medislot-web.zip" \
+            --region "$AWS_REGION"
+
       - name: Deploy authentication API stack
         env:
           ARTIFACT_BUCKET: ${{ steps.assets.outputs.bucket }}
@@ -270,6 +300,8 @@ jobs:
               "AuthLambdaS3Key=artifacts/${GITHUB_SHA}/auth.zip" \
               "AuthorizerLambdaS3Key=artifacts/${GITHUB_SHA}/authorizer.zip" \
               "ProfileLambdaS3Key=artifacts/${GITHUB_SHA}/profile.zip" \
+              "DoctorDomainLambdaS3Key=artifacts/${GITHUB_SHA}/doctor-domain.zip" \
+              "SlotMaterializerLambdaS3Key=artifacts/${GITHUB_SHA}/slot-materializer.zip" \
             --capabilities CAPABILITY_NAMED_IAM \
             --region "$AWS_REGION" \
             --no-fail-on-empty-changeset
@@ -291,6 +323,47 @@ jobs:
             --region "$AWS_REGION" \
             --no-fail-on-empty-changeset
 
+      - name: Initialize additive database schema
+        shell: bash
+        run: |
+          set -euo pipefail
+          aws lambda invoke \
+            --function-name "medislot-${ENVIRONMENT_NAME}-schema-init" \
+            --payload '{"confirm":"INITIALIZE_MEDISLOT_SCHEMA"}' \
+            --cli-binary-format raw-in-base64-out \
+            --region "$AWS_REGION" \
+            /tmp/schema-init-response.json
+          cat /tmp/schema-init-response.json
+
+      - name: Materialize initial 30-day doctor slot window
+        shell: bash
+        run: |
+          set -euo pipefail
+          aws lambda invoke \
+            --function-name "medislot-${ENVIRONMENT_NAME}-slot-materializer" \
+            --payload '{}' \
+            --cli-binary-format raw-in-base64-out \
+            --region "$AWS_REGION" \
+            /tmp/slot-materializer-response.json
+          cat /tmp/slot-materializer-response.json
+
+      - name: Deploy EC2 Flask doctor portal
+        env:
+          ARTIFACT_BUCKET: ${{ steps.assets.outputs.bucket }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          aws cloudformation deploy \
+            --stack-name "medislot-${ENVIRONMENT_NAME}-web" \
+            --template-file infrastructure/web.yaml \
+            --parameter-overrides \
+              "EnvironmentName=${ENVIRONMENT_NAME}" \
+              "WebArtifactBucket=${ARTIFACT_BUCKET}" \
+              "WebArtifactKey=artifacts/${GITHUB_SHA}/medislot-web.zip" \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --region "$AWS_REGION" \
+            --no-fail-on-empty-changeset
+
       - name: Show API and schema initializer outputs
         shell: bash
         run: |
@@ -298,7 +371,8 @@ jobs:
 
           for stack in \
             "medislot-${ENVIRONMENT_NAME}-authentication" \
-            "medislot-${ENVIRONMENT_NAME}-schema-init"
+            "medislot-${ENVIRONMENT_NAME}-schema-init" \
+            "medislot-${ENVIRONMENT_NAME}-web"
           do
             echo "Outputs for ${stack}"
 

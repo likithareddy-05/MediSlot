@@ -484,6 +484,21 @@ Resources:
 # OUTPUTS
 # ============================================================
 
+  # Lambda interface endpoint lets private doctor-domain Lambdas invoke the
+  # slot materialiser without a NAT Gateway.
+  LambdaInterfaceEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref MediSlotVPC
+      VpcEndpointType: Interface
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.lambda
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnetA
+        - !Ref PrivateSubnetB
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+
 Outputs:
 
   VpcId:
@@ -541,6 +556,10 @@ Outputs:
     Value: !Ref VPCEndpointSecurityGroup
     Export:
       Name: !Sub "medislot-${EnvironmentName}-VPCEndpointSecurityGroupId"
+
+  LambdaInterfaceEndpointId:
+    Description: Lambda API interface endpoint used by private Lambdas
+    Value: !Ref LambdaInterfaceEndpoint
 
   S3GatewayEndpointId:
     Description: S3 gateway endpoint ID

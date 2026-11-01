@@ -1,0 +1,90 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: MediSlot single EC2 Flask web application for doctor portal (Milestone 3)
+Parameters:
+  EnvironmentName:
+    Type: String
+    AllowedValues: [dev, test, prod]
+  WebArtifactBucket:
+    Type: String
+  WebArtifactKey:
+    Type: String
+Resources:
+  DoctorWebRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub medislot-${EnvironmentName}-doctor-web-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: ec2.amazonaws.com}
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: DownloadWebArtifact
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub arn:${AWS::Partition}:s3:::${WebArtifactBucket}/${WebArtifactKey}
+  DoctorWebInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref DoctorWebRole]
+  DoctorWebInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t2.micro
+      ImageId: "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}"
+      IamInstanceProfile: !Ref DoctorWebInstanceProfile
+      SubnetId:
+        Fn::ImportValue: !Sub medislot-${EnvironmentName}-PublicSubnetId
+      SecurityGroupIds:
+        - Fn::ImportValue: !Sub medislot-${EnvironmentName}-EC2SecurityGroupId
+      Tags:
+        - Key: Name
+          Value: !Sub medislot-${EnvironmentName}-doctor-web
+        - Key: Project
+          Value: MediSlot
+      UserData:
+        Fn::Base64: !Sub
+          - |
+            #!/bin/bash
+            set -eux
+            dnf update -y
+            dnf install -y python3 python3-pip unzip
+            mkdir -p /opt/medislot /var/lib/medislot/sessions
+            chmod 700 /var/lib/medislot/sessions
+            aws s3 cp s3://${WebArtifactBucket}/${WebArtifactKey} /tmp/medislot-web.zip --region ${AWS::Region}
+            unzip -o /tmp/medislot-web.zip -d /opt/medislot
+            python3 -m venv /opt/medislot/.venv
+            /opt/medislot/.venv/bin/pip install --upgrade pip
+            /opt/medislot/.venv/bin/pip install -r /opt/medislot/requirements.txt
+            FLASK_SECRET=$(openssl rand -hex 32)
+            cat >/etc/systemd/system/medislot-web.service <<EOF
+            [Unit]
+            Description=MediSlot Flask Web
+            After=network.target
+            [Service]
+            WorkingDirectory=/opt/medislot
+            Environment="MEDISLOT_API_BASE=${ApiBase}"
+            Environment="FLASK_SECRET_KEY=$FLASK_SECRET"
+            Environment="COOKIE_SECURE=false"
+            ExecStart=/opt/medislot/.venv/bin/gunicorn --workers 2 --bind 0.0.0.0:80 app:app
+            Restart=always
+            User=root
+            [Install]
+            WantedBy=multi-user.target
+            EOF
+            systemctl daemon-reload
+            systemctl enable medislot-web
+            systemctl start medislot-web
+          - ApiBase:
+              Fn::ImportValue: !Sub medislot-${EnvironmentName}-RestApiBaseUrl
+Outputs:
+  DoctorWebPublicIp:
+    Description: Public IP of the single Flask EC2 instance
+    Value: !GetAtt DoctorWebInstance.PublicIp
+  DoctorWebUrl:
+    Description: Doctor portal URL (HTTP; configure HTTPS before production use)
+    Value: !Sub http://${DoctorWebInstance.PublicDnsName}

@@ -17,6 +17,10 @@ Parameters:
     Type: String
     Description: S3 object key for the packaged dashboard application.
 
+  ApiBaseUrl:
+    Type: String
+    Description: Base URL exported by the authentication API stack, including the stage.
+
   InstanceType:
     Type: String
     Default: t3.micro
@@ -93,10 +97,20 @@ Resources:
           dnf update -y
           dnf install -y python3 python3-pip nginx unzip awscli-2
 
-          mkdir -p /opt/medislot
+          mkdir -p /opt/medislot /var/lib/medislot/sessions
           aws s3 cp "s3://${DashboardArtifactBucket}/${DashboardArtifactS3Key}" /tmp/medislot-dashboard.zip --region ${AWS::Region}
           unzip -o /tmp/medislot-dashboard.zip -d /opt/medislot
           chown -R ec2-user:ec2-user /opt/medislot
+          chown -R ec2-user:ec2-user /var/lib/medislot
+
+          cat > /etc/medislot-dashboard.env <<ENVVARS
+          MEDISLOT_API_BASE_URL=${ApiBaseUrl}
+          FLASK_SECRET_KEY=$(openssl rand -hex 32)
+          SESSION_FILE_DIR=/var/lib/medislot/sessions
+          SESSION_COOKIE_SECURE=false
+          ENVVARS
+          chown root:ec2-user /etc/medislot-dashboard.env
+          chmod 640 /etc/medislot-dashboard.env
 
           python3 -m venv /opt/medislot/.venv
           /opt/medislot/.venv/bin/pip install --upgrade pip
@@ -113,6 +127,7 @@ Resources:
           User=ec2-user
           Group=ec2-user
           WorkingDirectory=/opt/medislot
+          EnvironmentFile=/etc/medislot-dashboard.env
           ExecStart=/opt/medislot/.venv/bin/gunicorn --workers 2 --bind 127.0.0.1:8000 dashboard.app:app
           Restart=always
           RestartSec=5

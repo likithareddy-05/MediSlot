@@ -326,9 +326,26 @@ jobs:
             --region "$AWS_REGION" \
             --no-fail-on-empty-changeset
 
+      - name: Resolve authentication API base URL
+        id: api
+        shell: bash
+        run: |
+          set -euo pipefail
+          API_BASE_URL="$(aws cloudformation describe-stacks \
+            --stack-name "medislot-${ENVIRONMENT_NAME}-authentication" \
+            --query "Stacks[0].Outputs[?OutputKey=='RestApiBaseUrl'].OutputValue | [0]" \
+            --output text \
+            --region "$AWS_REGION")"
+          if [[ -z "$API_BASE_URL" || "$API_BASE_URL" == "None" ]]; then
+            echo "::error::RestApiBaseUrl output was not found in the authentication stack."
+            exit 1
+          fi
+          echo "url=${API_BASE_URL}" >> "$GITHUB_OUTPUT"
+
       - name: Deploy EC2 dashboard host
         env:
           ARTIFACT_BUCKET: ${{ steps.assets.outputs.bucket }}
+          API_BASE_URL: ${{ steps.api.outputs.url }}
         shell: bash
         run: |
           set -euo pipefail
@@ -340,6 +357,7 @@ jobs:
               "EnvironmentName=${ENVIRONMENT_NAME}" \
               "DashboardArtifactBucket=${ARTIFACT_BUCKET}" \
               "DashboardArtifactS3Key=artifacts/${GITHUB_SHA}/dashboard.zip" \
+              "ApiBaseUrl=${API_BASE_URL}" \
               "InstanceType=t3.micro" \
             --capabilities CAPABILITY_NAMED_IAM \
             --region "$AWS_REGION" \

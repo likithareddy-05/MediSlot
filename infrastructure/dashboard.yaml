@@ -1,7 +1,7 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
-  MediSlot doctor dashboard EC2 host with an HTTPS CloudFront front door.
-  CloudFront terminates TLS using its managed distribution certificate.
+  MediSlot doctor dashboard EC2 host with an HTTPS API Gateway HTTP API front door.
+  API Gateway terminates TLS using its AWS-managed execute-api certificate.
 
 Parameters:
   EnvironmentName:
@@ -146,52 +146,69 @@ Resources:
         - Key: Environment
           Value: !Ref EnvironmentName
 
-  DashboardDistribution:
-    Type: AWS::CloudFront::Distribution
-    DependsOn: DashboardInstance
+  DashboardHttpApi:
+    Type: AWS::ApiGatewayV2::Api
     Properties:
-      DistributionConfig:
-        Enabled: true
-        Comment: !Sub MediSlot ${EnvironmentName} doctor dashboard HTTPS distribution
-        PriceClass: PriceClass_100
-        HttpVersion: http2and3
-        IPV6Enabled: true
-        Origins:
-          - Id: MediSlotDashboardOrigin
-            DomainName: !GetAtt DashboardInstance.PublicDnsName
-            CustomOriginConfig:
-              HTTPPort: 80
-              HTTPSPort: 443
-              OriginProtocolPolicy: http-only
-              OriginKeepaliveTimeout: 60
-              OriginReadTimeout: 60
-        DefaultCacheBehavior:
-          TargetOriginId: MediSlotDashboardOrigin
-          ViewerProtocolPolicy: redirect-to-https
-          AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
-          CachedMethods: [GET, HEAD, OPTIONS]
-          Compress: true
-          CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
-          OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eafa07d3
-        Restrictions:
-          GeoRestriction:
-            RestrictionType: none
-        ViewerCertificate:
-          CloudFrontDefaultCertificate: true
+      Name: !Sub medislot-${EnvironmentName}-dashboard-https
+      ProtocolType: HTTP
+      Tags:
+        Project: MediSlot
+        Environment: !Ref EnvironmentName
+
+  DashboardIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref DashboardHttpApi
+      IntegrationType: HTTP_PROXY
+      IntegrationMethod: ANY
+      IntegrationUri: !Sub http://${DashboardInstance.PublicDnsName}/{proxy}
+      PayloadFormatVersion: "1.0"
+      TimeoutInMillis: 30000
+
+  DashboardRootIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref DashboardHttpApi
+      IntegrationType: HTTP_PROXY
+      IntegrationMethod: ANY
+      IntegrationUri: !Sub http://${DashboardInstance.PublicDnsName}/
+      PayloadFormatVersion: "1.0"
+      TimeoutInMillis: 30000
+
+  DashboardProxyRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref DashboardHttpApi
+      RouteKey: "ANY /{proxy+}"
+      Target: !Sub integrations/${DashboardIntegration}
+
+  DashboardRootRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref DashboardHttpApi
+      RouteKey: "ANY /"
+      Target: !Sub integrations/${DashboardRootIntegration}
+
+  DashboardStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref DashboardHttpApi
+      StageName: $default
+      AutoDeploy: true
 
 Outputs:
   DashboardInstanceId:
     Description: EC2 instance hosting the MediSlot dashboard.
     Value: !Ref DashboardInstance
   DashboardPublicIp:
-    Description: EC2 origin IPv4 address (HTTP origin; use HTTPS CloudFront URL in browsers).
+    Description: EC2 origin IPv4 address (HTTP origin; use HTTPS API Gateway URL in browsers).
     Value: !GetAtt DashboardInstance.PublicIp
   DashboardPublicDns:
     Description: EC2 origin DNS name.
     Value: !GetAtt DashboardInstance.PublicDnsName
-  DashboardDistributionDomain:
-    Description: CloudFront HTTPS distribution domain.
-    Value: !GetAtt DashboardDistribution.DomainName
+  DashboardApiEndpoint:
+    Description: API Gateway HTTPS endpoint domain.
+    Value: !Sub ${DashboardHttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}
   DashboardUrl:
     Description: Secure HTTPS URL for the MediSlot doctor dashboard.
-    Value: !Sub https://${DashboardDistribution.DomainName}/doctor/dashboard
+    Value: !Sub https://${DashboardHttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/doctor/dashboard

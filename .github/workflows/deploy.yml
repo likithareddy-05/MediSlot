@@ -13,69 +13,42 @@ concurrency:
 
 jobs:
   deploy-infrastructure:
-    name: Deploy MediSlot Infrastructure
+    name: Deploy MediSlot
     runs-on: ubuntu-latest
-
-    # Deploy only when manually triggered from the feature branch.
     if: github.ref == 'refs/heads/feature'
-
     env:
       AWS_REGION: ${{ vars.AWS_REGION }}
       ENVIRONMENT_NAME: ${{ vars.ENVIRONMENT_NAME }}
-      AWS_ROLE_TO_ASSUME: ${{ secrets.AWS_ROLE_ARN }}
+      ARTIFACT_BUCKET: ''
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Validate deployment configuration
+      - name: Validate deployment configuration and files
         shell: bash
         run: |
           set -euo pipefail
-
-          for name in AWS_REGION ENVIRONMENT_NAME AWS_ROLE_TO_ASSUME; do
+          for name in AWS_REGION ENVIRONMENT_NAME; do
             if [[ -z "${!name:-}" || "${!name}" == "null" ]]; then
-              echo "::error::Missing GitHub Actions configuration: ${name}"
+              echo "::error::Missing GitHub repository variable: ${name}"
               exit 1
             fi
           done
-
-          case "$ENVIRONMENT_NAME" in
-            dev|test|prod) ;;
-            *)
-              echo "::error::ENVIRONMENT_NAME must be dev, test, or prod."
-              exit 1
-              ;;
-          esac
-
+          case "$ENVIRONMENT_NAME" in dev|test|prod) ;; *) echo "::error::ENVIRONMENT_NAME must be dev, test, or prod"; exit 1 ;; esac
+          [[ "$AWS_REGION" == "ap-south-1" ]] || { echo "::error::Set AWS_REGION repository variable to ap-south-1 for this MediSlot deployment."; exit 1; }
+          test -n "${{ secrets.AWS_ROLE_ARN }}" || { echo '::error::Missing AWS_ROLE_ARN secret'; exit 1; }
           for file in \
-            infrastructure/network.yaml \
-            infrastructure/data.yaml \
-            infrastructure/security.yaml \
-            infrastructure/authentication.yaml \
-            infrastructure/schema-init.yaml \
-            infrastructure/dashboard.yaml \
-            dashboard/app.py \
-            dashboard/doctor_dashboard.html \
-            dashboard/requirements.txt \
-            src/lambdas/auth_handler.py \
-            src/lambdas/register.py \
-            src/lambdas/refresh.py \
-            src/lambdas/logout.py \
-            src/lambdas/authorizer.py \
-            src/lambdas/profile.py \
-            src/lambdas/schema_init.py \
-            src/lambdas/doctor_domain.py \
-            src/lambdas/slot_time.py \
-            src/lambdas/requirements.txt \
-            tests/test_dst_materializer.py \
-            tests/test_slot_idempotency.py \
-            database/schema.sql
-          do
-            if [[ ! -f "$file" ]]; then
-              echo "::error::Required file is missing: $file"
-              exit 1
-            fi
+            infrastructure/network.yaml infrastructure/data.yaml infrastructure/security.yaml \
+            infrastructure/authentication.yaml infrastructure/schema-init.yaml infrastructure/dashboard.yaml \
+            src/lambdas/auth_handler.py src/lambdas/register.py src/lambdas/refresh.py \
+            src/lambdas/logout.py src/lambdas/authorizer.py src/lambdas/profile.py \
+            src/lambdas/schema_init.py src/lambdas/doctor_domain.py \
+            src/lambdas/slot_materializer.py src/lambdas/slot_time.py \
+            src/lambdas/requirements.txt database/schema.sql \
+            dashboard/app.py dashboard/doctor_dashboard.html dashboard/requirements.txt \
+            tests/test_dst_materializer.py tests/test_slot_idempotency.py; do
+            test -f "$file" || { echo "::error::Missing required file: $file"; exit 1; }
           done
 
       - name: Configure AWS credentials using GitHub OIDC
@@ -87,93 +60,53 @@ jobs:
       - name: Verify AWS identity
         run: aws sts get-caller-identity --region "$AWS_REGION"
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Validate Python and run tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -r src/lambdas/requirements.txt
+          python -m compileall -q src/lambdas dashboard
+          python -m unittest discover -s tests -v
+
       - name: Validate CloudFormation templates
         shell: bash
         run: |
           set -euo pipefail
-
-          for template in \
-            infrastructure/network.yaml \
-            infrastructure/data.yaml \
-            infrastructure/security.yaml \
-            infrastructure/authentication.yaml \
-            infrastructure/schema-init.yaml \
-            infrastructure/dashboard.yaml
-          do
-            echo "Validating ${template}"
-
-            aws cloudformation validate-template \
-              --template-body "file://${template}" \
-              --region "$AWS_REGION" >/dev/null
+          for template in infrastructure/network.yaml infrastructure/data.yaml infrastructure/security.yaml infrastructure/authentication.yaml infrastructure/schema-init.yaml infrastructure/dashboard.yaml; do
+            echo "Validating $template"
+            aws cloudformation validate-template --template-body "file://${template}" --region "$AWS_REGION" >/dev/null
           done
 
       - name: Deploy network, data and security stacks
         shell: bash
         run: |
           set -euo pipefail
-
           deploy_stack() {
-            local stack_name="$1"
-            local template_file="$2"
-            shift 2
-
-            echo "Deploying CloudFormation stack: ${stack_name}"
-
-            aws cloudformation deploy \
-              --stack-name "$stack_name" \
-              --template-file "$template_file" \
-              --parameter-overrides \
-                "EnvironmentName=${ENVIRONMENT_NAME}" "$@" \
-              --capabilities CAPABILITY_NAMED_IAM \
-              --region "$AWS_REGION" \
-              --no-fail-on-empty-changeset
+            local stack="$1" template="$2"; shift 2
+            aws cloudformation deploy --stack-name "$stack" --template-file "$template" \
+              --parameter-overrides "EnvironmentName=${ENVIRONMENT_NAME}" "$@" \
+              --capabilities CAPABILITY_NAMED_IAM --region "$AWS_REGION" --no-fail-on-empty-changeset
           }
+          deploy_stack "medislot-${ENVIRONMENT_NAME}-network" infrastructure/network.yaml
+          deploy_stack "medislot-${ENVIRONMENT_NAME}-data" infrastructure/data.yaml
+          deploy_stack "medislot-${ENVIRONMENT_NAME}-security" infrastructure/security.yaml
 
-          deploy_stack \
-            "medislot-${ENVIRONMENT_NAME}-network" \
-            infrastructure/network.yaml
-
-          deploy_stack \
-            "medislot-${ENVIRONMENT_NAME}-data" \
-            infrastructure/data.yaml
-
-          deploy_stack \
-            "medislot-${ENVIRONMENT_NAME}-security" \
-            infrastructure/security.yaml
-
-      - name: Resolve CloudFormation-created assets bucket
+      - name: Resolve deployment artifact bucket
         id: assets
         shell: bash
         run: |
           set -euo pipefail
-
-          STACK_NAME="medislot-${ENVIRONMENT_NAME}-data"
-
-          ASSETS_BUCKET="$(aws cloudformation describe-stacks \
-            --stack-name "$STACK_NAME" \
+          bucket="$(aws cloudformation describe-stacks --stack-name "medislot-${ENVIRONMENT_NAME}-data" \
             --query "Stacks[0].Outputs[?OutputKey=='AssetsBucketName'].OutputValue | [0]" \
-            --output text \
-            --region "$AWS_REGION")"
-
-          if [[ -z "$ASSETS_BUCKET" || "$ASSETS_BUCKET" == "None" ]]; then
-            echo "::error::AssetsBucketName output was not found in ${STACK_NAME}."
-            exit 1
-          fi
-
-          echo "bucket=${ASSETS_BUCKET}" >> "$GITHUB_OUTPUT"
-          echo "CloudFormation assets bucket resolved successfully."
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Validate Lambda Python syntax
-        shell: bash
-        run: |
-          set -euo pipefail
-          python -m compileall -q src/lambdas tests
-          python -m unittest discover -s tests -v
+            --output text --region "$AWS_REGION")"
+          [[ -n "$bucket" && "$bucket" != "None" ]] || { echo '::error::AssetsBucketName output missing'; exit 1; }
+          echo "bucket=$bucket" >> "$GITHUB_OUTPUT"
 
       - name: Package and upload Lambda artifacts
         env:
@@ -181,122 +114,36 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
-          python -m pip install --upgrade pip
           mkdir -p build/lambdas
-
           package_lambda() {
-            local package_name="$1"
-            shift
-
-            local package_dir="build/${package_name}"
-            local zip_file="build/lambdas/${package_name}.zip"
-            local s3_key="artifacts/${GITHUB_SHA}/${package_name}.zip"
-
-            rm -rf "$package_dir"
-            mkdir -p "$package_dir"
-
-            python -m pip install \
-              --only-binary=:all: \
-              -r src/lambdas/requirements.txt \
-              -t "$package_dir"
-
-            for source_file in "$@"; do
-              cp "src/lambdas/${source_file}" "$package_dir/"
-            done
-
-            rm -f "$zip_file"
-
-            (
-              cd "$package_dir"
-              zip -qr "../lambdas/${package_name}.zip" .
-            )
-
-            aws s3 cp \
-              "$zip_file" \
-              "s3://${ARTIFACT_BUCKET}/${s3_key}" \
-              --region "$AWS_REGION"
-
-            echo "Uploaded ${s3_key}"
+            local name="$1"; shift
+            local dir="build/${name}" zipfile="build/lambdas/${name}.zip" key="artifacts/${GITHUB_SHA}/${name}.zip"
+            rm -rf "$dir"; mkdir -p "$dir"
+            python -m pip install --only-binary=:all: -r src/lambdas/requirements.txt -t "$dir"
+            for source in "$@"; do cp "src/lambdas/$source" "$dir/"; done
+            (cd "$dir" && zip -qr "../lambdas/${name}.zip" .)
+            aws s3 cp "$zipfile" "s3://${ARTIFACT_BUCKET}/${key}" --region "$AWS_REGION"
           }
-
-          # Existing authentication Lambda.
-          package_lambda auth \
-            auth_handler.py \
-            register.py \
-            refresh.py \
-            logout.py
-
-          # Existing JWT authorizer Lambda.
+          package_lambda auth auth_handler.py register.py refresh.py logout.py
           package_lambda authorizer authorizer.py
-
-          # Existing profile Lambda.
           package_lambda profile profile.py
+          package_lambda doctor-domain doctor_domain.py
+          package_lambda slot-materializer slot_materializer.py slot_time.py
 
-          # Milestone 3 doctor-domain API and scheduled slot materialiser.
-          package_lambda doctor-domain doctor_domain.py slot_time.py
+          schema_dir=build/schema-init
+          rm -rf "$schema_dir"; mkdir -p "$schema_dir"
+          python -m pip install --only-binary=:all: PyMySQL -t "$schema_dir"
+          cp src/lambdas/schema_init.py database/schema.sql "$schema_dir/"
+          (cd "$schema_dir" && zip -qr ../lambdas/schema-init.zip .)
+          aws s3 cp build/lambdas/schema-init.zip "s3://${ARTIFACT_BUCKET}/artifacts/${GITHUB_SHA}/schema-init.zip" --region "$AWS_REGION"
 
-          # One-time database schema initializer.
-          # It needs PyMySQL and the SQL file, not the full app dependencies.
-          SCHEMA_DIR="build/schema-init"
-          SCHEMA_ZIP="build/lambdas/schema-init.zip"
-          SCHEMA_KEY="artifacts/${GITHUB_SHA}/schema-init.zip"
-
-          rm -rf "$SCHEMA_DIR"
-          mkdir -p "$SCHEMA_DIR"
-
-          python -m pip install \
-            --only-binary=:all: \
-            PyMySQL \
-            -t "$SCHEMA_DIR"
-
-          cp src/lambdas/schema_init.py "$SCHEMA_DIR/"
-          cp database/schema.sql "$SCHEMA_DIR/"
-
-          rm -f "$SCHEMA_ZIP"
-
-          (
-            cd "$SCHEMA_DIR"
-            zip -qr "../lambdas/schema-init.zip" .
-          )
-
-          aws s3 cp \
-            "$SCHEMA_ZIP" \
-            "s3://${ARTIFACT_BUCKET}/${SCHEMA_KEY}" \
-            --region "$AWS_REGION"
-
-          echo "Uploaded ${SCHEMA_KEY}"
-
-          # Package the single-file doctor dashboard and its Flask host.
-          DASHBOARD_DIR="build/dashboard-package"
-          DASHBOARD_ZIP="build/dashboard.zip"
-          DASHBOARD_KEY="artifacts/${GITHUB_SHA}/dashboard.zip"
-
-          rm -rf "$DASHBOARD_DIR"
-          mkdir -p "$DASHBOARD_DIR"
-          cp -R dashboard "$DASHBOARD_DIR/"
-          rm -f "$DASHBOARD_ZIP"
-          (
-            cd "$DASHBOARD_DIR"
-            zip -qr "../dashboard.zip" dashboard
-          )
-
-          aws s3 cp \
-            "$DASHBOARD_ZIP" \
-            "s3://${ARTIFACT_BUCKET}/${DASHBOARD_KEY}" \
-            --region "$AWS_REGION"
-
-          echo "Uploaded ${DASHBOARD_KEY}"
-
-      - name: Deploy authentication API stack
+      - name: Deploy authentication and doctor API
         env:
           ARTIFACT_BUCKET: ${{ steps.assets.outputs.bucket }}
         shell: bash
         run: |
           set -euo pipefail
-
-          aws cloudformation deploy \
-            --stack-name "medislot-${ENVIRONMENT_NAME}-authentication" \
+          aws cloudformation deploy --stack-name "medislot-${ENVIRONMENT_NAME}-authentication" \
             --template-file infrastructure/authentication.yaml \
             --parameter-overrides \
               "EnvironmentName=${ENVIRONMENT_NAME}" \
@@ -305,79 +152,91 @@ jobs:
               "AuthorizerLambdaS3Key=artifacts/${GITHUB_SHA}/authorizer.zip" \
               "ProfileLambdaS3Key=artifacts/${GITHUB_SHA}/profile.zip" \
               "DoctorDomainLambdaS3Key=artifacts/${GITHUB_SHA}/doctor-domain.zip" \
-            --capabilities CAPABILITY_NAMED_IAM \
-            --region "$AWS_REGION" \
-            --no-fail-on-empty-changeset
+              "SlotMaterializerLambdaS3Key=artifacts/${GITHUB_SHA}/slot-materializer.zip" \
+            --capabilities CAPABILITY_NAMED_IAM --region "$AWS_REGION" --no-fail-on-empty-changeset
 
-      - name: Deploy temporary schema initializer stack
+      - name: Deploy and explicitly invoke schema initializer
         env:
           ARTIFACT_BUCKET: ${{ steps.assets.outputs.bucket }}
         shell: bash
         run: |
           set -euo pipefail
-
-          aws cloudformation deploy \
-            --stack-name "medislot-${ENVIRONMENT_NAME}-schema-init" \
+          aws cloudformation deploy --stack-name "medislot-${ENVIRONMENT_NAME}-schema-init" \
             --template-file infrastructure/schema-init.yaml \
             --parameter-overrides \
               "EnvironmentName=${ENVIRONMENT_NAME}" \
               "LambdaArtifactBucket=${ARTIFACT_BUCKET}" \
               "SchemaInitLambdaS3Key=artifacts/${GITHUB_SHA}/schema-init.zip" \
-            --region "$AWS_REGION" \
-            --no-fail-on-empty-changeset
+            --region "$AWS_REGION" --no-fail-on-empty-changeset
 
-      - name: Resolve authentication API base URL
+          aws lambda invoke --function-name "medislot-${ENVIRONMENT_NAME}-schema-init" \
+            --payload '{"confirm":"INITIALIZE_MEDISLOT_SCHEMA"}' \
+            --cli-binary-format raw-in-base64-out --region "$AWS_REGION" \
+            /tmp/schema-init-response.json > /tmp/schema-init-metadata.json
+          cat /tmp/schema-init-metadata.json
+          cat /tmp/schema-init-response.json
+          jq -e '(.FunctionError // null) == null' /tmp/schema-init-metadata.json >/dev/null
+          jq -e '.statusCode == 200' /tmp/schema-init-response.json >/dev/null
+
+      - name: Materialize initial rolling slot window
+        shell: bash
+        run: |
+          set -euo pipefail
+          aws lambda invoke --function-name "medislot-${ENVIRONMENT_NAME}-slot-materializer" \
+            --payload '{}' --cli-binary-format raw-in-base64-out --region "$AWS_REGION" \
+            /tmp/slot-materializer-response.json > /tmp/slot-materializer-metadata.json
+          cat /tmp/slot-materializer-metadata.json
+          cat /tmp/slot-materializer-response.json
+          jq -e '(.FunctionError // null) == null' /tmp/slot-materializer-metadata.json >/dev/null
+          jq -e '.statusCode == 200' /tmp/slot-materializer-response.json >/dev/null
+
+      - name: Package and upload dashboard
+        env:
+          ARTIFACT_BUCKET: ${{ steps.assets.outputs.bucket }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/dashboard/dashboard
+          cp dashboard/app.py dashboard/doctor_dashboard.html dashboard/requirements.txt build/dashboard/dashboard/
+          (cd build/dashboard && zip -qr ../dashboard.zip dashboard)
+          aws s3 cp build/dashboard.zip "s3://${ARTIFACT_BUCKET}/artifacts/${GITHUB_SHA}/dashboard.zip" --region "$AWS_REGION"
+
+      - name: Resolve API Gateway base URL
         id: api
         shell: bash
         run: |
           set -euo pipefail
-          API_BASE_URL="$(aws cloudformation describe-stacks \
-            --stack-name "medislot-${ENVIRONMENT_NAME}-authentication" \
+          url="$(aws cloudformation describe-stacks --stack-name "medislot-${ENVIRONMENT_NAME}-authentication" \
             --query "Stacks[0].Outputs[?OutputKey=='RestApiBaseUrl'].OutputValue | [0]" \
-            --output text \
-            --region "$AWS_REGION")"
-          if [[ -z "$API_BASE_URL" || "$API_BASE_URL" == "None" ]]; then
-            echo "::error::RestApiBaseUrl output was not found in the authentication stack."
-            exit 1
-          fi
-          echo "url=${API_BASE_URL}" >> "$GITHUB_OUTPUT"
+            --output text --region "$AWS_REGION")"
+          [[ "$url" == https://* ]] || { echo '::error::RestApiBaseUrl output missing or invalid'; exit 1; }
+          echo "url=$url" >> "$GITHUB_OUTPUT"
 
-      - name: Deploy EC2 dashboard host
+      - name: Deploy HTTPS dashboard
         env:
           ARTIFACT_BUCKET: ${{ steps.assets.outputs.bucket }}
           API_BASE_URL: ${{ steps.api.outputs.url }}
         shell: bash
         run: |
           set -euo pipefail
-
-          aws cloudformation deploy \
-            --stack-name "medislot-${ENVIRONMENT_NAME}-dashboard" \
+          aws cloudformation deploy --stack-name "medislot-${ENVIRONMENT_NAME}-dashboard" \
             --template-file infrastructure/dashboard.yaml \
             --parameter-overrides \
               "EnvironmentName=${ENVIRONMENT_NAME}" \
               "DashboardArtifactBucket=${ARTIFACT_BUCKET}" \
               "DashboardArtifactS3Key=artifacts/${GITHUB_SHA}/dashboard.zip" \
               "ApiBaseUrl=${API_BASE_URL}" \
-              "InstanceType=t3.micro" \
-            --capabilities CAPABILITY_NAMED_IAM \
-            --region "$AWS_REGION" \
-            --no-fail-on-empty-changeset
+            --capabilities CAPABILITY_NAMED_IAM --region "$AWS_REGION" --no-fail-on-empty-changeset
 
       - name: Show deployment outputs
         shell: bash
         run: |
           set -euo pipefail
-
           for stack in \
             "medislot-${ENVIRONMENT_NAME}-authentication" \
             "medislot-${ENVIRONMENT_NAME}-schema-init" \
-            "medislot-${ENVIRONMENT_NAME}-dashboard"
-          do
-            echo "Outputs for ${stack}"
-
-            aws cloudformation describe-stacks \
-              --stack-name "$stack" \
-              --query "Stacks[0].Outputs" \
-              --output table \
-              --region "$AWS_REGION"
+            "medislot-${ENVIRONMENT_NAME}-dashboard"; do
+            echo "Outputs for $stack"
+            aws cloudformation describe-stacks --stack-name "$stack" \
+              --query 'Stacks[0].Outputs' --output table --region "$AWS_REGION"
           done

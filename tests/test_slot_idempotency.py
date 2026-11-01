@@ -1,15 +1,5 @@
 """Idempotent DynamoDB put behavior for deterministic slot IDs."""
-import os
 import unittest
-os.environ.setdefault("AWS_DEFAULT_REGION", "ap-south-1")
-os.environ.setdefault("AWS_EC2_METADATA_DISABLED", "true")
-for key, value in {
-    "DB_HOST_PARAMETER": "/test/host", "DB_PORT_PARAMETER": "/test/port",
-    "DB_NAME_PARAMETER": "/test/name", "DB_USERNAME_PARAMETER": "/test/user",
-    "DB_SECRET_ARN": "arn:aws:secretsmanager:ap-south-1:000000000000:secret:test",
-    "SLOT_STATE_TABLE": "test-slots", "ASSETS_BUCKET": "test-assets"
-}.items():
-    os.environ.setdefault(key, value)
 
 from src.lambdas.slot_time import put_if_absent
 
@@ -21,8 +11,13 @@ class FakeTable:
     def put_item(self, Item, ConditionExpression):
         key = Item["slot_id"]
         if key in self.items:
-            error = RuntimeError("exists")
-            error.response = {"Error": {"Code": "ConditionalCheckFailedException", "Message": "exists"}}
+            error = RuntimeError("item already exists")
+            error.response = {
+                "Error": {
+                    "Code": "ConditionalCheckFailedException",
+                    "Message": "item already exists",
+                }
+            }
             raise error
         self.items[key] = Item
 

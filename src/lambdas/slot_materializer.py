@@ -1,7 +1,7 @@
 """Daily rolling 30-day doctor slot materialiser. Safe to re-run: deterministic slot IDs + conditional PutItem."""
 import os, json, logging, hashlib
 from datetime import date, datetime, time, timedelta, timezone
-from slot_time import build_slots
+from slot_time import build_slots, put_if_absent
 import boto3, pymysql
 
 log=logging.getLogger(); log.setLevel(logging.INFO)
@@ -57,11 +57,9 @@ def handler(event,context):
                           "start_time_utc":utc_start.isoformat(),"end_time_utc":utc_end.isoformat(),
                           "timezone":p["home_timezone"],"capacity":int(p["slot_capacity"]),
                           "booked_count":0,"status":"AVAILABLE","created_at":datetime.now(timezone.utc).isoformat()}
-                    try:
-                        table.put_item(Item=item,ConditionExpression="attribute_not_exists(slot_id)")
-                        created+=1
-                    except Exception as e:
-                        if "ConditionalCheckFailedException" in str(e): skipped+=1
-                        else: raise
+                    if put_if_absent(table, item):
+                        created += 1
+                    else:
+                        skipped += 1
         return {"statusCode":200,"body":json.dumps({"created":created,"already_present":skipped,"window_start_by_timezone":sorted(set(window_starts)),"days":days})}
     finally: conn.close()

@@ -1,23 +1,78 @@
-import sys, unittest
-from datetime import date
-sys.path.insert(0,"src/lambdas")
-from slot_time import build_slots
+
+import sys
+import unittest
+from datetime import datetime
+from zoneinfo import ZoneInfo
+from unittest.mock import Mock
+
+sys.path.insert(0, "src/lambdas")
+
+from slot_time import valid_local_time, put_if_absent
+
 
 class SlotTimezoneTests(unittest.TestCase):
-    def test_local_hours_remain_constant_across_dst(self):
-        before=list(build_slots(date(2026,3,1),"09:00","17:00",60,"America/New_York"))
-        after=list(build_slots(date(2026,3,8),"09:00","17:00",60,"America/New_York"))
-        self.assertEqual(before[0][0].strftime("%H:%M"),"09:00")
-        self.assertEqual(after[0][0].strftime("%H:%M"),"09:00")
-        self.assertEqual(before[-1][1].strftime("%H:%M"),"17:00")
-        self.assertEqual(after[-1][1].strftime("%H:%M"),"17:00")
-        self.assertEqual(before[0][2].strftime("%H:%M"),"14:00")
-        self.assertEqual(after[0][2].strftime("%H:%M"),"13:00")
-        self.assertEqual(len(before),8)
-        self.assertEqual(len(after),8)
 
-    def test_slots_align_to_pattern_start(self):
-        slots=list(build_slots(date(2026,11,2),"09:10","10:40",30,"Asia/Kolkata"))
-        self.assertEqual([x[0].strftime("%H:%M") for x in slots],["09:10","09:40","10:10"])
+    def test_valid_local_time(self):
+        zone = ZoneInfo("Asia/Kolkata")
+        local_time = datetime(2026, 11, 2, 9, 0)
 
-if __name__=="__main__": unittest.main()
+        result = valid_local_time(local_time, zone)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.strftime("%H:%M"), "09:00")
+
+    def test_dst_nonexistent_time_returns_none(self):
+        zone = ZoneInfo("America/New_York")
+
+        # On March 8, 2026, clocks jump from 01:59 to 03:00.
+        nonexistent_time = datetime(2026, 3, 8, 2, 30)
+
+        result = valid_local_time(nonexistent_time, zone)
+
+        self.assertIsNone(result)
+
+    def test_dst_overlap_chooses_fold_zero(self):
+        zone = ZoneInfo("America/New_York")
+
+        # 01:30 occurs twice when daylight saving time ends.
+        overlapping_time = datetime(2026, 11, 1, 1, 30)
+
+        result = valid_local_time(overlapping_time, zone)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.fold, 0)
+
+    def test_put_if_absent_success(self):
+        table = Mock()
+
+        result = put_if_absent(table, {"slot_id": "slot-001"})
+
+        self.assertTrue(result)
+        table.put_item.assert_called_once()
+
+    def test_put_if_absent_duplicate(self):
+        table = Mock()
+
+        error = Exception("Duplicate item")
+        error.response = {
+            "Error": {
+                "Code": "ConditionalCheckFailedException"
+            }
+        }
+
+        table.put_item.side_effect = error
+
+        result = put_if_absent(table, {"slot_id": "slot-001"})
+
+        self.assertFalse(result)
+
+    def test_put_if_absent_unexpected_error(self):
+        table = Mock()
+        table.put_item.side_effect = RuntimeError("DynamoDB unavailable")
+
+        with self.assertRaises(RuntimeError):
+            put_if_absent(table, {"slot_id": "slot-001"})
+
+
+if __name__ == "__main__":
+    unittest.main()

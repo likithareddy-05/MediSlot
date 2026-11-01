@@ -1,36 +1,29 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
-  MediSlot doctor dashboard host. Creates one Amazon Linux 2023 EC2 instance
-  in the existing public subnet and reuses the existing EC2 security group.
+  MediSlot doctor dashboard EC2 host with an HTTPS CloudFront front door.
+  CloudFront terminates TLS using its managed distribution certificate.
 
 Parameters:
   EnvironmentName:
     Type: String
     AllowedValues: [dev, test, prod]
     Description: MediSlot deployment environment.
-
   DashboardArtifactBucket:
     Type: String
-    Description: Existing private S3 bucket used for versioned deployment artifacts.
-
+    Description: Existing private S3 bucket containing the dashboard artifact.
   DashboardArtifactS3Key:
     Type: String
     Description: S3 object key for the packaged dashboard application.
-
   ApiBaseUrl:
     Type: String
-    Description: Base URL exported by the authentication API stack, including the stage.
-
+    Description: API Gateway stage URL exported by the authentication stack.
   InstanceType:
     Type: String
     Default: t3.micro
     AllowedValues: [t3.micro, t3.small, t3.medium]
-    Description: EC2 instance size for the Flask dashboard host.
-
   LatestAmiId:
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
     Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
-    Description: Latest Amazon Linux 2023 x86_64 AMI published by AWS.
 
 Resources:
   DashboardInstanceRole:
@@ -64,8 +57,7 @@ Resources:
     Type: AWS::IAM::InstanceProfile
     Properties:
       InstanceProfileName: !Sub medislot-${EnvironmentName}-dashboard-instance-profile
-      Roles:
-        - !Ref DashboardInstanceRole
+      Roles: [!Ref DashboardInstanceRole]
 
   DashboardInstance:
     Type: AWS::EC2::Instance
@@ -93,35 +85,28 @@ Resources:
           #!/bin/bash
           set -euxo pipefail
           exec > >(tee -a /var/log/medislot-dashboard-setup.log) 2>&1
-
           dnf update -y
           dnf install -y python3 python3-pip nginx unzip awscli-2
-
           mkdir -p /opt/medislot /var/lib/medislot/sessions
           aws s3 cp "s3://${DashboardArtifactBucket}/${DashboardArtifactS3Key}" /tmp/medislot-dashboard.zip --region ${AWS::Region}
           unzip -o /tmp/medislot-dashboard.zip -d /opt/medislot
-          chown -R ec2-user:ec2-user /opt/medislot
-          chown -R ec2-user:ec2-user /var/lib/medislot
-
+          chown -R ec2-user:ec2-user /opt/medislot /var/lib/medislot
           cat > /etc/medislot-dashboard.env <<ENVVARS
           MEDISLOT_API_BASE_URL=${ApiBaseUrl}
           FLASK_SECRET_KEY=$(openssl rand -hex 32)
           SESSION_FILE_DIR=/var/lib/medislot/sessions
-          SESSION_COOKIE_SECURE=false
+          SESSION_COOKIE_SECURE=true
           ENVVARS
           chown root:ec2-user /etc/medislot-dashboard.env
           chmod 640 /etc/medislot-dashboard.env
-
           python3 -m venv /opt/medislot/.venv
           /opt/medislot/.venv/bin/pip install --upgrade pip
-          /opt/medislot/.venv/bin/pip install -r /opt/medislot/dashboard/requirements.txt gunicorn
-
+          /opt/medislot/.venv/bin/pip install -r /opt/medislot/dashboard/requirements.txt
           cat > /etc/systemd/system/medislot-dashboard.service <<'SERVICE'
           [Unit]
           Description=MediSlot Flask Doctor Dashboard
           After=network-online.target
           Wants=network-online.target
-
           [Service]
           Type=simple
           User=ec2-user
@@ -131,11 +116,9 @@ Resources:
           ExecStart=/opt/medislot/.venv/bin/gunicorn --workers 2 --bind 127.0.0.1:8000 dashboard.app:app
           Restart=always
           RestartSec=5
-
           [Install]
           WantedBy=multi-user.target
           SERVICE
-
           rm -f /etc/nginx/conf.d/default.conf
           cat > /etc/nginx/conf.d/medislot-dashboard.conf <<'NGINX'
           server {
@@ -147,11 +130,10 @@ Resources:
                   proxy_set_header Host $host;
                   proxy_set_header X-Real-IP $remote_addr;
                   proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-                  proxy_set_header X-Forwarded-Proto $scheme;
+                  proxy_set_header X-Forwarded-Proto https;
               }
           }
           NGINX
-
           nginx -t
           systemctl daemon-reload
           systemctl enable --now medislot-dashboard
@@ -164,19 +146,52 @@ Resources:
         - Key: Environment
           Value: !Ref EnvironmentName
 
+  DashboardDistribution:
+    Type: AWS::CloudFront::Distribution
+    DependsOn: DashboardInstance
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub MediSlot ${EnvironmentName} doctor dashboard HTTPS distribution
+        PriceClass: PriceClass_100
+        HttpVersion: http2and3
+        IPV6Enabled: true
+        Origins:
+          - Id: MediSlotDashboardOrigin
+            DomainName: !GetAtt DashboardInstance.PublicDnsName
+            CustomOriginConfig:
+              HTTPPort: 80
+              HTTPSPort: 443
+              OriginProtocolPolicy: http-only
+              OriginKeepaliveTimeout: 60
+              OriginReadTimeout: 60
+        DefaultCacheBehavior:
+          TargetOriginId: MediSlotDashboardOrigin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+          CachedMethods: [GET, HEAD, OPTIONS]
+          Compress: true
+          CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+          OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eafa07d3
+        Restrictions:
+          GeoRestriction:
+            RestrictionType: none
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: true
+
 Outputs:
   DashboardInstanceId:
-    Description: EC2 instance hosting the MediSlot doctor dashboard.
+    Description: EC2 instance hosting the MediSlot dashboard.
     Value: !Ref DashboardInstance
-
   DashboardPublicIp:
-    Description: Public IPv4 address of the dashboard host.
+    Description: EC2 origin IPv4 address (HTTP origin; use HTTPS CloudFront URL in browsers).
     Value: !GetAtt DashboardInstance.PublicIp
-
   DashboardPublicDns:
-    Description: Public DNS name of the dashboard host.
+    Description: EC2 origin DNS name.
     Value: !GetAtt DashboardInstance.PublicDnsName
-
+  DashboardDistributionDomain:
+    Description: CloudFront HTTPS distribution domain.
+    Value: !GetAtt DashboardDistribution.DomainName
   DashboardUrl:
-    Description: HTTP URL for the MediSlot doctor dashboard.
-    Value: !Sub http://${DashboardInstance.PublicDnsName}/doctor/dashboard
+    Description: Secure HTTPS URL for the MediSlot doctor dashboard.
+    Value: !Sub https://${DashboardDistribution.DomainName}/doctor/dashboard

@@ -113,7 +113,7 @@ def _check_window(cursor, doctor_id, consultation_id, start_value, end_value):
                    (consultation_id, doctor_id))
     row = cursor.fetchone()
     if not row:
-        raise ValueError("Invalid active consultation_type_id")
+        raise ValueError("The selected consultation type is inactive or does not belong to you. Activate it on the Consultations tab first.")
     minutes = (start_value.hour*60 + start_value.minute) - 0
     window = (end_value.hour*60 + end_value.minute) - minutes
     if window < int(row["duration_minutes"]):
@@ -401,9 +401,17 @@ def _handle_api(event, context):
                     raise ValueError(f"{name} slot capacity must be 1")
                 if fixed_capacity is None and not 2 <= capacity <= 10:
                     raise ValueError("Health Camp Session capacity must be between 2 and 10")
-                cur.execute("SELECT 1 FROM consultation_types WHERE doctor_id=%s AND consultation_name=%s LIMIT 1", (doctor_id,name))
-                if cur.fetchone():
+                cur.execute("SELECT consultation_type_id,is_active FROM consultation_types WHERE doctor_id=%s AND consultation_name=%s LIMIT 1", (doctor_id,name))
+                existing_type = cur.fetchone()
+                if existing_type and existing_type["is_active"]:
                     raise ValueError("This consultation type already exists in your account")
+                if existing_type:
+                    # Previously deactivated: bring it back with the submitted fee/capacity.
+                    cur.execute("UPDATE consultation_types SET duration_minutes=%s,fee=%s,slot_capacity=%s,is_active=1 WHERE consultation_type_id=%s AND doctor_id=%s",
+                                (duration, fee, capacity, existing_type["consultation_type_id"], doctor_id))
+                    conn.commit()
+                    return response(200, {"message": "Consultation type reactivated", "consultation_type_id": existing_type["consultation_type_id"],
+                                          "slots": _refresh_slots(doctor_id)})
                 cur.execute("INSERT INTO consultation_types (doctor_id,consultation_name,duration_minutes,fee,slot_capacity,is_active) VALUES (%s,%s,%s,%s,%s,1)", (doctor_id,name,duration,fee,capacity))
                 conn.commit()
                 return response(201, {"message": "Consultation type created", "consultation_type_id": cur.lastrowid})
@@ -418,6 +426,7 @@ def _handle_api(event, context):
                 for k in ("duration_minutes", "slot_capacity"):
                     if k in fields: fields[k] = int(fields[k])
                 if "fee" in fields: fields["fee"] = float(fields["fee"])
+                if "is_active" in fields: fields["is_active"] = 1 if fields["is_active"] in (1, True, "1", "true", "True") else 0
                 name = fields.get("consultation_name", current["consultation_name"])
                 rules = {"Quick Consult": (15, 1), "Standard Consult": (30, 1), "Detailed Consult": (60, 1), "Health Camp Session": (60, None)}
                 if name not in rules: raise ValueError("Choose one of the four approved consultation types")
@@ -496,7 +505,7 @@ def _handle_api(event, context):
                 if existing_zones and tz not in existing_zones:
                     raise ValueError("All active availability patterns for one doctor must use the same timezone")
                 if not 0 <= weekday <= 6 or start >= end: raise ValueError("weekday must be 0-6 and start_time must be before end_time")
-                effective_from = date.fromisoformat(str(body.get("effective_from", date.today().isoformat())))
+                effective_from = date.fromisoformat(str(body.get("effective_from") or datetime.now(ZoneInfo(tz)).date().isoformat()))
                 effective_to = date.fromisoformat(str(body["effective_to"])) if body.get("effective_to") else None
                 if effective_to and effective_to < effective_from: raise ValueError("effective_to cannot precede effective_from")
                 consultation_id = int(_required(body,"consultation_type_id"))

@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import boto3
 import pymysql
+from botocore.config import Config
 from boto3.dynamodb.conditions import Key
 from slot_time import valid_local_time, put_if_absent
 
@@ -23,14 +24,18 @@ logger.setLevel(logging.INFO)
 ssm = boto3.client("ssm")
 secrets = boto3.client("secretsmanager")
 ddb = boto3.resource("dynamodb")
-s3 = boto3.client("s3")
+s3 = boto3.client("s3", config=Config(signature_version="s3v4", s3={"addressing_style": "virtual"}))
 
 DB_HOST_PARAMETER = os.environ["DB_HOST_PARAMETER"]
 DB_PORT_PARAMETER = os.environ["DB_PORT_PARAMETER"]
 DB_NAME_PARAMETER = os.environ["DB_NAME_PARAMETER"]
 DB_USERNAME_PARAMETER = os.environ["DB_USERNAME_PARAMETER"]
 DB_SECRET_ARN = os.environ["DB_SECRET_ARN"]
-SLOT_TABLE_NAME = os.environ["SLOT_STATE_TABLE"]
+# CloudFormation (authentication.yaml) defines SLOT_TABLE_NAME. Older builds read
+# SLOT_STATE_TABLE, which crashed the Lambda at import time. Accept either name.
+SLOT_TABLE_NAME = os.environ.get("SLOT_TABLE_NAME") or os.environ.get("SLOT_STATE_TABLE")
+if not SLOT_TABLE_NAME:
+    raise RuntimeError("Set SLOT_TABLE_NAME (or SLOT_STATE_TABLE) on the doctor-domain Lambda")
 ASSETS_BUCKET = os.environ["ASSETS_BUCKET"]
 _db_config = None
 
@@ -205,8 +210,13 @@ def _handle_api(event, context):
     method = event.get("httpMethod", "GET").upper()
     # Explicit API Gateway resources provide event.resource (for example,
     # /doctors/me/availability). Keep the legacy proxy fallback for safe rollback.
-    path = event.get("resource") or (event.get("pathParameters") or {}).get("proxy", "")
+    # NOTE: event["resource"] keeps placeholders such as /{consultationTypeId}, so the
+    # numeric-id routes below would never match. Use the concrete request path instead.
+    path = event.get("path") or event.get("resource") or (event.get("pathParameters") or {}).get("proxy", "")
     path = "/" + path.strip("/")
+    stage = (event.get("requestContext") or {}).get("stage")
+    if stage and path.startswith("/" + stage + "/"):
+        path = path[len(stage) + 1:]
     if path.startswith("/doctors/"):
         path = path[len("/doctors"):]
     # Normalize the public /doctors/me contract to the existing domain handlers.
@@ -215,9 +225,9 @@ def _handle_api(event, context):
     elif path.startswith("/me/"):
         path = path[len("/me"):]
     query = event.get("queryStringParameters") or {}
-    body = _json_body(event)
     conn = None
     try:
+        body = _json_body(event)
         conn = db_connect()
         with conn.cursor() as cur:
             doctor_id = _doctor_id(cur, user_id)

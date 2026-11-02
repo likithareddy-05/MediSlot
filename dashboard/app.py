@@ -180,6 +180,7 @@ def _local_doctor_path(api_path):
         ("/schedule", "/doctors/me/schedule"),
         ("/appointments", "/doctors/me/appointments"),
         ("/slots", "/doctors/me/slots"),
+        ("/materialize", "/doctors/me/materialize"),
     )
     for source, target in mappings:
         if path == source or path.startswith(source + "/"):

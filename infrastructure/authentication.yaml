@@ -428,7 +428,7 @@ Resources:
       Code:
         S3Bucket: !Ref LambdaArtifactBucket
         S3Key: !Ref DoctorDomainLambdaS3Key
-      Timeout: 30
+      Timeout: 60
       MemorySize: 512
       VpcConfig:
         SecurityGroupIds:

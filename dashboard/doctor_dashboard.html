@@ -177,7 +177,7 @@ $('#cancelAvailabilityEdit').onclick=clearAvailability;
 async function removeAvailability(index){
   if(!confirm('Remove this recurring weekly availability pattern?'))return;
   const next=state.availability.filter((_,i)=>i!==index);
-  try{await saveAvailability(next);await loadAvailability();clearAvailability();toast('Availability pattern removed; future slots are being refreshed')}
+  try{await saveAvailability(next);await loadAvailability();clearAvailability();await loadSchedule();toast('Availability pattern removed; slots refreshed')}
   catch(e){toast(e.message)}
 }
 $('#availabilityForm').addEventListener('submit',async e=>{
@@ -190,7 +190,7 @@ $('#availabilityForm').addEventListener('submit',async e=>{
     const next=state.availability.map(p=>({weekday:Number(p.weekday ?? (Number(p.day_of_week)-1)),start_time:String(p.start_time).slice(0,5),end_time:String(p.end_time).slice(0,5),consultation_type_id:Number(p.consultation_type_id)}));
     if(editIndex!==undefined)next[Number(editIndex)]=pattern;else next.push(pattern);
     await api('/availability','PUT',{timezone_name:o.home_timezone,patterns:next});
-    clearAvailability();await loadAvailability();toast('Availability saved; future slots are being refreshed');
+    clearAvailability();await loadAvailability();await loadSchedule();toast('Availability saved; slots for the next 30 days were generated');
   }catch(err){toast(err.message)}
 });
 async function loadBlackouts(){const d=await api('/blackouts');state.blackouts=d.blackouts||[];const host=$('#blackoutTable');if(!state.blackouts.length)host.innerHTML='<div class="empty">No blackout dates.</div>';else host.innerHTML=`<div class="table-wrap"><table><thead><tr><th>Date</th><th>Reason</th><th></th></tr></thead><tbody>${state.blackouts.map(b=>`<tr><td>${esc(String(b.blackout_date).slice(0,10))}</td><td>${esc(b.reason||'—')}</td><td><button class="btn danger small" data-remove-blackout="${b.blackout_id}">Remove</button></td></tr>`).join('')}</tbody></table></div>`;host.querySelectorAll('[data-remove-blackout]').forEach(b=>b.onclick=()=>removeBlackout(Number(b.dataset.removeBlackout)))}

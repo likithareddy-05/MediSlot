@@ -10,7 +10,6 @@ Safe to re-run:
 import os
 import json
 import logging
-import hashlib
 
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -145,6 +144,7 @@ def handler(event, context):
             cur.execute("""
                 SELECT
                     d.doctor_id,
+                    ap.availability_pattern_id,
                     ap.timezone_name AS home_timezone,
                     ap.weekday AS day_of_week,
                     ap.effective_from,
@@ -161,6 +161,8 @@ def handler(event, context):
                     ) AS end_time,
 
                     ct.consultation_type_id,
+                    ct.consultation_name,
+                    ct.fee,
                     ct.duration_minutes,
                     ct.slot_capacity
 
@@ -173,6 +175,7 @@ def handler(event, context):
                 JOIN consultation_types ct
                     ON ct.consultation_type_id =
                        ap.consultation_type_id
+                    AND ct.doctor_id = ap.doctor_id
                     AND ct.is_active = 1
 
             """)
@@ -282,98 +285,43 @@ def handler(event, context):
                     utc_end
                 ) in generated_slots:
 
-                    # ------------------------------------------------
-                    # Deterministic slot ID.
-                    # Same doctor, consultation, date, local start
-                    # and timezone always produce the same ID.
-                    # ------------------------------------------------
-
-                    material = (
-                        f"{doctor_id}|"
-                        f"{pattern['consultation_type_id']}|"
-                        f"{day.isoformat()}|"
-                        f"{local_start.time().isoformat()}|"
-                        f"{doctor_timezone}"
+                    # Same ID format as doctor_domain.materialize_doctor so the
+                    # scheduled job and the on-save refresh never create duplicates.
+                    slot_id = (
+                        f"{doctor_id}#{pattern['consultation_type_id']}#"
+                        f"{utc_start.strftime('%Y%m%dT%H%M%SZ')}"
                     )
 
-                    slot_id = hashlib.sha256(
-                        material.encode("utf-8")
-                    ).hexdigest()
-
-                    # ------------------------------------------------
-                    # DynamoDB slot record.
-                    # ------------------------------------------------
+                    start_text = utc_start.isoformat().replace("+00:00", "Z")
+                    end_text = utc_end.isoformat().replace("+00:00", "Z")
 
                     item = {
                         "slot_id": slot_id,
-
                         "doctor_id": str(doctor_id),
-
-                        "consultation_type_id": int(
-                            pattern["consultation_type_id"]
-                        ),
-
-                        # GSI key: must match DoctorDateIndex in data.yaml.
                         "slot_date": day.isoformat(),
-
-                        # Retain local_date for compatibility with any older
-                        # readers while slot_date is the canonical index key.
-                        "local_date": day.isoformat(),
-
-                        "local_start": local_start.isoformat(),
-
-                        # Canonical UTC/timezone fields shared by both
-                        # materializers and the dashboard.
-                        "start_time_utc": utc_start.isoformat().replace("+00:00", "Z"),
-
-                        "end_time_utc": utc_end.isoformat().replace("+00:00", "Z"),
-
+                        "consultation_type_id": int(pattern["consultation_type_id"]),
+                        "consultation_name": pattern["consultation_name"],
+                        "start_time_utc": start_text,
+                        "end_time_utc": end_text,
                         "timezone": doctor_timezone,
-
-                        "capacity": int(
-                            pattern["slot_capacity"]
-                        ),
-
+                        "local_date": day.isoformat(),
+                        "local_start": local_start.replace(tzinfo=None).isoformat(),
+                        "duration_minutes": duration,
+                        "fee": str(pattern["fee"]),
+                        "capacity": int(pattern["slot_capacity"]),
                         "booked_count": 0,
-
                         "status": "AVAILABLE",
-
-                        "created_at": datetime.now(
-                            timezone.utc
-                        ).isoformat()
+                        "availability_pattern_id": int(pattern["availability_pattern_id"]),
+                        "start_at_utc": start_text,
+                        "end_at_utc": end_text,
+                        "timezone_name": doctor_timezone,
                     }
 
-                    # ------------------------------------------------
-                    # Conditional insertion:
-                    # Existing slots are not overwritten.
-                    # ------------------------------------------------
-
+                    # Conditional insert: existing slots (and their booking
+                    # state) are never touched.
                     if put_if_absent(table, item):
                         created += 1
                     else:
-                        # Backfill the GSI key and canonical fields on records
-                        # created by the previous version. Do not overwrite
-                        # status, booked_count, capacity, or other booking data.
-                        table.update_item(
-                            Key={"slot_id": slot_id},
-                            UpdateExpression=(
-                                "SET slot_date = :slot_date, "
-                                "local_date = :local_date, "
-                                "local_start = :local_start, "
-                                "start_time_utc = :start_utc, "
-                                "end_time_utc = :end_utc, "
-                                "#tz = :tz"
-                            ),
-                            ExpressionAttributeNames={"#tz": "timezone"},
-                            ExpressionAttributeValues={
-                                ":slot_date": item["slot_date"],
-                                ":local_date": item["local_date"],
-                                ":local_start": item["local_start"],
-                                ":start_utc": item["start_time_utc"],
-                                ":end_utc": item["end_time_utc"],
-                                ":tz": item["timezone"],
-                            },
-                        )
                         skipped += 1
 
         # ----------------------------------------------------

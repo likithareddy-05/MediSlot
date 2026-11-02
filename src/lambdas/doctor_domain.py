@@ -359,11 +359,11 @@ def _handle_api(event, context):
                     if cur.fetchone(): raise ValueError("This consultation type already exists in your account")
                 cur.execute("UPDATE consultation_types SET " + ",".join(f"{k}=%s" for k in fields) + " WHERE consultation_type_id=%s AND doctor_id=%s", list(fields.values())+[int(match.group(1)),doctor_id])
                 if cur.rowcount == 0: return response(404, {"message": "Consultation type not found"})
-                conn.commit(); return response(200, {"message": "Consultation type updated"})
+                conn.commit(); return response(200, {"message": "Consultation type updated", "slots": _refresh_slots(doctor_id)})
             if match and method == "DELETE":
                 cur.execute("UPDATE consultation_types SET is_active=0 WHERE consultation_type_id=%s AND doctor_id=%s", (int(match.group(1)),doctor_id))
                 if not cur.rowcount: return response(404, {"message": "Consultation type not found"})
-                conn.commit(); return response(200, {"message": "Consultation type deactivated"})
+                conn.commit(); return response(200, {"message": "Consultation type deactivated", "slots": _refresh_slots(doctor_id)})
 
             if path == "/availability" and method == "PUT":
                 # Replace the doctor's active weekly patterns in one transaction.
@@ -378,7 +378,8 @@ def _handle_api(event, context):
                     else:
                         raise ValueError("timezone_name is required")
                 ZoneInfo(str(timezone_name))
-                effective_from = date.fromisoformat(str(body.get("effective_from") or date.today().isoformat()))
+                effective_from = date.fromisoformat(str(body.get("effective_from") or
+                    datetime.now(ZoneInfo(str(timezone_name))).date().isoformat()))
                 # Validate every item before changing existing patterns.
                 validated = []
                 for item in patterns:
@@ -404,11 +405,15 @@ def _handle_api(event, context):
                         VALUES (%s,%s,%s,%s,%s,%s,%s,NULL,1)""",
                         (doctor_id, consultation_id, weekday, start_value, end_value, str(timezone_name), effective_from))
                 conn.commit()
-                return response(200, {"message": "Weekly availability replaced", "patterns_saved": len(validated), "timezone_name": str(timezone_name)})
+                slots = _refresh_slots(doctor_id)
+                return response(200, {"message": "Weekly availability replaced", "patterns_saved": len(validated), "timezone_name": str(timezone_name), "slots": slots})
 
             if path == "/availability" and method == "GET":
                 cur.execute("SELECT * FROM availability_patterns WHERE doctor_id=%s AND is_active=1 ORDER BY weekday,start_time", (doctor_id,))
                 rows = cur.fetchall()
+                for row in rows:
+                    row["start_time"] = _as_time(row["start_time"]).strftime("%H:%M:%S")
+                    row["end_time"] = _as_time(row["end_time"]).strftime("%H:%M:%S")
                 timezone_name = rows[0]["timezone_name"] if rows else "Asia/Kolkata"
                 return response(200, {"availability_patterns": rows, "timezone_name": timezone_name})
             if path == "/availability" and method == "POST":
@@ -426,7 +431,7 @@ def _handle_api(event, context):
                 cur.execute("SELECT 1 FROM consultation_types WHERE consultation_type_id=%s AND doctor_id=%s AND is_active=1",(consultation_id,doctor_id))
                 if not cur.fetchone(): raise ValueError("Invalid active consultation_type_id")
                 cur.execute("INSERT INTO availability_patterns (doctor_id,consultation_type_id,weekday,start_time,end_time,timezone_name,effective_from,effective_to,is_active) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,1)",(doctor_id,consultation_id,weekday,start,end,tz,effective_from,effective_to))
-                conn.commit(); return response(201,{"message":"Availability pattern created","availability_id":cur.lastrowid})
+                conn.commit(); new_id = cur.lastrowid; return response(201,{"message":"Availability pattern created","availability_id":new_id,"slots":_refresh_slots(doctor_id)})
             match = re.fullmatch(r"/availability/(\d+)", path)
             if match and method in {"PUT", "PATCH"}:
                 fields = {k: body[k] for k in ("weekday", "start_time", "end_time", "timezone_name", "effective_from", "effective_to", "consultation_type_id") if k in body}
@@ -458,11 +463,11 @@ def _handle_api(event, context):
                     zones = {row["timezone_name"] for row in cur.fetchall()}
                     if zones and fields["timezone_name"] not in zones: raise ValueError("All active availability patterns for one doctor must use the same timezone")
                 cur.execute("UPDATE availability_patterns SET " + ",".join(f"{k}=%s" for k in fields) + " WHERE availability_pattern_id=%s AND doctor_id=%s",list(fields.values())+[int(match.group(1)),doctor_id])
-                conn.commit(); return response(200,{"message":"Availability pattern updated"})
+                conn.commit(); return response(200,{"message":"Availability pattern updated","slots":_refresh_slots(doctor_id)})
             if match and method == "DELETE":
                 cur.execute("UPDATE availability_patterns SET is_active=0 WHERE availability_pattern_id=%s AND doctor_id=%s",(int(match.group(1)),doctor_id))
                 if not cur.rowcount: return response(404,{"message":"Availability pattern not found"})
-                conn.commit(); return response(200,{"message":"Availability pattern deactivated"})
+                conn.commit(); return response(200,{"message":"Availability pattern deactivated","slots":_refresh_slots(doctor_id)})
 
             if path == "/blackouts" and method == "GET":
                 cur.execute("SELECT * FROM doctor_blackouts WHERE doctor_id=%s ORDER BY blackout_date",(doctor_id,))
@@ -489,7 +494,7 @@ def _handle_api(event, context):
             if match and method == "DELETE":
                 cur.execute("DELETE FROM doctor_blackouts WHERE blackout_id=%s AND doctor_id=%s",(int(match.group(1)),doctor_id))
                 if not cur.rowcount: return response(404,{"message":"Blackout date not found"})
-                conn.commit(); return response(200,{"message":"Blackout date removed"})
+                conn.commit(); return response(200,{"message":"Blackout date removed","slots":_refresh_slots(doctor_id)})
 
             if path == "/schedule" and method == "GET":
                 day = date.fromisoformat(str(_required(query,"date")))
@@ -540,7 +545,7 @@ def _handle_api(event, context):
                 return _cancel_slot(conn, cur, doctor_id, slot_id)
 
             if path == "/materialize" and method == "POST":
-                start = date.fromisoformat(str(body.get("start_date",date.today().isoformat())))
+                start = date.fromisoformat(str(body["start_date"])) if body.get("start_date") else None
                 return response(200,materialize_doctor(doctor_id,start,30))
 
         return response(404,{"message":"Doctor endpoint not found","path":path})
@@ -559,11 +564,43 @@ def _handle_api(event, context):
         if conn: conn.close()
 
 
-def materialize_doctor(doctor_id, start_day, days=30):
+def _query_day(table, doctor_id, day):
+    """All slot records for one doctor/date (handles pagination)."""
+    items, kwargs = [], dict(IndexName="DoctorDateIndex",
+        KeyConditionExpression=Key("doctor_id").eq(str(doctor_id)) & Key("slot_date").eq(day.isoformat()))
+    while True:
+        page = table.query(**kwargs)
+        items.extend(page.get("Items", []))
+        if not page.get("LastEvaluatedKey"):
+            return items
+        kwargs["ExclusiveStartKey"] = page["LastEvaluatedKey"]
+
+
+def _set_status(table, slot_id, status, expected):
+    try:
+        table.update_item(Key={"slot_id": slot_id},
+            UpdateExpression="SET #s = :s",
+            ConditionExpression="#s = :expected AND booked_count = :zero",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={":s": status, ":expected": expected, ":zero": 0})
+        return True
+    except Exception as exc:
+        if getattr(exc, "response", {}).get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            return False
+        raise
+
+
+def materialize_doctor(doctor_id, start_day=None, days=30):
+    """Create/refresh this doctor's slots for the rolling window starting at start_day.
+
+    - Idempotent: slot ids are deterministic (doctor#consultation#UTC start).
+    - Existing slots are never overwritten; booking counters are untouched.
+    - Unbooked future slots that no longer match the active patterns are marked
+      REMOVED; they are restored automatically if the pattern returns.
+    """
     conn = db_connect()
     table = ddb.Table(SLOT_TABLE_NAME)
-    created = 0
-    skipped = 0
+    created = skipped = removed = restored = 0
     try:
         with conn.cursor() as cur:
             cur.execute("""SELECT a.availability_pattern_id,a.consultation_type_id,a.weekday,
@@ -573,99 +610,100 @@ def materialize_doctor(doctor_id, start_day, days=30):
                 ON c.consultation_type_id=a.consultation_type_id AND c.doctor_id=a.doctor_id
                 WHERE a.doctor_id=%s AND a.is_active=1 AND c.is_active=1""",(doctor_id,))
             patterns = cur.fetchall()
+            if start_day is None:
+                start_day = (datetime.now(ZoneInfo(patterns[0]["timezone_name"])).date()
+                             if patterns else date.today())
             cur.execute("SELECT blackout_date FROM doctor_blackouts WHERE doctor_id=%s AND blackout_date >= %s AND blackout_date < %s",(doctor_id,start_day,start_day+timedelta(days=days)))
             blackouts = {r["blackout_date"] for r in cur.fetchall()}
+            conn.commit()
+        now_utc = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         for offset in range(days):
             day = start_day + timedelta(days=offset)
-            if day in blackouts:
-                continue
-            # A removed blackout may leave pre-existing deterministic slot IDs.
-            # Restore only unbooked slots; never overwrite booking counters.
-            existing_day = table.query(IndexName="DoctorDateIndex",
-                KeyConditionExpression=Key("doctor_id").eq(str(doctor_id)) & Key("slot_date").eq(day.isoformat()))
-            for existing_slot in existing_day.get("Items", []):
-                if existing_slot.get("status") == "BLACKED_OUT" and int(existing_slot.get("booked_count",0)) == 0:
-                    table.update_item(Key={"slot_id":existing_slot["slot_id"]},
-                        UpdateExpression="SET #status = :status",
-                        ExpressionAttributeNames={"#status":"status"},
-                        ExpressionAttributeValues={":status":"AVAILABLE"})
-            for p in patterns:
-                if day.weekday() != int(p["weekday"]): continue
-                if day < p["effective_from"] or (p["effective_to"] and day > p["effective_to"]): continue
-                zone = ZoneInfo(p["timezone_name"])
-                start_t = _as_time(p["start_time"])
-                end_t = _as_time(p["end_time"])
-                duration = int(p["duration_minutes"])
-                local_start = datetime.combine(day,start_t)
-                local_end = datetime.combine(day,end_t)
-                cursor = local_start
-                while cursor + timedelta(minutes=duration) <= local_end:
-                    aware_start = valid_local_time(cursor,zone)
-                    aware_end = valid_local_time(cursor+timedelta(minutes=duration),zone)
-                    if aware_start is None or aware_end is None:
-                        skipped += 1
+            existing = {s["slot_id"]: s for s in _query_day(table, doctor_id, day)}
+            desired = set()
+            if day not in blackouts:
+                for p in patterns:
+                    if day.weekday() != int(p["weekday"]): continue
+                    if day < p["effective_from"] or (p["effective_to"] and day > p["effective_to"]): continue
+                    zone = ZoneInfo(p["timezone_name"])
+                    start_t = _as_time(p["start_time"])
+                    end_t = _as_time(p["end_time"])
+                    duration = int(p["duration_minutes"])
+                    local_end = datetime.combine(day,end_t)
+                    cursor = datetime.combine(day,start_t)
+                    while cursor + timedelta(minutes=duration) <= local_end:
+                        aware_start = valid_local_time(cursor,zone)
+                        aware_end = valid_local_time(cursor+timedelta(minutes=duration),zone)
+                        if aware_start is None or aware_end is None:
+                            skipped += 1
+                            cursor += timedelta(minutes=duration)
+                            continue
+                        start_utc = aware_start.astimezone(timezone.utc)
+                        # Elapsed time, not wall-clock subtraction (DST safe).
+                        end_utc = start_utc + timedelta(minutes=duration)
+                        slot_id = f"{doctor_id}#{p['consultation_type_id']}#{start_utc.strftime('%Y%m%dT%H%M%SZ')}"
+                        desired.add(slot_id)
+                        current = existing.get(slot_id)
+                        if current is not None:
+                            if current.get("status") in ("REMOVED", "BLACKED_OUT") and int(current.get("booked_count", 0)) == 0:
+                                if _set_status(table, slot_id, "AVAILABLE", current["status"]):
+                                    restored += 1
+                            cursor += timedelta(minutes=duration)
+                            continue
+                        start_text = start_utc.isoformat().replace("+00:00", "Z")
+                        end_text = end_utc.isoformat().replace("+00:00", "Z")
+                        item = {
+                            "slot_id": slot_id,
+                            "doctor_id": str(doctor_id),
+                            "slot_date": day.isoformat(),
+                            "consultation_type_id": int(p["consultation_type_id"]),
+                            "consultation_name": p["consultation_name"],
+                            "start_time_utc": start_text,
+                            "end_time_utc": end_text,
+                            "timezone": p["timezone_name"],
+                            "local_date": day.isoformat(),
+                            "local_start": cursor.isoformat(),
+                            "duration_minutes": duration,
+                            "fee": str(p["fee"]),
+                            "capacity": int(p["slot_capacity"]),
+                            "booked_count": 0,
+                            "status": "AVAILABLE",
+                            "availability_pattern_id": int(p["availability_pattern_id"]),
+                            "start_at_utc": start_text,
+                            "end_at_utc": end_text,
+                            "timezone_name": p["timezone_name"],
+                        }
+                        if put_if_absent(table, item):
+                            created += 1
                         cursor += timedelta(minutes=duration)
-                        continue
-                    start_utc = aware_start.astimezone(timezone.utc)
-                    # Duration is elapsed time, not wall-clock subtraction. This
-                    # keeps a 30-minute consultation exactly 30 minutes when
-                    # the UTC offset changes during a fall-back transition.
-                    end_utc = start_utc + timedelta(minutes=duration)
-                    slot_id = f"{doctor_id}#{p['consultation_type_id']}#{start_utc.strftime('%Y%m%dT%H%M%SZ')}"
-                    start_utc_text = start_utc.isoformat().replace("+00:00", "Z")
-                    end_utc_text = end_utc.isoformat().replace("+00:00", "Z")
-                    item = {
-                        "slot_id": slot_id,
-                        "doctor_id": str(doctor_id),
-                        # Canonical GSI partition/sort attributes.
-                        "slot_date": day.isoformat(),
-                        "consultation_type_id": int(p["consultation_type_id"]),
-                        "consultation_name": p["consultation_name"],
-                        # Canonical time fields consumed by the dashboard.
-                        "start_time_utc": start_utc_text,
-                        "end_time_utc": end_utc_text,
-                        "timezone": p["timezone_name"],
-                        "local_date": day.isoformat(),
-                        "local_start": cursor.isoformat(),
-                        "duration_minutes": duration,
-                        "fee": str(p["fee"]),
-                        "capacity": int(p["slot_capacity"]),
-                        "booked_count": 0,
-                        "status": "AVAILABLE",
-                        "availability_pattern_id": int(p["availability_pattern_id"]),
-                        # Legacy aliases retained while existing clients migrate.
-                        "start_at_utc": start_utc_text,
-                        "end_at_utc": end_utc_text,
-                        "timezone_name": p["timezone_name"],
-                    }
-                    if put_if_absent(table, item):
-                        created += 1
-                    else:
-                        # Repair older records without changing booking state.
-                        table.update_item(
-                            Key={"slot_id": slot_id},
-                            UpdateExpression=(
-                                "SET slot_date = :slot_date, "
-                                "start_time_utc = :start_utc, "
-                                "end_time_utc = :end_utc, "
-                                "#tz = :tz, "
-                                "start_at_utc = :start_utc, "
-                                "end_at_utc = :end_utc, "
-                                "timezone_name = :tz"
-                            ),
-                            ExpressionAttributeNames={"#tz": "timezone"},
-                            ExpressionAttributeValues={
-                                ":slot_date": item["slot_date"],
-                                ":start_utc": start_utc_text,
-                                ":end_utc": end_utc_text,
-                                ":tz": p["timezone_name"],
-                            },
-                        )
-                    cursor += timedelta(minutes=duration)
+            # Withdraw unbooked future slots that no active pattern produces any more
+            # (edited/removed patterns, or legacy duplicate ids). Blackouts are handled
+            # by the blackout endpoint (status BLACKED_OUT).
+            if day not in blackouts:
+                for sid, slot in existing.items():
+                    if sid in desired or slot.get("status") != "AVAILABLE": continue
+                    if int(slot.get("booked_count", 0)) != 0: continue
+                    if str(slot.get("start_time_utc") or slot.get("start_at_utc") or "") <= now_utc: continue
+                    if _set_status(table, sid, "REMOVED", "AVAILABLE"):
+                        removed += 1
         return {"doctor_id":doctor_id,"start_date":start_day.isoformat(),"days":days,
-                "created":created,"dst_wall_times_skipped":skipped,"idempotent":True}
+                "created":created,"restored":restored,"removed":removed,
+                "dst_wall_times_skipped":skipped,"idempotent":True}
     finally:
         conn.close()
+
+
+def _refresh_slots(doctor_id):
+    """Best-effort slot refresh after an availability/blackout change.
+
+    The pattern change is already committed; a failure here must not undo it.
+    The daily scheduler (and POST /doctors/me/materialize) will catch up.
+    """
+    try:
+        return materialize_doctor(doctor_id, None, 30)
+    except Exception:
+        logger.exception("Slot refresh failed for doctor_id=%s", doctor_id)
+        return {"error": "Slot refresh failed; it will be retried by the daily job"}
 
 
 def materializer_handler(event, context):

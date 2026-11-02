@@ -95,6 +95,32 @@ def _doctor_id(cursor, user_id):
     return row["doctor_id"] if row else None
 
 
+INDIAN_MOBILE_PATTERN = re.compile(r"[6-9][0-9]{9}")
+INDIAN_MOBILE_MESSAGE = ("Enter a valid 10-digit Indian mobile number starting with 6, 7, 8 or 9 "
+                         "(digits only, no spaces, +91 or symbols).")
+
+
+def _indian_mobile(value):
+    """Return the phone if it matches ^[6-9][0-9]{9}$, otherwise raise ValueError."""
+    if not isinstance(value, str) or not INDIAN_MOBILE_PATTERN.fullmatch(value.strip()):
+        raise ValueError(INDIAN_MOBILE_MESSAGE)
+    return value.strip()
+
+
+def _check_window(cursor, doctor_id, consultation_id, start_value, end_value):
+    """The availability window must fit at least one slot of the consultation duration."""
+    cursor.execute("SELECT duration_minutes FROM consultation_types WHERE consultation_type_id=%s AND doctor_id=%s AND is_active=1",
+                   (consultation_id, doctor_id))
+    row = cursor.fetchone()
+    if not row:
+        raise ValueError("Invalid active consultation_type_id")
+    minutes = (start_value.hour*60 + start_value.minute) - 0
+    window = (end_value.hour*60 + end_value.minute) - minutes
+    if window < int(row["duration_minutes"]):
+        raise ValueError(f"The availability window ({window} min) is shorter than the consultation duration "
+                         f"({int(row['duration_minutes'])} min). Slots are generated automatically from the duration.")
+
+
 def _required(body, key):
     value = body.get(key)
     if value is None or (isinstance(value, str) and not value.strip()):
@@ -199,6 +225,51 @@ def _cancel_slot(conn, cursor, doctor_id, slot_id):
         "refund_status":"PENDING_PAYMENT_PROCESSOR"})
 
 
+SCHEDULE_MESSAGES = {
+    "OK": "",
+    "BLACKOUT": "Doctor is unavailable on this date because it is marked as a blackout day.",
+    "NO_AVAILABILITY": "No weekly availability is configured. Add your weekly availability to generate slots.",
+    "NOT_MATERIALISED": "Slots for this date have not been generated yet. They are created automatically when availability is saved and by the daily refresh.",
+    "NO_SLOTS": "No slots available for the selected date.",
+}
+
+
+def _schedule_for_day(cursor, conn, doctor_id, day):
+    """Schedule payload with an explicit status so the UI can explain an empty day.
+
+    status: OK | BLACKOUT | NO_AVAILABILITY | NOT_MATERIALISED | NO_SLOTS
+    Slot dates are the doctor's local calendar dates (the zone stored on the pattern).
+    """
+    cursor.execute("""SELECT weekday,timezone_name,effective_from,effective_to FROM availability_patterns
+        WHERE doctor_id=%s AND is_active=1""", (doctor_id,))
+    patterns = cursor.fetchall()
+    tz_name = patterns[0]["timezone_name"] if patterns else "Asia/Kolkata"
+    cursor.execute("SELECT blackout_id,reason FROM doctor_blackouts WHERE doctor_id=%s AND blackout_date=%s LIMIT 1",
+                   (doctor_id, day))
+    blackout = cursor.fetchone()
+    all_slots = _query_day(ddb.Table(SLOT_TABLE_NAME), doctor_id, day)
+    # Withdrawn/blacked-out slots are never shown as bookable.
+    slots = [s for s in all_slots if s.get("status") not in ("REMOVED", "BLACKED_OUT")]
+    if blackout:
+        # Keep only slots that already hold patients so they are not lost from view.
+        slots = [s for s in all_slots if int(s.get("booked_count", 0)) > 0]
+        status = "BLACKOUT"
+    elif slots:
+        status = "OK"
+    elif not patterns:
+        status = "NO_AVAILABILITY"
+    else:
+        applicable = any(int(p["weekday"]) == day.weekday() and day >= p["effective_from"]
+                         and (p["effective_to"] is None or day <= p["effective_to"]) for p in patterns)
+        local_today = datetime.now(ZoneInfo(tz_name)).date()
+        status = "NOT_MATERIALISED" if applicable and day >= local_today else "NO_SLOTS"
+    appointments = _appointments_for_slots(cursor, doctor_id, [s["slot_id"] for s in slots])
+    conn.commit()
+    return {"doctor_id": doctor_id, "date": day.isoformat(), "timezone": tz_name, "status": status,
+            "is_blackout": bool(blackout), "blackout_reason": (blackout or {}).get("reason"),
+            "message": SCHEDULE_MESSAGES[status], "slots": slots, "appointments": appointments}
+
+
 def _handle_api(event, context):
     # Browser dashboard preflight. API Gateway maps OPTIONS without the JWT authorizer.
     if event.get("httpMethod", "GET").upper() == "OPTIONS":
@@ -239,6 +310,7 @@ def _handle_api(event, context):
                 fields = ["first_name", "last_name", "phone", "date_of_birth", "gender", "address",
                           "specialization", "license_number", "years_of_experience", "clinic_address"]
                 values = [_required(body, field) for field in fields]
+                values[2] = _indian_mobile(values[2])
                 date.fromisoformat(str(values[3]))
                 if values[4] not in {"FEMALE", "MALE", "OTHER", "PREFER_NOT_TO_SAY"}:
                     raise ValueError("Invalid gender")
@@ -271,6 +343,8 @@ def _handle_api(event, context):
                 updates = {k: body[k] for k in allowed if k in body}
                 if not updates:
                     return response(400, {"message": "Provide at least one editable profile field"})
+                if "phone" in updates:
+                    updates["phone"] = _indian_mobile(updates["phone"])
                 if "years_of_experience" in updates and not 0 <= int(updates["years_of_experience"]) <= 60:
                     raise ValueError("years_of_experience must be between 0 and 60")
                 if "gender" in updates and updates["gender"] not in {"FEMALE", "MALE", "OTHER", "PREFER_NOT_TO_SAY"}:
@@ -393,9 +467,7 @@ def _handle_api(event, context):
                     if start_value >= end_value:
                         raise ValueError("start_time must be before end_time")
                     consultation_id = int(_required(item, "consultation_type_id"))
-                    cur.execute("SELECT 1 FROM consultation_types WHERE consultation_type_id=%s AND doctor_id=%s AND is_active=1", (consultation_id, doctor_id))
-                    if not cur.fetchone():
-                        raise ValueError("Invalid active consultation_type_id")
+                    _check_window(cur, doctor_id, consultation_id, start_value, end_value)
                     validated.append((consultation_id, weekday, start_value, end_value))
 
                 cur.execute("UPDATE availability_patterns SET is_active=0 WHERE doctor_id=%s AND is_active=1", (doctor_id,))
@@ -430,6 +502,7 @@ def _handle_api(event, context):
                 consultation_id = int(_required(body,"consultation_type_id"))
                 cur.execute("SELECT 1 FROM consultation_types WHERE consultation_type_id=%s AND doctor_id=%s AND is_active=1",(consultation_id,doctor_id))
                 if not cur.fetchone(): raise ValueError("Invalid active consultation_type_id")
+                _check_window(cur, doctor_id, consultation_id, start, end)
                 cur.execute("INSERT INTO availability_patterns (doctor_id,consultation_type_id,weekday,start_time,end_time,timezone_name,effective_from,effective_to,is_active) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,1)",(doctor_id,consultation_id,weekday,start,end,tz,effective_from,effective_to))
                 conn.commit(); new_id = cur.lastrowid; return response(201,{"message":"Availability pattern created","availability_id":new_id,"slots":_refresh_slots(doctor_id)})
             match = re.fullmatch(r"/availability/(\d+)", path)
@@ -449,12 +522,13 @@ def _handle_api(event, context):
                     cur.execute("SELECT 1 FROM consultation_types WHERE consultation_type_id=%s AND doctor_id=%s AND is_active=1",(consultation_id,doctor_id))
                     if not cur.fetchone(): raise ValueError("Invalid active consultation_type_id")
                     fields["consultation_type_id"] = consultation_id
-                cur.execute("SELECT start_time,end_time,effective_from,effective_to,timezone_name FROM availability_patterns WHERE availability_pattern_id=%s AND doctor_id=%s",(int(match.group(1)),doctor_id))
+                cur.execute("SELECT consultation_type_id,start_time,end_time,effective_from,effective_to,timezone_name FROM availability_patterns WHERE availability_pattern_id=%s AND doctor_id=%s",(int(match.group(1)),doctor_id))
                 existing = cur.fetchone()
                 if not existing: return response(404,{"message":"Availability pattern not found"})
                 start_value = _as_time(fields.get("start_time",existing["start_time"]))
                 end_value = _as_time(fields.get("end_time",existing["end_time"]))
                 if start_value >= end_value: raise ValueError("start_time must be before end_time")
+                _check_window(cur, doctor_id, int(fields.get("consultation_type_id", existing["consultation_type_id"])), start_value, end_value)
                 from_value = fields.get("effective_from",existing["effective_from"])
                 to_value = fields.get("effective_to",existing["effective_to"])
                 if to_value is not None and to_value < from_value: raise ValueError("effective_to cannot precede effective_from")
@@ -497,14 +571,7 @@ def _handle_api(event, context):
                 conn.commit(); return response(200,{"message":"Blackout date removed","slots":_refresh_slots(doctor_id)})
 
             if path == "/schedule" and method == "GET":
-                day = date.fromisoformat(str(_required(query,"date")))
-                table = ddb.Table(SLOT_TABLE_NAME)
-                result = table.query(IndexName="DoctorDateIndex",
-                    KeyConditionExpression=Key("doctor_id").eq(str(doctor_id)) & Key("slot_date").eq(day.isoformat()))
-                slots = result.get("Items",[])
-                appointments = _appointments_for_slots(cur, doctor_id, [s["slot_id"] for s in slots])
-                conn.commit()
-                return response(200,{"doctor_id":doctor_id,"date":day.isoformat(),"slots":slots,"appointments":appointments})
+                return response(200, _schedule_for_day(cur, conn, doctor_id, date.fromisoformat(str(_required(query,"date")))))
 
             if path == "/appointments" and method == "GET":
                 # from/to are UTC bounds. A date-only "to" value includes the whole day.

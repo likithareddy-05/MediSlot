@@ -206,10 +206,28 @@ def _validate_name(value, field, errors):
     return value
 
 
-def _validate_phone(value, errors):
-    """Validate and normalize a phone number."""
+INDIAN_MOBILE_PATTERN = re.compile(r"[6-9][0-9]{9}")
+INDIAN_MOBILE_MESSAGE = (
+    "Enter a valid 10-digit Indian mobile number starting with 6, 7, 8 or 9 "
+    "(digits only, no spaces, +91 or symbols)."
+)
+
+
+def _validate_phone(value, errors, indian_mobile=False):
+    """Validate a phone number.
+
+    Doctors must supply a strict Indian mobile number (^[6-9][0-9]{9}$) which is
+    stored exactly as entered. Other roles keep the original international rule.
+    """
     if value is None:
         return None
+
+    if indian_mobile:
+        candidate = value.strip()
+        if not INDIAN_MOBILE_PATTERN.fullmatch(candidate):
+            errors["phone"] = INDIAN_MOBILE_MESSAGE
+            return value
+        return candidate
 
     # Allow formatting characters in the submitted phone number.
     normalized = re.sub(r"[\s().-]", "", value)
@@ -399,6 +417,7 @@ def validate_registration(body):
         values["phone"] = _validate_phone(
             values.get("phone"),
             errors,
+            indian_mobile=(role == "DOCTOR"),
         )
 
         values["date_of_birth"] = _validate_date_of_birth(

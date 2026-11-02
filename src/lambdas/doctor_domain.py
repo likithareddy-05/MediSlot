@@ -441,7 +441,6 @@ def _handle_api(event, context):
                     cur.execute("SELECT 1 FROM consultation_types WHERE doctor_id=%s AND consultation_name=%s AND consultation_type_id<>%s LIMIT 1", (doctor_id,name,int(match.group(1))))
                     if cur.fetchone(): raise ValueError("This consultation type already exists in your account")
                 cur.execute("UPDATE consultation_types SET " + ",".join(f"{k}=%s" for k in fields) + " WHERE consultation_type_id=%s AND doctor_id=%s", list(fields.values())+[int(match.group(1)),doctor_id])
-                if cur.rowcount == 0: return response(404, {"message": "Consultation type not found"})
                 conn.commit(); return response(200, {"message": "Consultation type updated", "slots": _refresh_slots(doctor_id)})
             if match and method == "DELETE":
                 cur.execute("UPDATE consultation_types SET is_active=0 WHERE consultation_type_id=%s AND doctor_id=%s", (int(match.group(1)),doctor_id))

@@ -16,7 +16,7 @@ Parameters:
     Description: S3 object key for the packaged dashboard application.
   ApiBaseUrl:
     Type: String
-    Description: API Gateway stage URL exported by the authentication stack.
+    Description: Base URL of the single MediSlot REST API, including the stage.
   InstanceType:
     Type: String
     Default: t3.micro
@@ -95,7 +95,7 @@ Resources:
           MEDISLOT_API_BASE_URL=${ApiBaseUrl}
           FLASK_SECRET_KEY=$(openssl rand -hex 32)
           SESSION_FILE_DIR=/var/lib/medislot/sessions
-          SESSION_COOKIE_SECURE=true
+          SESSION_COOKIE_SECURE=false
           ENVVARS
           chown root:ec2-user /etc/medislot-dashboard.env
           chmod 640 /etc/medislot-dashboard.env
@@ -151,11 +151,11 @@ Outputs:
     Description: EC2 instance hosting the MediSlot dashboard.
     Value: !Ref DashboardInstance
   DashboardPublicIp:
-    Description: EC2 origin IPv4 address used only by the REST API HTTPS proxy.
+    Description: EC2 origin Public IPv4 address for direct dashboard access.
     Value: !GetAtt DashboardInstance.PublicIp
   DashboardPublicDns:
-    Description: EC2 origin DNS name configured as the REST API HTTPS proxy target.
+    Description: EC2 DNS name for direct dashboard access.
     Value: !GetAtt DashboardInstance.PublicDnsName
   DashboardUrl:
-    Description: Secure HTTPS URL served through the single MediSlot REST API.
-    Value: !Sub ${ApiBaseUrl}/portal/doctor/dashboard
+    Description: Direct EC2 dashboard URL. Use a custom domain and TLS reverse proxy for HTTPS.
+    Value: !Sub http://${DashboardInstance.PublicDnsName}/doctor/dashboard

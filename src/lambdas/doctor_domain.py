@@ -203,10 +203,13 @@ def _handle_api(event, context):
     if not user_id or role != "DOCTOR":
         return response(403, {"message": "A doctor account is required"})
     method = event.get("httpMethod", "GET").upper()
-    path = (event.get("pathParameters") or {}).get("proxy", "")
+    # Explicit API Gateway resources provide event.resource (for example,
+    # /doctors/me/availability). Keep the legacy proxy fallback for safe rollback.
+    path = event.get("resource") or (event.get("pathParameters") or {}).get("proxy", "")
     path = "/" + path.strip("/")
-    # Public API contract is /doctors/me/... . API Gateway's greedy proxy
-    # supplies the part after /doctors, so normalize /me to the handlers below.
+    if path.startswith("/doctors/"):
+        path = path[len("/doctors"):]
+    # Normalize the public /doctors/me contract to the existing domain handlers.
     if path == "/me":
         path = "/profile"
     elif path.startswith("/me/"):

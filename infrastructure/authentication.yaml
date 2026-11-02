@@ -13,11 +13,6 @@ Parameters:
       - test
       - prod
 
-  DashboardOrigin:
-    Type: String
-    Default: 127.0.0.1
-    Description: Public DNS name of the EC2 Flask dashboard origin (without scheme). Updated after the dashboard stack is created.
-
   LambdaArtifactBucket:
     Type: String
     Description: S3 bucket containing packaged Lambda deployment ZIP files.
@@ -451,55 +446,6 @@ Resources:
             - FunctionArn: !GetAtt ProfileFunction.Arn
 
   # ---------------------------------------------------------
-  # HTTPS DASHBOARD ROUTES (same REST API; no second API Gateway)
-  # /portal/{proxy+} forwards to the Flask EC2 origin while preserving
-  # the HTTPS execute-api endpoint and secure browser session cookies.
-  # ---------------------------------------------------------
-  DashboardPortalResource:
-    Type: AWS::ApiGateway::Resource
-    Properties:
-      RestApiId: !Ref MediSlotRestApi
-      ParentId: !GetAtt MediSlotRestApi.RootResourceId
-      PathPart: portal
-
-  DashboardPortalProxyResource:
-    Type: AWS::ApiGateway::Resource
-    Properties:
-      RestApiId: !Ref MediSlotRestApi
-      ParentId: !Ref DashboardPortalResource
-      PathPart: "{proxy+}"
-
-  DashboardPortalProxyMethod:
-    Type: AWS::ApiGateway::Method
-    Properties:
-      RestApiId: !Ref MediSlotRestApi
-      ResourceId: !Ref DashboardPortalProxyResource
-      HttpMethod: ANY
-      AuthorizationType: NONE
-      RequestParameters:
-        method.request.path.proxy: true
-      Integration:
-        Type: HTTP_PROXY
-        IntegrationHttpMethod: ANY
-        Uri: !Sub http://${DashboardOrigin}/{proxy}
-        RequestParameters:
-          integration.request.path.proxy: method.request.path.proxy
-        PassthroughBehavior: WHEN_NO_MATCH
-
-  DashboardPortalRootMethod:
-    Type: AWS::ApiGateway::Method
-    Properties:
-      RestApiId: !Ref MediSlotRestApi
-      ResourceId: !Ref DashboardPortalResource
-      HttpMethod: ANY
-      AuthorizationType: NONE
-      Integration:
-        Type: HTTP_PROXY
-        IntegrationHttpMethod: ANY
-        Uri: !Sub http://${DashboardOrigin}/
-        PassthroughBehavior: WHEN_NO_MATCH
-
-  # ---------------------------------------------------------
   # API DEPLOYMENT
   # ---------------------------------------------------------
 
@@ -546,30 +492,305 @@ Resources:
               Fn::Sub: medislot-${EnvironmentName}-AssetsBucketName
           MATERIALIZER_FUNCTION_NAME: !Sub medislot-${EnvironmentName}-slot-materializer
 
-  DoctorProxyResource:
+  DoctorsRootResource:
     Type: AWS::ApiGateway::Resource
     Properties:
       RestApiId: !Ref MediSlotRestApi
       ParentId: !GetAtt MediSlotRestApi.RootResourceId
       PathPart: doctors
 
-  DoctorProxyGreedyResource:
+  DoctorsMeResource:
     Type: AWS::ApiGateway::Resource
     Properties:
       RestApiId: !Ref MediSlotRestApi
-      ParentId: !Ref DoctorProxyResource
-      PathPart: "{proxy+}"
+      ParentId: !Ref DoctorsRootResource
+      PathPart: me
 
-  DoctorProxyMethod:
+  DoctorsMeGetMethod:
     Type: AWS::ApiGateway::Method
     Properties:
       RestApiId: !Ref MediSlotRestApi
-      ResourceId: !Ref DoctorProxyGreedyResource
-      HttpMethod: ANY
+      ResourceId: !Ref DoctorsMeResource
+      HttpMethod: GET
       AuthorizationType: CUSTOM
       AuthorizerId: !Ref JwtAuthorizer
-      RequestParameters:
-        method.request.path.proxy: true
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Credentials:
+          Fn::ImportValue:
+            Fn::Sub: medislot-${EnvironmentName}-ApiGatewayInvokeLambdaRoleArn
+        Uri:
+          Fn::Sub:
+            - arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FunctionArn}/invocations
+            - FunctionArn: !GetAtt DoctorDomainFunction.Arn
+
+  DoctorsMePutMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref MediSlotRestApi
+      ResourceId: !Ref DoctorsMeResource
+      HttpMethod: PUT
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref JwtAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Credentials:
+          Fn::ImportValue:
+            Fn::Sub: medislot-${EnvironmentName}-ApiGatewayInvokeLambdaRoleArn
+        Uri:
+          Fn::Sub:
+            - arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FunctionArn}/invocations
+            - FunctionArn: !GetAtt DoctorDomainFunction.Arn
+
+  DoctorPhotoResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref MediSlotRestApi
+      ParentId: !Ref DoctorsMeResource
+      PathPart: photo
+
+  DoctorPhotoPostMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref MediSlotRestApi
+      ResourceId: !Ref DoctorPhotoResource
+      HttpMethod: POST
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref JwtAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Credentials:
+          Fn::ImportValue:
+            Fn::Sub: medislot-${EnvironmentName}-ApiGatewayInvokeLambdaRoleArn
+        Uri:
+          Fn::Sub:
+            - arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FunctionArn}/invocations
+            - FunctionArn: !GetAtt DoctorDomainFunction.Arn
+
+  DoctorConsultationTypesResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref MediSlotRestApi
+      ParentId: !Ref DoctorsMeResource
+      PathPart: consultation-types
+
+  DoctorConsultationTypesGetMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref MediSlotRestApi
+      ResourceId: !Ref DoctorConsultationTypesResource
+      HttpMethod: GET
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref JwtAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Credentials:
+          Fn::ImportValue:
+            Fn::Sub: medislot-${EnvironmentName}-ApiGatewayInvokeLambdaRoleArn
+        Uri:
+          Fn::Sub:
+            - arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FunctionArn}/invocations
+            - FunctionArn: !GetAtt DoctorDomainFunction.Arn
+
+  DoctorConsultationTypesPostMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref MediSlotRestApi
+      ResourceId: !Ref DoctorConsultationTypesResource
+      HttpMethod: POST
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref JwtAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Credentials:
+          Fn::ImportValue:
+            Fn::Sub: medislot-${EnvironmentName}-ApiGatewayInvokeLambdaRoleArn
+        Uri:
+          Fn::Sub:
+            - arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FunctionArn}/invocations
+            - FunctionArn: !GetAtt DoctorDomainFunction.Arn
+
+  DoctorAvailabilityResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref MediSlotRestApi
+      ParentId: !Ref DoctorsMeResource
+      PathPart: availability
+
+  DoctorAvailabilityGetMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref MediSlotRestApi
+      ResourceId: !Ref DoctorAvailabilityResource
+      HttpMethod: GET
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref JwtAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Credentials:
+          Fn::ImportValue:
+            Fn::Sub: medislot-${EnvironmentName}-ApiGatewayInvokeLambdaRoleArn
+        Uri:
+          Fn::Sub:
+            - arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FunctionArn}/invocations
+            - FunctionArn: !GetAtt DoctorDomainFunction.Arn
+
+  DoctorAvailabilityPutMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref MediSlotRestApi
+      ResourceId: !Ref DoctorAvailabilityResource
+      HttpMethod: PUT
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref JwtAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Credentials:
+          Fn::ImportValue:
+            Fn::Sub: medislot-${EnvironmentName}-ApiGatewayInvokeLambdaRoleArn
+        Uri:
+          Fn::Sub:
+            - arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FunctionArn}/invocations
+            - FunctionArn: !GetAtt DoctorDomainFunction.Arn
+
+  DoctorAvailabilityPostMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref MediSlotRestApi
+      ResourceId: !Ref DoctorAvailabilityResource
+      HttpMethod: POST
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref JwtAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Credentials:
+          Fn::ImportValue:
+            Fn::Sub: medislot-${EnvironmentName}-ApiGatewayInvokeLambdaRoleArn
+        Uri:
+          Fn::Sub:
+            - arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FunctionArn}/invocations
+            - FunctionArn: !GetAtt DoctorDomainFunction.Arn
+
+  DoctorBlackoutsResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref MediSlotRestApi
+      ParentId: !Ref DoctorsMeResource
+      PathPart: blackouts
+
+  DoctorBlackoutsGetMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref MediSlotRestApi
+      ResourceId: !Ref DoctorBlackoutsResource
+      HttpMethod: GET
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref JwtAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Credentials:
+          Fn::ImportValue:
+            Fn::Sub: medislot-${EnvironmentName}-ApiGatewayInvokeLambdaRoleArn
+        Uri:
+          Fn::Sub:
+            - arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FunctionArn}/invocations
+            - FunctionArn: !GetAtt DoctorDomainFunction.Arn
+
+  DoctorBlackoutsPostMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref MediSlotRestApi
+      ResourceId: !Ref DoctorBlackoutsResource
+      HttpMethod: POST
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref JwtAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Credentials:
+          Fn::ImportValue:
+            Fn::Sub: medislot-${EnvironmentName}-ApiGatewayInvokeLambdaRoleArn
+        Uri:
+          Fn::Sub:
+            - arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FunctionArn}/invocations
+            - FunctionArn: !GetAtt DoctorDomainFunction.Arn
+
+  DoctorScheduleResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref MediSlotRestApi
+      ParentId: !Ref DoctorsMeResource
+      PathPart: schedule
+
+  DoctorScheduleGetMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref MediSlotRestApi
+      ResourceId: !Ref DoctorScheduleResource
+      HttpMethod: GET
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref JwtAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Credentials:
+          Fn::ImportValue:
+            Fn::Sub: medislot-${EnvironmentName}-ApiGatewayInvokeLambdaRoleArn
+        Uri:
+          Fn::Sub:
+            - arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FunctionArn}/invocations
+            - FunctionArn: !GetAtt DoctorDomainFunction.Arn
+
+  DoctorAppointmentsResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref MediSlotRestApi
+      ParentId: !Ref DoctorsMeResource
+      PathPart: appointments
+
+  DoctorAppointmentsGetMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref MediSlotRestApi
+      ResourceId: !Ref DoctorAppointmentsResource
+      HttpMethod: GET
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref JwtAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Credentials:
+          Fn::ImportValue:
+            Fn::Sub: medislot-${EnvironmentName}-ApiGatewayInvokeLambdaRoleArn
+        Uri:
+          Fn::Sub:
+            - arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FunctionArn}/invocations
+            - FunctionArn: !GetAtt DoctorDomainFunction.Arn
+
+  DoctorMaterializeResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref MediSlotRestApi
+      ParentId: !Ref DoctorsMeResource
+      PathPart: materialize
+
+  DoctorMaterializePostMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref MediSlotRestApi
+      ResourceId: !Ref DoctorMaterializeResource
+      HttpMethod: POST
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref JwtAuthorizer
       Integration:
         Type: AWS_PROXY
         IntegrationHttpMethod: POST
@@ -652,14 +873,24 @@ Resources:
       - LogoutMethod
       - PatientMeMethod
       - DoctorMeMethod
-      - DoctorProxyMethod
       - AuthDoctorsRegisterMethod
       - AuthDoctorsLoginMethod
-      - DashboardPortalProxyMethod
-      - DashboardPortalRootMethod
+      - DoctorsMeGetMethod
+      - DoctorsMePutMethod
+      - DoctorPhotoPostMethod
+      - DoctorConsultationTypesGetMethod
+      - DoctorConsultationTypesPostMethod
+      - DoctorAvailabilityGetMethod
+      - DoctorAvailabilityPutMethod
+      - DoctorAvailabilityPostMethod
+      - DoctorBlackoutsGetMethod
+      - DoctorBlackoutsPostMethod
+      - DoctorScheduleGetMethod
+      - DoctorAppointmentsGetMethod
+      - DoctorMaterializePostMethod
     Properties:
       RestApiId: !Ref MediSlotRestApi
-      Description: !Sub MediSlot ${EnvironmentName} authentication, doctor domain, and HTTPS dashboard API deployment
+      Description: !Sub MediSlot ${EnvironmentName} explicit authentication and doctor API routes
 
   ApiStage:
     Type: AWS::ApiGateway::Stage

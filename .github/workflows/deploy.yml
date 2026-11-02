@@ -153,7 +153,6 @@ jobs:
               "ProfileLambdaS3Key=artifacts/${GITHUB_SHA}/profile.zip" \
               "DoctorDomainLambdaS3Key=artifacts/${GITHUB_SHA}/doctor-domain.zip" \
               "SlotMaterializerLambdaS3Key=artifacts/${GITHUB_SHA}/slot-materializer.zip" \
-              "DashboardOrigin=127.0.0.1" \
             --capabilities CAPABILITY_NAMED_IAM --region "$AWS_REGION" --no-fail-on-empty-changeset
 
       - name: Deploy and explicitly invoke schema initializer
@@ -213,7 +212,7 @@ jobs:
           [[ "$url" == https://* ]] || { echo '::error::RestApiBaseUrl output missing or invalid'; exit 1; }
           echo "url=$url" >> "$GITHUB_OUTPUT"
 
-      - name: Deploy HTTPS dashboard
+      - name: Deploy dashboard on EC2
         env:
           ARTIFACT_BUCKET: ${{ steps.assets.outputs.bucket }}
           API_BASE_URL: ${{ steps.api.outputs.url }}
@@ -227,29 +226,6 @@ jobs:
               "DashboardArtifactBucket=${ARTIFACT_BUCKET}" \
               "DashboardArtifactS3Key=artifacts/${GITHUB_SHA}/dashboard.zip" \
               "ApiBaseUrl=${API_BASE_URL}" \
-            --capabilities CAPABILITY_NAMED_IAM --region "$AWS_REGION" --no-fail-on-empty-changeset
-
-      - name: Connect dashboard HTTPS route through the same REST API
-        env:
-          ARTIFACT_BUCKET: ${{ steps.assets.outputs.bucket }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          dashboard_origin="$(aws cloudformation describe-stacks --stack-name "medislot-${ENVIRONMENT_NAME}-dashboard" \
-            --query "Stacks[0].Outputs[?OutputKey=='DashboardPublicDns'].OutputValue | [0]" \
-            --output text --region "$AWS_REGION")"
-          [[ -n "$dashboard_origin" && "$dashboard_origin" != "None" ]] || { echo '::error::DashboardPublicDns output missing'; exit 1; }
-          aws cloudformation deploy --stack-name "medislot-${ENVIRONMENT_NAME}-authentication" \
-            --template-file infrastructure/authentication.yaml \
-            --parameter-overrides \
-              "EnvironmentName=${ENVIRONMENT_NAME}" \
-              "LambdaArtifactBucket=${ARTIFACT_BUCKET}" \
-              "AuthLambdaS3Key=artifacts/${GITHUB_SHA}/auth.zip" \
-              "AuthorizerLambdaS3Key=artifacts/${GITHUB_SHA}/authorizer.zip" \
-              "ProfileLambdaS3Key=artifacts/${GITHUB_SHA}/profile.zip" \
-              "DoctorDomainLambdaS3Key=artifacts/${GITHUB_SHA}/doctor-domain.zip" \
-              "SlotMaterializerLambdaS3Key=artifacts/${GITHUB_SHA}/slot-materializer.zip" \
-              "DashboardOrigin=${dashboard_origin}" \
             --capabilities CAPABILITY_NAMED_IAM --region "$AWS_REGION" --no-fail-on-empty-changeset
 
       - name: Show deployment outputs

@@ -121,6 +121,44 @@ def _check_window(cursor, doctor_id, consultation_id, start_value, end_value):
                          f"({int(row['duration_minutes'])} min). Slots are generated automatically from the duration.")
 
 
+DAY_NAMES = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
+
+
+def _minutes(value):
+    return value.hour * 60 + value.minute
+
+
+def _ranges_overlap(a_start, a_end, b_start, b_end):
+    return a_start < b_end and b_start < a_end
+
+
+def _dates_overlap(from_a, to_a, from_b, to_b):
+    return (to_a is None or from_b <= to_a) and (to_b is None or from_a <= to_b)
+
+
+def _check_overlap(cursor, doctor_id, weekday, start_value, end_value, eff_from, eff_to, exclude_id=None):
+    """One time range on a weekday may belong to only one availability pattern.
+
+    Overlapping windows for different consultation types would offer the same
+    clock time as different slot grids (e.g. 15-min and 60-min), so they are rejected.
+    """
+    cursor.execute("""SELECT a.availability_pattern_id,a.start_time,a.end_time,a.effective_from,a.effective_to,
+        c.consultation_name FROM availability_patterns a
+        JOIN consultation_types c ON c.consultation_type_id=a.consultation_type_id
+        WHERE a.doctor_id=%s AND a.is_active=1 AND a.weekday=%s""", (doctor_id, weekday))
+    for row in cursor.fetchall():
+        if exclude_id is not None and int(row["availability_pattern_id"]) == int(exclude_id):
+            continue
+        other_start, other_end = _as_time(row["start_time"]), _as_time(row["end_time"])
+        if (_ranges_overlap(_minutes(start_value), _minutes(end_value), _minutes(other_start), _minutes(other_end))
+                and _dates_overlap(eff_from, eff_to, row["effective_from"], row["effective_to"])):
+            raise ValueError(
+                f"This window overlaps your existing {DAY_NAMES[weekday]} availability "
+                f"{other_start.strftime('%H:%M')}–{other_end.strftime('%H:%M')} ({row['consultation_name']}). "
+                "The same time cannot be offered under two consultation types; "
+                "choose a different time range or edit/remove the existing one.")
+
+
 def _required(body, key):
     value = body.get(key)
     if value is None or (isinstance(value, str) and not value.strip()):
@@ -476,6 +514,10 @@ def _handle_api(event, context):
                         raise ValueError("start_time must be before end_time")
                     consultation_id = int(_required(item, "consultation_type_id"))
                     _check_window(cur, doctor_id, consultation_id, start_value, end_value)
+                    for _, other_day, other_start, other_end in validated:
+                        if other_day == weekday and _ranges_overlap(_minutes(start_value), _minutes(end_value),
+                                                                    _minutes(other_start), _minutes(other_end)):
+                            raise ValueError(f"Overlapping {DAY_NAMES[weekday]} availability windows are not allowed")
                     validated.append((consultation_id, weekday, start_value, end_value))
 
                 cur.execute("UPDATE availability_patterns SET is_active=0 WHERE doctor_id=%s AND is_active=1", (doctor_id,))
@@ -511,6 +553,7 @@ def _handle_api(event, context):
                 cur.execute("SELECT 1 FROM consultation_types WHERE consultation_type_id=%s AND doctor_id=%s AND is_active=1",(consultation_id,doctor_id))
                 if not cur.fetchone(): raise ValueError("Invalid active consultation_type_id")
                 _check_window(cur, doctor_id, consultation_id, start, end)
+                _check_overlap(cur, doctor_id, weekday, start, end, effective_from, effective_to)
                 cur.execute("INSERT INTO availability_patterns (doctor_id,consultation_type_id,weekday,start_time,end_time,timezone_name,effective_from,effective_to,is_active) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,1)",(doctor_id,consultation_id,weekday,start,end,tz,effective_from,effective_to))
                 conn.commit(); new_id = cur.lastrowid; return response(201,{"message":"Availability pattern created","availability_id":new_id,"slots":_refresh_slots(doctor_id)})
             match = re.fullmatch(r"/availability/(\d+)", path)
@@ -530,13 +573,17 @@ def _handle_api(event, context):
                     cur.execute("SELECT 1 FROM consultation_types WHERE consultation_type_id=%s AND doctor_id=%s AND is_active=1",(consultation_id,doctor_id))
                     if not cur.fetchone(): raise ValueError("Invalid active consultation_type_id")
                     fields["consultation_type_id"] = consultation_id
-                cur.execute("SELECT consultation_type_id,start_time,end_time,effective_from,effective_to,timezone_name FROM availability_patterns WHERE availability_pattern_id=%s AND doctor_id=%s",(int(match.group(1)),doctor_id))
+                cur.execute("SELECT consultation_type_id,weekday,start_time,end_time,effective_from,effective_to,timezone_name FROM availability_patterns WHERE availability_pattern_id=%s AND doctor_id=%s",(int(match.group(1)),doctor_id))
                 existing = cur.fetchone()
                 if not existing: return response(404,{"message":"Availability pattern not found"})
+                existing_weekday = int(existing["weekday"])
                 start_value = _as_time(fields.get("start_time",existing["start_time"]))
                 end_value = _as_time(fields.get("end_time",existing["end_time"]))
                 if start_value >= end_value: raise ValueError("start_time must be before end_time")
                 _check_window(cur, doctor_id, int(fields.get("consultation_type_id", existing["consultation_type_id"])), start_value, end_value)
+                _check_overlap(cur, doctor_id, int(fields.get("weekday", existing_weekday)), start_value, end_value,
+                               fields.get("effective_from", existing["effective_from"]),
+                               fields.get("effective_to", existing["effective_to"]), exclude_id=int(match.group(1)))
                 from_value = fields.get("effective_from",existing["effective_from"])
                 to_value = fields.get("effective_to",existing["effective_to"])
                 if to_value is not None and to_value < from_value: raise ValueError("effective_to cannot precede effective_from")

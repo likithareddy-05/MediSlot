@@ -410,42 +410,6 @@ Resources:
             - FunctionArn: !GetAtt ProfileFunction.Arn
 
   # ---------------------------------------------------------
-  # /doctor/me - current authenticated doctor's account details
-  # ---------------------------------------------------------
-  DoctorResource:
-    Type: AWS::ApiGateway::Resource
-    Properties:
-      RestApiId: !Ref MediSlotRestApi
-      ParentId: !GetAtt MediSlotRestApi.RootResourceId
-      PathPart: doctor
-
-  DoctorMeResource:
-    Type: AWS::ApiGateway::Resource
-    Properties:
-      RestApiId: !Ref MediSlotRestApi
-      ParentId: !Ref DoctorResource
-      PathPart: me
-
-  DoctorMeMethod:
-    Type: AWS::ApiGateway::Method
-    Properties:
-      RestApiId: !Ref MediSlotRestApi
-      ResourceId: !Ref DoctorMeResource
-      HttpMethod: GET
-      AuthorizationType: CUSTOM
-      AuthorizerId: !Ref JwtAuthorizer
-      Integration:
-        Type: AWS_PROXY
-        IntegrationHttpMethod: POST
-        Credentials:
-          Fn::ImportValue:
-            Fn::Sub: medislot-${EnvironmentName}-ApiGatewayInvokeLambdaRoleArn
-        Uri:
-          Fn::Sub:
-            - arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FunctionArn}/invocations
-            - FunctionArn: !GetAtt ProfileFunction.Arn
-
-  # ---------------------------------------------------------
   # API DEPLOYMENT
   # ---------------------------------------------------------
 
@@ -872,7 +836,6 @@ Resources:
       - RefreshMethod
       - LogoutMethod
       - PatientMeMethod
-      - DoctorMeMethod
       - AuthDoctorsRegisterMethod
       - AuthDoctorsLoginMethod
       - DoctorsMeGetMethod

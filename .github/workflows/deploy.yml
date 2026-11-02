@@ -127,7 +127,7 @@ jobs:
           package_lambda auth auth_handler.py register.py refresh.py logout.py
           package_lambda authorizer authorizer.py
           package_lambda profile profile.py
-          package_lambda doctor-domain doctor_domain.py
+          package_lambda doctor-domain doctor_domain.py slot_time.py
           package_lambda slot-materializer slot_materializer.py slot_time.py
 
           schema_dir=build/schema-init

@@ -1,7 +1,7 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
-  MediSlot doctor dashboard EC2 host with an HTTPS API Gateway HTTP API front door.
-  API Gateway terminates TLS using its AWS-managed execute-api certificate.
+  MediSlot doctor dashboard EC2 host. The existing MediSlot REST API provides the
+  HTTPS /portal proxy route to this EC2 Flask origin.
 
 Parameters:
   EnvironmentName:
@@ -146,69 +146,16 @@ Resources:
         - Key: Environment
           Value: !Ref EnvironmentName
 
-  DashboardHttpApi:
-    Type: AWS::ApiGatewayV2::Api
-    Properties:
-      Name: !Sub medislot-${EnvironmentName}-dashboard-https
-      ProtocolType: HTTP
-      Tags:
-        Project: MediSlot
-        Environment: !Ref EnvironmentName
-
-  DashboardIntegration:
-    Type: AWS::ApiGatewayV2::Integration
-    Properties:
-      ApiId: !Ref DashboardHttpApi
-      IntegrationType: HTTP_PROXY
-      IntegrationMethod: ANY
-      IntegrationUri: !Sub http://${DashboardInstance.PublicDnsName}/{proxy}
-      PayloadFormatVersion: "1.0"
-      TimeoutInMillis: 30000
-
-  DashboardRootIntegration:
-    Type: AWS::ApiGatewayV2::Integration
-    Properties:
-      ApiId: !Ref DashboardHttpApi
-      IntegrationType: HTTP_PROXY
-      IntegrationMethod: ANY
-      IntegrationUri: !Sub http://${DashboardInstance.PublicDnsName}/
-      PayloadFormatVersion: "1.0"
-      TimeoutInMillis: 30000
-
-  DashboardProxyRoute:
-    Type: AWS::ApiGatewayV2::Route
-    Properties:
-      ApiId: !Ref DashboardHttpApi
-      RouteKey: "ANY /{proxy+}"
-      Target: !Sub integrations/${DashboardIntegration}
-
-  DashboardRootRoute:
-    Type: AWS::ApiGatewayV2::Route
-    Properties:
-      ApiId: !Ref DashboardHttpApi
-      RouteKey: "ANY /"
-      Target: !Sub integrations/${DashboardRootIntegration}
-
-  DashboardStage:
-    Type: AWS::ApiGatewayV2::Stage
-    Properties:
-      ApiId: !Ref DashboardHttpApi
-      StageName: $default
-      AutoDeploy: true
-
 Outputs:
   DashboardInstanceId:
     Description: EC2 instance hosting the MediSlot dashboard.
     Value: !Ref DashboardInstance
   DashboardPublicIp:
-    Description: EC2 origin IPv4 address (HTTP origin; use HTTPS API Gateway URL in browsers).
+    Description: EC2 origin IPv4 address used only by the REST API HTTPS proxy.
     Value: !GetAtt DashboardInstance.PublicIp
   DashboardPublicDns:
-    Description: EC2 origin DNS name.
+    Description: EC2 origin DNS name configured as the REST API HTTPS proxy target.
     Value: !GetAtt DashboardInstance.PublicDnsName
-  DashboardApiEndpoint:
-    Description: API Gateway HTTPS endpoint domain.
-    Value: !Sub ${DashboardHttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}
   DashboardUrl:
-    Description: Secure HTTPS URL for the MediSlot doctor dashboard.
-    Value: !Sub https://${DashboardHttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/doctor/dashboard
+    Description: Secure HTTPS URL served through the single MediSlot REST API.
+    Value: !Sub ${ApiBaseUrl}/portal/doctor/dashboard

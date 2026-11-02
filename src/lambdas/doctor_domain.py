@@ -108,11 +108,13 @@ def _as_time(value):
 
 
 def _profile(cursor, doctor_id):
-    cursor.execute("""SELECT d.doctor_id,d.user_id,d.first_name,d.last_name,d.phone,
+    cursor.execute("""SELECT d.doctor_id,d.user_id,u.email,d.first_name,d.last_name,d.phone,
         d.date_of_birth,d.gender,d.address,d.specialization,d.license_number,
         d.years_of_experience,d.clinic_address,d.created_at,d.updated_at,
-        a.photo_key FROM doctors d LEFT JOIN doctor_profile_assets a
-        ON a.doctor_id=d.doctor_id WHERE d.doctor_id=%s""", (doctor_id,))
+        a.photo_key FROM doctors d
+        JOIN users u ON u.user_id=d.user_id
+        LEFT JOIN doctor_profile_assets a ON a.doctor_id=d.doctor_id
+        WHERE d.doctor_id=%s""", (doctor_id,))
     return cursor.fetchone()
 
 
@@ -203,6 +205,12 @@ def _handle_api(event, context):
     method = event.get("httpMethod", "GET").upper()
     path = (event.get("pathParameters") or {}).get("proxy", "")
     path = "/" + path.strip("/")
+    # Public API contract is /doctors/me/... . API Gateway's greedy proxy
+    # supplies the part after /doctors, so normalize /me to the handlers below.
+    if path == "/me":
+        path = "/profile"
+    elif path.startswith("/me/"):
+        path = path[len("/me"):]
     query = event.get("queryStringParameters") or {}
     body = _json_body(event)
     conn = None
@@ -236,7 +244,14 @@ def _handle_api(event, context):
 
             # Profile read/update. The registered identity/license fields are immutable here.
             if path == "/profile" and method == "GET":
-                return response(200, {"profile": _profile(cur, doctor_id)})
+                profile = _profile(cur, doctor_id)
+                if profile and profile.get("photo_key"):
+                    profile["photo_url"] = s3.generate_presigned_url(
+                        "get_object",
+                        Params={"Bucket": ASSETS_BUCKET, "Key": profile["photo_key"]},
+                        ExpiresIn=300,
+                    )
+                return response(200, {"profile": profile})
             if path == "/profile" and method in {"PUT", "PATCH"}:
                 allowed = {"first_name", "last_name", "phone", "date_of_birth", "gender", "address",
                            "specialization", "years_of_experience", "clinic_address"}
@@ -262,7 +277,7 @@ def _handle_api(event, context):
                 url = s3.generate_presigned_url("get_object",Params={"Bucket":ASSETS_BUCKET,"Key":photo["photo_key"]},ExpiresIn=300)
                 return response(200,{"photo_url":url,"photo_key":photo["photo_key"],"expires_in_seconds":300})
 
-            if path == "/profile/photo-url" and method == "POST":
+            if path in {"/photo", "/profile/photo-url"} and method == "POST":
                 content_type = _required(body, "content_type")
                 if content_type not in {"image/jpeg", "image/png", "image/webp"}:
                     raise ValueError("content_type must be image/jpeg, image/png, or image/webp")
@@ -337,9 +352,52 @@ def _handle_api(event, context):
                 if not cur.rowcount: return response(404, {"message": "Consultation type not found"})
                 conn.commit(); return response(200, {"message": "Consultation type deactivated"})
 
+            if path == "/availability" and method == "PUT":
+                # Replace the doctor's active weekly patterns in one transaction.
+                # Existing rows are deactivated (not deleted) to preserve history.
+                patterns = body.get("patterns")
+                timezone_name = body.get("timezone_name") or body.get("home_timezone")
+                if not isinstance(patterns, list):
+                    raise ValueError("patterns must be an array")
+                if not timezone_name:
+                    if patterns and patterns[0].get("timezone_name"):
+                        timezone_name = patterns[0]["timezone_name"]
+                    else:
+                        raise ValueError("timezone_name is required")
+                ZoneInfo(str(timezone_name))
+                effective_from = date.fromisoformat(str(body.get("effective_from") or date.today().isoformat()))
+                # Validate every item before changing existing patterns.
+                validated = []
+                for item in patterns:
+                    if not isinstance(item, dict):
+                        raise ValueError("Each availability pattern must be an object")
+                    weekday = int(item.get("weekday", item.get("day_of_week", -1)))
+                    if not 0 <= weekday <= 6:
+                        raise ValueError("weekday must be 0-6 (Monday=0)")
+                    start_value = time.fromisoformat(str(_required(item, "start_time")))
+                    end_value = time.fromisoformat(str(_required(item, "end_time")))
+                    if start_value >= end_value:
+                        raise ValueError("start_time must be before end_time")
+                    consultation_id = int(_required(item, "consultation_type_id"))
+                    cur.execute("SELECT 1 FROM consultation_types WHERE consultation_type_id=%s AND doctor_id=%s AND is_active=1", (consultation_id, doctor_id))
+                    if not cur.fetchone():
+                        raise ValueError("Invalid active consultation_type_id")
+                    validated.append((consultation_id, weekday, start_value, end_value))
+
+                cur.execute("UPDATE availability_patterns SET is_active=0 WHERE doctor_id=%s AND is_active=1", (doctor_id,))
+                for consultation_id, weekday, start_value, end_value in validated:
+                    cur.execute("""INSERT INTO availability_patterns
+                        (doctor_id,consultation_type_id,weekday,start_time,end_time,timezone_name,effective_from,effective_to,is_active)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,NULL,1)""",
+                        (doctor_id, consultation_id, weekday, start_value, end_value, str(timezone_name), effective_from))
+                conn.commit()
+                return response(200, {"message": "Weekly availability replaced", "patterns_saved": len(validated), "timezone_name": str(timezone_name)})
+
             if path == "/availability" and method == "GET":
-                cur.execute("SELECT * FROM availability_patterns WHERE doctor_id=%s ORDER BY weekday,start_time", (doctor_id,))
-                return response(200, {"availability_patterns": cur.fetchall()})
+                cur.execute("SELECT * FROM availability_patterns WHERE doctor_id=%s AND is_active=1 ORDER BY weekday,start_time", (doctor_id,))
+                rows = cur.fetchall()
+                timezone_name = rows[0]["timezone_name"] if rows else "Asia/Kolkata"
+                return response(200, {"availability_patterns": rows, "timezone_name": timezone_name})
             if path == "/availability" and method == "POST":
                 weekday = int(_required(body,"weekday")); start = time.fromisoformat(_required(body,"start_time")); end = time.fromisoformat(_required(body,"end_time")); tz = _required(body,"timezone_name")
                 ZoneInfo(tz)
@@ -541,15 +599,55 @@ def materialize_doctor(doctor_id, start_day, days=30):
                     # the UTC offset changes during a fall-back transition.
                     end_utc = start_utc + timedelta(minutes=duration)
                     slot_id = f"{doctor_id}#{p['consultation_type_id']}#{start_utc.strftime('%Y%m%dT%H%M%SZ')}"
-                    item = {"slot_id":slot_id,"doctor_id":str(doctor_id),"slot_date":day.isoformat(),
-                        "consultation_type_id":int(p["consultation_type_id"]),"consultation_name":p["consultation_name"],
-                        "start_at_utc":start_utc.isoformat().replace("+00:00","Z"),"end_at_utc":end_utc.isoformat().replace("+00:00","Z"),
-                        "timezone_name":p["timezone_name"],"local_start":cursor.isoformat(),"duration_minutes":duration,
-                        "fee":str(p["fee"]),"capacity":int(p["slot_capacity"]),"booked_count":0,"status":"AVAILABLE",
-                        "availability_pattern_id":int(p["availability_pattern_id"])}
-                    if put_if_absent(table,item):
+                    start_utc_text = start_utc.isoformat().replace("+00:00", "Z")
+                    end_utc_text = end_utc.isoformat().replace("+00:00", "Z")
+                    item = {
+                        "slot_id": slot_id,
+                        "doctor_id": str(doctor_id),
+                        # Canonical GSI partition/sort attributes.
+                        "slot_date": day.isoformat(),
+                        "consultation_type_id": int(p["consultation_type_id"]),
+                        "consultation_name": p["consultation_name"],
+                        # Canonical time fields consumed by the dashboard.
+                        "start_time_utc": start_utc_text,
+                        "end_time_utc": end_utc_text,
+                        "timezone": p["timezone_name"],
+                        "local_date": day.isoformat(),
+                        "local_start": cursor.isoformat(),
+                        "duration_minutes": duration,
+                        "fee": str(p["fee"]),
+                        "capacity": int(p["slot_capacity"]),
+                        "booked_count": 0,
+                        "status": "AVAILABLE",
+                        "availability_pattern_id": int(p["availability_pattern_id"]),
+                        # Legacy aliases retained while existing clients migrate.
+                        "start_at_utc": start_utc_text,
+                        "end_at_utc": end_utc_text,
+                        "timezone_name": p["timezone_name"],
+                    }
+                    if put_if_absent(table, item):
                         created += 1
-                    # Existing deterministic slot is intentionally left unchanged.
+                    else:
+                        # Repair older records without changing booking state.
+                        table.update_item(
+                            Key={"slot_id": slot_id},
+                            UpdateExpression=(
+                                "SET slot_date = :slot_date, "
+                                "start_time_utc = :start_utc, "
+                                "end_time_utc = :end_utc, "
+                                "#tz = :tz, "
+                                "start_at_utc = :start_utc, "
+                                "end_at_utc = :end_utc, "
+                                "timezone_name = :tz"
+                            ),
+                            ExpressionAttributeNames={"#tz": "timezone"},
+                            ExpressionAttributeValues={
+                                ":slot_date": item["slot_date"],
+                                ":start_utc": start_utc_text,
+                                ":end_utc": end_utc_text,
+                                ":tz": p["timezone_name"],
+                            },
+                        )
                     cursor += timedelta(minutes=duration)
         return {"doctor_id":doctor_id,"start_date":start_day.isoformat(),"days":days,
                 "created":created,"dst_wall_times_skipped":skipped,"idempotent":True}

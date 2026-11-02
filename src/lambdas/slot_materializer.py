@@ -313,15 +313,20 @@ def handler(event, context):
                             pattern["consultation_type_id"]
                         ),
 
+                        # GSI key: must match DoctorDateIndex in data.yaml.
+                        "slot_date": day.isoformat(),
+
+                        # Retain local_date for compatibility with any older
+                        # readers while slot_date is the canonical index key.
                         "local_date": day.isoformat(),
 
-                        "local_start": (
-                            local_start.time().isoformat()
-                        ),
+                        "local_start": local_start.isoformat(),
 
-                        "start_time_utc": utc_start.isoformat(),
+                        # Canonical UTC/timezone fields shared by both
+                        # materializers and the dashboard.
+                        "start_time_utc": utc_start.isoformat().replace("+00:00", "Z"),
 
-                        "end_time_utc": utc_end.isoformat(),
+                        "end_time_utc": utc_end.isoformat().replace("+00:00", "Z"),
 
                         "timezone": doctor_timezone,
 
@@ -346,6 +351,29 @@ def handler(event, context):
                     if put_if_absent(table, item):
                         created += 1
                     else:
+                        # Backfill the GSI key and canonical fields on records
+                        # created by the previous version. Do not overwrite
+                        # status, booked_count, capacity, or other booking data.
+                        table.update_item(
+                            Key={"slot_id": slot_id},
+                            UpdateExpression=(
+                                "SET slot_date = :slot_date, "
+                                "local_date = :local_date, "
+                                "local_start = :local_start, "
+                                "start_time_utc = :start_utc, "
+                                "end_time_utc = :end_utc, "
+                                "#tz = :tz"
+                            ),
+                            ExpressionAttributeNames={"#tz": "timezone"},
+                            ExpressionAttributeValues={
+                                ":slot_date": item["slot_date"],
+                                ":local_date": item["local_date"],
+                                ":local_start": item["local_start"],
+                                ":start_utc": item["start_time_utc"],
+                                ":end_utc": item["end_time_utc"],
+                                ":tz": item["timezone"],
+                            },
+                        )
                         skipped += 1
 
         # ----------------------------------------------------

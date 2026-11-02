@@ -13,6 +13,11 @@ Parameters:
       - test
       - prod
 
+  DashboardOrigin:
+    Type: String
+    Default: 127.0.0.1
+    Description: Public DNS name of the EC2 Flask dashboard origin (without scheme). Updated after the dashboard stack is created.
+
   LambdaArtifactBucket:
     Type: String
     Description: S3 bucket containing packaged Lambda deployment ZIP files.
@@ -446,6 +451,55 @@ Resources:
             - FunctionArn: !GetAtt ProfileFunction.Arn
 
   # ---------------------------------------------------------
+  # HTTPS DASHBOARD ROUTES (same REST API; no second API Gateway)
+  # /portal/{proxy+} forwards to the Flask EC2 origin while preserving
+  # the HTTPS execute-api endpoint and secure browser session cookies.
+  # ---------------------------------------------------------
+  DashboardPortalResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref MediSlotRestApi
+      ParentId: !GetAtt MediSlotRestApi.RootResourceId
+      PathPart: portal
+
+  DashboardPortalProxyResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref MediSlotRestApi
+      ParentId: !Ref DashboardPortalResource
+      PathPart: "{proxy+}"
+
+  DashboardPortalProxyMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref MediSlotRestApi
+      ResourceId: !Ref DashboardPortalProxyResource
+      HttpMethod: ANY
+      AuthorizationType: NONE
+      RequestParameters:
+        method.request.path.proxy: true
+      Integration:
+        Type: HTTP_PROXY
+        IntegrationHttpMethod: ANY
+        Uri: !Sub http://${DashboardOrigin}/{proxy}
+        RequestParameters:
+          integration.request.path.proxy: method.request.path.proxy
+        PassthroughBehavior: WHEN_NO_MATCH
+
+  DashboardPortalRootMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref MediSlotRestApi
+      ResourceId: !Ref DashboardPortalResource
+      HttpMethod: ANY
+      AuthorizationType: NONE
+      Integration:
+        Type: HTTP_PROXY
+        IntegrationHttpMethod: ANY
+        Uri: !Sub http://${DashboardOrigin}/
+        PassthroughBehavior: WHEN_NO_MATCH
+
+  # ---------------------------------------------------------
   # API DEPLOYMENT
   # ---------------------------------------------------------
 
@@ -589,7 +643,7 @@ Resources:
       Principal: events.amazonaws.com
       SourceArn: !GetAtt SlotMaterializerSchedule.Arn
 
-  ApiDeploymentMilestone3:
+  ApiDeploymentMilestone4:
     Type: AWS::ApiGateway::Deployment
     DependsOn:
       - RegisterMethod
@@ -601,15 +655,17 @@ Resources:
       - DoctorProxyMethod
       - AuthDoctorsRegisterMethod
       - AuthDoctorsLoginMethod
+      - DashboardPortalProxyMethod
+      - DashboardPortalRootMethod
     Properties:
       RestApiId: !Ref MediSlotRestApi
-      Description: !Sub MediSlot ${EnvironmentName} authentication and doctor domain API deployment
+      Description: !Sub MediSlot ${EnvironmentName} authentication, doctor domain, and HTTPS dashboard API deployment
 
   ApiStage:
     Type: AWS::ApiGateway::Stage
     Properties:
       RestApiId: !Ref MediSlotRestApi
-      DeploymentId: !Ref ApiDeploymentMilestone3
+      DeploymentId: !Ref ApiDeploymentMilestone4
       StageName: !Ref EnvironmentName
       Description: !Sub MediSlot ${EnvironmentName} stage
 

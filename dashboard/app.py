@@ -2,6 +2,7 @@
 import os
 import secrets
 from pathlib import Path
+from urllib.parse import quote
 
 import requests
 from flask import Flask, jsonify, redirect, request, send_from_directory, session
@@ -52,7 +53,7 @@ def _api_call(path, method="GET", *, token=None, body=None, params=None):
     if body is not None:
         headers["Content-Type"] = "application/json"
     return HTTP.request(
-        method, f"{API_BASE_URL}/{path.lstrip('/')}", headers=headers,
+        method, f"{API_BASE_URL}/{quote(path.lstrip('/'), safe='/')}", headers=headers,
         json=body, params=params, timeout=TIMEOUT,
     )
 
@@ -97,7 +98,7 @@ def bff_register():
         return jsonify({"message": "Invalid registration data."}), 400
     payload["role"] = "DOCTOR"
     try:
-        response = _api_call("auth/register", "POST", body=payload)
+        response = _api_call("auth/doctors/register", "POST", body=payload)
     except requests.RequestException:
         app.logger.exception("Doctor registration API request failed")
         return jsonify({"message": "Unable to reach the registration service. Please try again."}), 502
@@ -113,7 +114,7 @@ def bff_login():
     if not isinstance(email, str) or not isinstance(password, str) or not email.strip() or not password:
         return jsonify({"message": "Email and password are required."}), 400
     try:
-        response = _api_call("auth/login", "POST",
+        response = _api_call("auth/doctors/login", "POST",
                              body={"email": email.strip(), "password": password})
     except requests.RequestException:
         app.logger.exception("Authentication API request failed")
@@ -162,19 +163,27 @@ def bff_logout():
 
 
 def _local_doctor_path(api_path):
-    """Translate dashboard-friendly paths to the existing local doctor-domain routes."""
+    """Map same-origin dashboard paths to the documented MediSlot API routes."""
     path = "/" + api_path.strip("/")
+
+    # Profile
     if path == "/profile":
         return "doctors/me"
-    if path == "/profile/photo-url":
-        # The local Lambda supports POST for presigned S3 PUT URLs; it has no GET photo URL route.
+    if path == "/profile/photo":
         return "doctors/me/photo"
-    allowed = (
-        "/consultation-types", "/availability", "/blackouts", "/schedule",
-        "/appointments",
+
+    # Doctor-domain collections and item actions
+    mappings = (
+        ("/consultation-types", "/doctors/me/consultation-types"),
+        ("/availability", "/doctors/me/availability"),
+        ("/blackouts", "/doctors/me/blackouts"),
+        ("/schedule", "/doctors/me/schedule"),
+        ("/appointments", "/doctors/me/appointments"),
+        ("/slots", "/doctors/me/slots"),
     )
-    if any(path == item or path.startswith(item + "/") for item in allowed):
-        return "doctors" + path
+    for source, target in mappings:
+        if path == source or path.startswith(source + "/"):
+            return target + path[len(source):]
     return None
 
 
@@ -188,11 +197,8 @@ def bff_api(api_path):
     upstream_path = _local_doctor_path(api_path)
     if not upstream_path:
         return jsonify({"message": "Dashboard API route is not supported."}), 404
-    if api_path.strip("/") == "profile/photo-url" and request.method != "POST":
-        return jsonify({"message": "The current doctor API supports photo uploads only."}), 405
-
-    body = request.get_json(silent=True) if request.method != "GET" else None
-    if api_path.strip("/") == "profile/photo-url" and isinstance(body, dict):
+    body = request.get_json(silent=True) if request.method not in {"GET", "DELETE"} else None
+    if api_path.strip("/") == "profile/photo" and isinstance(body, dict):
         body.setdefault("filename", "profile.jpg")
 
     try:

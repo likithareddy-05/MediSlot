@@ -8,6 +8,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src" / "lambdas"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 for key, value in {
     "AWS_DEFAULT_REGION": "ap-south-1", "AWS_ACCESS_KEY_ID": "test", "AWS_SECRET_ACCESS_KEY": "test",
     "DB_HOST_PARAMETER": "h", "DB_PORT_PARAMETER": "p", "DB_NAME_PARAMETER": "n",
@@ -15,6 +16,7 @@ for key, value in {
 }.items():
     os.environ.setdefault(key, value)
 
+import aws_stubs  # noqa: E402,F401  (boto3 stand-ins when it is not installed)
 import doctor_domain as dd  # noqa: E402
 
 SCHEMA = (ROOT / "database" / "schema.sql").read_text(encoding="utf-8")

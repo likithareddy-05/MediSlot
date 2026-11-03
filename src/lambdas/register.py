@@ -305,6 +305,24 @@ def _validate_address(value, field, errors):
     return value
 
 
+def _validate_lookup_id(value, field, label, errors):
+    """Validate an id chosen from a dropdown list (a positive whole number)."""
+    if isinstance(value, bool):
+        number = None
+    elif isinstance(value, int):
+        number = value
+    elif isinstance(value, str) and value.strip().isdigit():
+        number = int(value.strip())
+    else:
+        number = None
+
+    if number is None or number < 1:
+        errors[field] = f"Select a valid {label}."
+        return None
+
+    return number
+
+
 def validate_registration(body):
     """Validate common and role-specific fields; return normalized values."""
     errors = {}
@@ -395,7 +413,6 @@ def validate_registration(body):
             "date_of_birth",
             "gender",
             "address",
-            "specialization",
             "license_number",
             "years_of_experience",
             "clinic_address",
@@ -437,16 +454,21 @@ def validate_registration(body):
         )
 
         if role == "DOCTOR":
-            # Validate specialization.
-            specialization = values.get("specialization")
+            # Specialization and hospital are ids taken from the
+            # specializations and hospitals tables (dropdown lists).
+            values["specialization_id"] = _validate_lookup_id(
+                body.get("specialization_id"),
+                "specialization_id",
+                "specialization",
+                errors,
+            )
 
-            if (
-                specialization is not None
-                and not 2 <= len(specialization) <= 100
-            ):
-                errors["specialization"] = (
-                    "specialization must be between 2 and 100 characters."
-                )
+            values["hospital_id"] = _validate_lookup_id(
+                body.get("hospital_id"),
+                "hospital_id",
+                "hospital",
+                errors,
+            )
 
             # License must be exactly AA-12345.
             # Normalize lowercase input to uppercase first.
@@ -545,6 +567,40 @@ def lambda_handler(event, context):
         connection = get_db_connection()
 
         with connection.cursor() as cursor:
+            if data["role"] == "DOCTOR":
+                # The chosen specialization and hospital must exist and be active.
+                lookup_errors = {}
+
+                cursor.execute(
+                    "SELECT 1 FROM specializations "
+                    "WHERE specialization_id = %s AND is_active = 1",
+                    (data["specialization_id"],),
+                )
+                if not cursor.fetchone():
+                    lookup_errors["specialization_id"] = (
+                        "Select a valid specialization."
+                    )
+
+                cursor.execute(
+                    "SELECT 1 FROM hospitals "
+                    "WHERE hospital_id = %s AND is_active = 1",
+                    (data["hospital_id"],),
+                )
+                if not cursor.fetchone():
+                    lookup_errors["hospital_id"] = "Select a valid hospital."
+
+                if lookup_errors:
+                    return response(
+                        400,
+                        {
+                            "message": (
+                                "Validation failed. Correct the fields "
+                                "listed in errors."
+                            ),
+                            "errors": lookup_errors,
+                        },
+                    )
+
             # Insert common account details.
             cursor.execute(
                 """
@@ -600,12 +656,13 @@ def lambda_handler(event, context):
                             date_of_birth,
                             gender,
                             address,
-                            specialization,
+                            specialization_id,
                             license_number,
                             years_of_experience,
-                            clinic_address
+                            clinic_address,
+                            hospital_id
                         )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         user_id,
@@ -615,10 +672,11 @@ def lambda_handler(event, context):
                         data["date_of_birth"],
                         data["gender"],
                         data["address"],
-                        data["specialization"],
+                        data["specialization_id"],
                         data["license_number"],
                         data["years_of_experience"],
                         data["clinic_address"],
+                        data["hospital_id"],
                     ),
                 )
 

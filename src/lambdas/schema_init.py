@@ -68,6 +68,45 @@ def lambda_handler(event, context):
             autocommit=True,
         )
 
+        # A database still on the old one-table layout must be migrated first;
+        # running the new schema on top of it would fail half-way.
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = %s
+                  AND table_name = 'consultation_types'
+                  AND column_name = 'doctor_id'
+                """,
+                (database,),
+            )
+            if cursor.fetchone():
+                raise RuntimeError(
+                    "The database still has the old consultation_types layout. "
+                    "Run database/migrations/001_normalize_consultation_types.sql first."
+                )
+
+        # An existing doctors table without specialization_id / hospital_id / photo_key
+        # would be left untouched by CREATE TABLE IF NOT EXISTS: stop with a clear message.
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT
+                  (SELECT COUNT(*) FROM information_schema.tables
+                    WHERE table_schema = %s AND table_name = 'doctors') AS has_table,
+                  (SELECT COUNT(*) FROM information_schema.columns
+                    WHERE table_schema = %s AND table_name = 'doctors'
+                      AND column_name IN ('specialization_id', 'hospital_id', 'photo_key')) AS new_columns
+                """,
+                (database, database),
+            )
+            has_table, new_columns = cursor.fetchone()
+            if has_table and new_columns != 3:
+                raise RuntimeError(
+                    "The existing doctors table is missing specialization_id, hospital_id or "
+                    "photo_key. Update or recreate the doctors table first (see README)."
+                )
+
         with connection.cursor() as cursor:
             for index, statement in enumerate(statements, start=1):
                 logger.info("Executing schema statement %s", index)
@@ -79,19 +118,27 @@ def lambda_handler(event, context):
                 SELECT TABLE_NAME
                 FROM information_schema.tables
                 WHERE TABLE_SCHEMA = %s
-                  AND TABLE_NAME IN ('users', 'patients', 'doctors', 'doctor_profile_assets', 'consultation_types', 'availability_patterns', 'doctor_blackouts', 'appointments', 'refund_ledger')
+                  AND TABLE_NAME IN ('users', 'patients', 'hospitals', 'specializations', 'doctors', 'consultation_types', 'doctor_consultation_types', 'availability_patterns', 'doctor_blackouts', 'appointments')
                 ORDER BY TABLE_NAME
                 """,
                 (database,),
             )
             tables = [row[0] for row in cursor.fetchall()]
 
-        expected = {"users", "patients", "doctors", "doctor_profile_assets", "consultation_types", "availability_patterns", "doctor_blackouts", "appointments", "refund_ledger"}
+        expected = {"users", "patients", "hospitals", "specializations", "doctors", "consultation_types", "doctor_consultation_types", "availability_patterns", "doctor_blackouts", "appointments"}
         missing = sorted(expected - set(tables))
 
         if missing:
             raise RuntimeError(
                 f"Schema verification failed. Missing tables: {missing}"
+            )
+
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT COUNT(*) FROM consultation_types")
+            catalog_rows = cursor.fetchone()[0]
+        if catalog_rows != 4:
+            raise RuntimeError(
+                f"consultation_types must hold exactly the 4 approved types, found {catalog_rows}"
             )
 
         logger.info("Schema initialized and verified: %s", tables)

@@ -124,6 +124,108 @@ CREATE TABLE IF NOT EXISTS patients (
 
 
 -- ============================================================
+-- HOSPITALS
+-- Reference list shown as a dropdown on the doctor dashboard.
+-- doctors.hospital_id stores the id from this table.
+-- The rows below are sample data: add, edit or hide (is_active = 0) as needed.
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS hospitals (
+    hospital_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+
+    hospital_name VARCHAR(150) NOT NULL,
+
+    city VARCHAR(100) NOT NULL,
+
+    state VARCHAR(100) NOT NULL,
+
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+
+    created_at DATETIME(6) NOT NULL
+        DEFAULT CURRENT_TIMESTAMP(6),
+
+    updated_at DATETIME(6) NOT NULL
+        DEFAULT CURRENT_TIMESTAMP(6)
+        ON UPDATE CURRENT_TIMESTAMP(6),
+
+    PRIMARY KEY (hospital_id),
+
+    UNIQUE KEY uq_hospitals_name_city (hospital_name, city),
+
+    KEY idx_hospitals_active_name (is_active, hospital_name)
+
+) ENGINE=InnoDB
+  DEFAULT CHARSET=utf8mb4
+  COLLATE=utf8mb4_0900_ai_ci;
+
+INSERT IGNORE INTO hospitals (hospital_id, hospital_name, city, state) VALUES
+    (1, 'Apollo Hospitals, Jubilee Hills', 'Hyderabad', 'Telangana'),
+    (2, 'Yashoda Hospitals, Secunderabad', 'Hyderabad', 'Telangana'),
+    (3, 'KIMS Hospitals, Secunderabad', 'Hyderabad', 'Telangana'),
+    (4, 'CARE Hospitals, Banjara Hills', 'Hyderabad', 'Telangana'),
+    (5, 'Continental Hospitals, Gachibowli', 'Hyderabad', 'Telangana'),
+    (6, 'AIG Hospitals, Gachibowli', 'Hyderabad', 'Telangana'),
+    (7, 'Medicover Hospitals, HITEC City', 'Hyderabad', 'Telangana'),
+    (8, 'Sunshine Hospitals, Secunderabad', 'Hyderabad', 'Telangana'),
+    (9, 'Rainbow Children''s Hospital, Banjara Hills', 'Hyderabad', 'Telangana'),
+    (10, 'Osmania General Hospital', 'Hyderabad', 'Telangana'),
+    (11, 'Apollo Hospitals, Greams Road', 'Chennai', 'Tamil Nadu'),
+    (12, 'Manipal Hospital, Old Airport Road', 'Bengaluru', 'Karnataka'),
+    (13, 'Fortis Hospital, Bannerghatta Road', 'Bengaluru', 'Karnataka'),
+    (14, 'Max Super Speciality Hospital, Saket', 'New Delhi', 'Delhi');
+
+
+-- ============================================================
+-- SPECIALIZATIONS
+-- Reference list shown as a dropdown on the doctor dashboard.
+-- doctors.specialization_id stores the id from this table.
+-- The rows below are sample data: add, edit or hide (is_active = 0) as needed.
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS specializations (
+    specialization_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+
+    specialization_name VARCHAR(100) NOT NULL,
+
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+
+    created_at DATETIME(6) NOT NULL
+        DEFAULT CURRENT_TIMESTAMP(6),
+
+    updated_at DATETIME(6) NOT NULL
+        DEFAULT CURRENT_TIMESTAMP(6)
+        ON UPDATE CURRENT_TIMESTAMP(6),
+
+    PRIMARY KEY (specialization_id),
+
+    UNIQUE KEY uq_specializations_name (specialization_name)
+
+) ENGINE=InnoDB
+  DEFAULT CHARSET=utf8mb4
+  COLLATE=utf8mb4_0900_ai_ci;
+
+INSERT IGNORE INTO specializations (specialization_id, specialization_name) VALUES
+    (1, 'Cardiology'),
+    (2, 'Dentistry'),
+    (3, 'Dermatology'),
+    (4, 'Endocrinology'),
+    (5, 'ENT (Otolaryngology)'),
+    (6, 'Gastroenterology'),
+    (7, 'General Medicine'),
+    (8, 'General Surgery'),
+    (9, 'Gynecology & Obstetrics'),
+    (10, 'Nephrology'),
+    (11, 'Neurology'),
+    (12, 'Oncology'),
+    (13, 'Ophthalmology'),
+    (14, 'Orthopedics'),
+    (15, 'Pediatrics'),
+    (16, 'Psychiatry'),
+    (17, 'Pulmonology'),
+    (18, 'Urology');
+
+
+-- ============================================================
 -- DOCTORS TABLE
 -- Stores personal and professional doctor information.
 -- ============================================================
@@ -145,13 +247,18 @@ CREATE TABLE IF NOT EXISTS doctors (
 
     address VARCHAR(500) NOT NULL,
 
-    specialization VARCHAR(100) NOT NULL,
+    specialization_id BIGINT UNSIGNED NOT NULL,
+
+    hospital_id BIGINT UNSIGNED NOT NULL,
 
     license_number VARCHAR(8) NOT NULL,
 
     years_of_experience TINYINT UNSIGNED NOT NULL,
 
     clinic_address VARCHAR(500) NOT NULL,
+
+    -- S3 object key of the profile photo (NULL until one is uploaded)
+    photo_key VARCHAR(512) NULL,
 
     created_at DATETIME(6) NOT NULL
         DEFAULT CURRENT_TIMESTAMP(6),
@@ -168,7 +275,9 @@ CREATE TABLE IF NOT EXISTS doctors (
     -- Every doctor must have a unique license number
     UNIQUE KEY uq_doctors_license_number (license_number),
 
-    KEY idx_doctors_specialization (specialization),
+    KEY idx_doctors_specialization (specialization_id),
+
+    KEY idx_doctors_hospital (hospital_id),
 
     KEY idx_doctors_name (last_name, first_name),
 
@@ -177,6 +286,18 @@ CREATE TABLE IF NOT EXISTS doctors (
     CONSTRAINT fk_doctors_user
         FOREIGN KEY (user_id)
         REFERENCES users (user_id)
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT,
+
+    CONSTRAINT fk_doctors_specialization
+        FOREIGN KEY (specialization_id)
+        REFERENCES specializations (specialization_id)
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT,
+
+    CONSTRAINT fk_doctors_hospital
+        FOREIGN KEY (hospital_id)
+        REFERENCES hospitals (hospital_id)
         ON UPDATE RESTRICT
         ON DELETE RESTRICT,
 
@@ -213,34 +334,60 @@ CREATE TABLE IF NOT EXISTS doctors (
 -- MILESTONE 3: DOCTOR DOMAIN (additive; preserves Milestone 2)
 -- ============================================================
 
-CREATE TABLE IF NOT EXISTS doctor_profile_assets (
-    doctor_id BIGINT UNSIGNED NOT NULL,
-    photo_key VARCHAR(512) NOT NULL,
-    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
-    PRIMARY KEY (doctor_id),
-    CONSTRAINT fk_doctor_profile_assets_doctor FOREIGN KEY (doctor_id)
-        REFERENCES doctors (doctor_id) ON UPDATE RESTRICT ON DELETE RESTRICT
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
-
+-- ------------------------------------------------------------
+-- CONSULTATION TYPES (catalog)
+-- The four consultation types MediSlot supports, and nothing else.
+-- Each type has a fixed id, name and duration. Per-doctor details
+-- (fee, capacity, active flag) live in doctor_consultation_types.
+--   1 Quick Consult        15 min, capacity 1
+--   2 Standard Consult     30 min, capacity 1
+--   3 Detailed Consult     60 min, capacity 1
+--   4 Health Camp Session  60 min, capacity 2-10 (chosen per doctor)
+-- ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS consultation_types (
-    consultation_type_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-    doctor_id BIGINT UNSIGNED NOT NULL,
+    consultation_type_id BIGINT UNSIGNED NOT NULL,
     consultation_name VARCHAR(100) NOT NULL,
     duration_minutes SMALLINT UNSIGNED NOT NULL,
+    min_capacity SMALLINT UNSIGNED NOT NULL DEFAULT 1,
+    max_capacity SMALLINT UNSIGNED NOT NULL DEFAULT 1,
+    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+    PRIMARY KEY (consultation_type_id),
+    UNIQUE KEY uq_consultation_types_name (consultation_name),
+    CONSTRAINT chk_consultation_types_id CHECK (consultation_type_id BETWEEN 1 AND 4),
+    CONSTRAINT chk_consultation_types_name CHECK (consultation_name IN ('Quick Consult','Standard Consult','Detailed Consult','Health Camp Session')),
+    CONSTRAINT chk_consultation_types_duration CHECK (duration_minutes BETWEEN 5 AND 240),
+    CONSTRAINT chk_consultation_types_capacity CHECK (min_capacity >= 1 AND max_capacity >= min_capacity AND max_capacity <= 50)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+INSERT IGNORE INTO consultation_types (consultation_type_id, consultation_name, duration_minutes, min_capacity, max_capacity) VALUES
+    (1, 'Quick Consult', 15, 1, 1),
+    (2, 'Standard Consult', 30, 1, 1),
+    (3, 'Detailed Consult', 60, 1, 1),
+    (4, 'Health Camp Session', 60, 2, 10);
+
+-- ------------------------------------------------------------
+-- DOCTOR CONSULTATION TYPES
+-- Which catalog consultation types a doctor offers, with the
+-- doctor's own fee, slot capacity and active flag.
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS doctor_consultation_types (
+    doctor_id BIGINT UNSIGNED NOT NULL,
+    consultation_type_id BIGINT UNSIGNED NOT NULL,
     fee DECIMAL(10,2) NOT NULL DEFAULT 0.00,
     slot_capacity SMALLINT UNSIGNED NOT NULL DEFAULT 1,
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
     created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
     updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
-    PRIMARY KEY (consultation_type_id),
-    UNIQUE KEY uq_consultation_doctor_name (doctor_id, consultation_name),
-    KEY idx_consultation_doctor_active (doctor_id, is_active),
-    CONSTRAINT fk_consultation_types_doctor FOREIGN KEY (doctor_id)
+    PRIMARY KEY (doctor_id, consultation_type_id),
+    KEY idx_doctor_consultation_type (consultation_type_id),
+    KEY idx_doctor_consultation_active (doctor_id, is_active),
+    CONSTRAINT fk_doctor_consultation_doctor FOREIGN KEY (doctor_id)
         REFERENCES doctors (doctor_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-    CONSTRAINT chk_consultation_duration CHECK (duration_minutes BETWEEN 5 AND 240),
-    CONSTRAINT chk_consultation_fee CHECK (fee >= 0),
-    CONSTRAINT chk_consultation_capacity CHECK (slot_capacity BETWEEN 1 AND 50)
+    CONSTRAINT fk_doctor_consultation_type FOREIGN KEY (consultation_type_id)
+        REFERENCES consultation_types (consultation_type_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    CONSTRAINT chk_doctor_consultation_fee CHECK (fee >= 0),
+    CONSTRAINT chk_doctor_consultation_capacity CHECK (slot_capacity BETWEEN 1 AND 50)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE IF NOT EXISTS availability_patterns (
@@ -258,10 +405,11 @@ CREATE TABLE IF NOT EXISTS availability_patterns (
     updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
     PRIMARY KEY (availability_pattern_id),
     KEY idx_availability_doctor_weekday (doctor_id, weekday, is_active),
+    KEY idx_availability_doctor_consultation (doctor_id, consultation_type_id),
     CONSTRAINT fk_availability_doctor FOREIGN KEY (doctor_id)
         REFERENCES doctors (doctor_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-    CONSTRAINT fk_availability_consultation FOREIGN KEY (consultation_type_id)
-        REFERENCES consultation_types (consultation_type_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    CONSTRAINT fk_availability_doctor_consultation FOREIGN KEY (doctor_id, consultation_type_id)
+        REFERENCES doctor_consultation_types (doctor_id, consultation_type_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
     CONSTRAINT chk_availability_weekday CHECK (weekday BETWEEN 0 AND 6),
     CONSTRAINT chk_availability_time CHECK (start_time < end_time),
     CONSTRAINT chk_availability_dates CHECK (effective_to IS NULL OR effective_to >= effective_from)
@@ -281,7 +429,7 @@ CREATE TABLE IF NOT EXISTS doctor_blackouts (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 -- ============================================================
--- MILESTONE 3: APPOINTMENTS AND REFUND LEDGER (additive)
+-- MILESTONE 3: APPOINTMENTS (additive)
 -- Minimal appointment shape used by the doctor day-view and outcome APIs.
 -- The patient booking workflow populates these rows in a later milestone.
 -- ============================================================
@@ -302,34 +450,13 @@ CREATE TABLE IF NOT EXISTS appointments (
     UNIQUE KEY uq_appointment_slot_patient (slot_id, patient_id),
     KEY idx_appointments_doctor_start (doctor_id, scheduled_start_utc),
     KEY idx_appointments_doctor_status (doctor_id, status),
+    KEY idx_appointments_doctor_consultation (doctor_id, consultation_type_id),
     CONSTRAINT fk_appointment_doctor FOREIGN KEY (doctor_id)
         REFERENCES doctors (doctor_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
     CONSTRAINT fk_appointment_patient FOREIGN KEY (patient_id)
         REFERENCES patients (patient_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-    CONSTRAINT fk_appointment_consultation FOREIGN KEY (consultation_type_id)
-        REFERENCES consultation_types (consultation_type_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    CONSTRAINT fk_appointment_doctor_consultation FOREIGN KEY (doctor_id, consultation_type_id)
+        REFERENCES doctor_consultation_types (doctor_id, consultation_type_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
     CONSTRAINT chk_appointment_status CHECK (status IN ('BOOKED','CANCELLED','COMPLETED','NO_SHOW')),
     CONSTRAINT chk_appointment_outcome CHECK (outcome IS NULL OR outcome IN ('COMPLETED','NO_SHOW'))
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
-
-CREATE TABLE IF NOT EXISTS refund_ledger (
-    refund_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-    appointment_id BIGINT UNSIGNED NOT NULL,
-    patient_id BIGINT UNSIGNED NOT NULL,
-    doctor_id BIGINT UNSIGNED NOT NULL,
-    refund_amount DECIMAL(10,2) NOT NULL,
-    refund_status VARCHAR(20) NOT NULL DEFAULT 'PENDING',
-    reason VARCHAR(255) NOT NULL DEFAULT 'DOCTOR_SLOT_CANCELLED',
-    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
-    PRIMARY KEY (refund_id),
-    UNIQUE KEY uq_refund_appointment (appointment_id),
-    CONSTRAINT fk_refund_appointment FOREIGN KEY (appointment_id)
-        REFERENCES appointments (appointment_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-    CONSTRAINT fk_refund_patient FOREIGN KEY (patient_id)
-        REFERENCES patients (patient_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-    CONSTRAINT fk_refund_doctor FOREIGN KEY (doctor_id)
-        REFERENCES doctors (doctor_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-    CONSTRAINT chk_refund_amount CHECK (refund_amount >= 0),
-    CONSTRAINT chk_refund_status CHECK (refund_status IN ('PENDING','PROCESSING','REFUNDED','FAILED'))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;

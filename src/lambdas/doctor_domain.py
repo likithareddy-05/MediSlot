@@ -117,9 +117,28 @@ def _indian_mobile(value):
     return value.strip()
 
 
+def _catalog_type_by_name(cursor, name):
+    """Row of the consultation_types catalog (the four approved types) or None."""
+    cursor.execute("""SELECT consultation_type_id,consultation_name,duration_minutes,min_capacity,max_capacity
+        FROM consultation_types WHERE consultation_name=%s""", (name,))
+    return cursor.fetchone()
+
+
+def _validate_capacity(name, catalog, capacity):
+    """Capacity must be inside the catalog range for this consultation type."""
+    low, high = int(catalog["min_capacity"]), int(catalog["max_capacity"])
+    if low == high:
+        if capacity != low:
+            raise ValueError(f"{name} slot capacity must be {low}")
+    elif not low <= capacity <= high:
+        raise ValueError(f"{name} capacity must be between {low} and {high}")
+
+
 def _check_window(cursor, doctor_id, consultation_id, start_value, end_value):
     """The availability window must fit at least one slot of the consultation duration."""
-    cursor.execute("SELECT duration_minutes FROM consultation_types WHERE consultation_type_id=%s AND doctor_id=%s AND is_active=1",
+    cursor.execute("""SELECT c.duration_minutes FROM doctor_consultation_types d
+        JOIN consultation_types c ON c.consultation_type_id=d.consultation_type_id
+        WHERE d.consultation_type_id=%s AND d.doctor_id=%s AND d.is_active=1""",
                    (consultation_id, doctor_id))
     row = cursor.fetchone()
     if not row:
@@ -187,14 +206,37 @@ def _as_time(value):
 
 
 def _profile(cursor, doctor_id):
+    # `specialization` stays in the response as the readable name; the ids are what is stored.
     cursor.execute("""SELECT d.doctor_id,d.user_id,u.email,d.first_name,d.last_name,d.phone,
-        d.date_of_birth,d.gender,d.address,d.specialization,d.license_number,
+        d.date_of_birth,d.gender,d.address,d.specialization_id,s.specialization_name AS specialization,
+        d.hospital_id,h.hospital_name,h.city AS hospital_city,d.license_number,
         d.years_of_experience,d.clinic_address,d.created_at,d.updated_at,
-        a.photo_key FROM doctors d
+        d.photo_key FROM doctors d
         JOIN users u ON u.user_id=d.user_id
-        LEFT JOIN doctor_profile_assets a ON a.doctor_id=d.doctor_id
+        JOIN specializations s ON s.specialization_id=d.specialization_id
+        JOIN hospitals h ON h.hospital_id=d.hospital_id
         WHERE d.doctor_id=%s""", (doctor_id,))
     return cursor.fetchone()
+
+
+def _lookup_id(cursor, table, id_column, value, label, current=None):
+    """Validate an id chosen from the hospitals / specializations dropdown.
+
+    The id must exist and be active. Keeping the doctor's current value is always
+    allowed, so a profile can still be saved if that entry was later hidden.
+    """
+    try:
+        if isinstance(value, bool):
+            raise ValueError
+        number = int(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"Select a valid {label}")
+    if current is not None and number == int(current):
+        return number
+    cursor.execute(f"SELECT 1 FROM {table} WHERE {id_column}=%s AND is_active=1", (number,))
+    if not cursor.fetchone():
+        raise ValueError(f"Select a valid {label}")
+    return number
 
 
 APPOINTMENT_STATUSES = {"BOOKED","CANCELLED","COMPLETED","NO_SHOW"}
@@ -234,29 +276,21 @@ def _appointments_for_slots(cursor, doctor_id, slot_ids):
 
 
 def _cancel_slot(conn, cursor, doctor_id, slot_id):
-    """Cancel a slot and record a full-fee PENDING refund for each booked patient.
+    """Cancel a slot and mark every booked appointment on it as CANCELLED.
 
-    There is no payment gateway in this repository yet, so refund rows stay
-    PENDING until a payment processor is connected.
+    There is no refund table: no refund record is created.
     """
     table = ddb.Table(SLOT_TABLE_NAME)
     item = table.get_item(Key={"slot_id":slot_id}).get("Item")
     if not item or str(item.get("doctor_id")) != str(doctor_id):
         _log_event("slot_cancel_not_found", logging.WARNING, doctor_id=doctor_id, slot_id=slot_id)
         return response(404,{"message":"Slot not found"})
-    cursor.execute("""SELECT a.appointment_id,a.patient_id,c.fee
-        FROM appointments a JOIN consultation_types c
-        ON c.consultation_type_id=a.consultation_type_id
+    cursor.execute("""SELECT a.appointment_id,a.patient_id FROM appointments a
         WHERE a.slot_id=%s AND a.doctor_id=%s AND a.status='BOOKED'""",(slot_id,doctor_id))
     affected = cursor.fetchall()
     for appt in affected:
         cursor.execute("UPDATE appointments SET status='CANCELLED' WHERE appointment_id=%s AND status='BOOKED'",
                        (appt["appointment_id"],))
-        cursor.execute("""INSERT INTO refund_ledger
-            (appointment_id,patient_id,doctor_id,refund_amount,refund_status)
-            VALUES (%s,%s,%s,%s,'PENDING')
-            ON DUPLICATE KEY UPDATE appointment_id=VALUES(appointment_id)""",
-            (appt["appointment_id"],appt["patient_id"],doctor_id,appt["fee"]))
     conn.commit()
     try:
         table.update_item(Key={"slot_id":slot_id},
@@ -268,17 +302,15 @@ def _cancel_slot(conn, cursor, doctor_id, slot_id):
         # Already cancelled is fine; the cancel call is idempotent.
         code = getattr(exc,"response",{}).get("Error",{}).get("Code")
         if code != "ConditionalCheckFailedException":
-            # MySQL is already committed (appointments cancelled, refunds queued)
+            # MySQL is already committed (appointments cancelled)
             # but DynamoDB still shows the slot as open: flag it for follow-up.
             _log_event("slot_cancel_state_mismatch", logging.ERROR, doctor_id=doctor_id,
                        slot_id=slot_id, affected_appointments=len(affected), error_code=code)
             raise
     _log_event("slot_cancelled", doctor_id=doctor_id, slot_id=slot_id,
-               affected_appointments=len(affected), refunds_created=len(affected),
-               refund_total=sum(float(a["fee"]) for a in affected))
+               affected_appointments=len(affected))
     return response(200,{"message":"Slot cancelled","slot_id":slot_id,
-        "affected_appointments":len(affected),"refunds_created":len(affected),
-        "refund_status":"PENDING_PAYMENT_PROCESSOR"})
+        "affected_appointments":len(affected)})
 
 
 SCHEDULE_MESSAGES = {
@@ -364,8 +396,11 @@ def _handle_api(event, context):
                 if doctor_id is not None:
                     return response(409, {"message": "Doctor profile already exists; use PUT to update it"})
                 fields = ["first_name", "last_name", "phone", "date_of_birth", "gender", "address",
-                          "specialization", "license_number", "years_of_experience", "clinic_address"]
+                          "specialization_id", "license_number", "years_of_experience", "clinic_address",
+                          "hospital_id"]
                 values = [_required(body, field) for field in fields]
+                values[6] = _lookup_id(cur, "specializations", "specialization_id", values[6], "specialization")
+                values[10] = _lookup_id(cur, "hospitals", "hospital_id", values[10], "hospital")
                 values[2] = _indian_mobile(values[2])
                 date.fromisoformat(str(values[3]))
                 if values[4] not in {"FEMALE", "MALE", "OTHER", "PREFER_NOT_TO_SAY"}:
@@ -375,8 +410,8 @@ def _handle_api(event, context):
                 if not 0 <= int(values[8]) <= 60:
                     raise ValueError("years_of_experience must be between 0 and 60")
                 cur.execute("""INSERT INTO doctors (user_id,first_name,last_name,phone,date_of_birth,gender,
-                    address,specialization,license_number,years_of_experience,clinic_address)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""", [user_id] + values)
+                    address,specialization_id,license_number,years_of_experience,clinic_address,hospital_id)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""", [user_id] + values)
                 doctor_id = cur.lastrowid
                 conn.commit()
                 _log_event("doctor_profile_created", doctor_id=doctor_id, user_id=user_id)
@@ -396,7 +431,7 @@ def _handle_api(event, context):
                 return response(200, {"profile": profile})
             if path == "/profile" and method in {"PUT", "PATCH"}:
                 allowed = {"first_name", "last_name", "phone", "date_of_birth", "gender", "address",
-                           "specialization", "years_of_experience", "clinic_address"}
+                           "specialization_id", "hospital_id", "years_of_experience", "clinic_address"}
                 updates = {k: body[k] for k in allowed if k in body}
                 if not updates:
                     return response(400, {"message": "Provide at least one editable profile field"})
@@ -408,6 +443,15 @@ def _handle_api(event, context):
                     raise ValueError("Invalid gender")
                 if "date_of_birth" in updates:
                     date.fromisoformat(str(updates["date_of_birth"]))
+                if "specialization_id" in updates or "hospital_id" in updates:
+                    cur.execute("SELECT specialization_id,hospital_id FROM doctors WHERE doctor_id=%s", (doctor_id,))
+                    current_ids = cur.fetchone()
+                    if "specialization_id" in updates:
+                        updates["specialization_id"] = _lookup_id(cur, "specializations", "specialization_id",
+                            updates["specialization_id"], "specialization", current_ids["specialization_id"])
+                    if "hospital_id" in updates:
+                        updates["hospital_id"] = _lookup_id(cur, "hospitals", "hospital_id",
+                            updates["hospital_id"], "hospital", current_ids["hospital_id"])
                 sql = "UPDATE doctors SET " + ",".join(f"{k}=%s" for k in updates) + " WHERE doctor_id=%s"
                 cur.execute(sql, list(updates.values()) + [doctor_id])
                 conn.commit()
@@ -415,9 +459,9 @@ def _handle_api(event, context):
                 return response(200, {"message": "Doctor profile updated", "profile": _profile(cur, doctor_id)})
 
             if path == "/profile/photo-url" and method == "GET":
-                cur.execute("SELECT photo_key FROM doctor_profile_assets WHERE doctor_id=%s",(doctor_id,))
+                cur.execute("SELECT photo_key FROM doctors WHERE doctor_id=%s",(doctor_id,))
                 photo = cur.fetchone()
-                if not photo:
+                if not photo or not photo["photo_key"]:
                     return response(404,{"message":"Profile photo not found"})
                 url = s3.generate_presigned_url("get_object",Params={"Bucket":ASSETS_BUCKET,"Key":photo["photo_key"]},ExpiresIn=300)
                 return response(200,{"photo_url":url,"photo_key":photo["photo_key"],"expires_in_seconds":300})
@@ -430,86 +474,82 @@ def _handle_api(event, context):
                 key = f"doctor-photos/{doctor_id}/{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}-{os.urandom(6).hex()}.{ext}"
                 url = s3.generate_presigned_url("put_object", Params={"Bucket": ASSETS_BUCKET, "Key": key,
                     "ContentType": content_type, "ServerSideEncryption": "AES256"}, ExpiresIn=300)
-                cur.execute("""INSERT INTO doctor_profile_assets (doctor_id,photo_key) VALUES (%s,%s)
-                    ON DUPLICATE KEY UPDATE photo_key=VALUES(photo_key),updated_at=CURRENT_TIMESTAMP(6)""", (doctor_id, key))
+                cur.execute("UPDATE doctors SET photo_key=%s WHERE doctor_id=%s", (key, doctor_id))
                 conn.commit()
                 _log_event("doctor_photo_upload_url_issued", doctor_id=doctor_id, photo_key=key, content_type=content_type)
                 return response(200, {"upload_url": url, "photo_key": key, "method": "PUT",
                     "headers": {"Content-Type": content_type, "x-amz-server-side-encryption": "AES256"}, "expires_in_seconds": 300})
 
             if path == "/consultation-types" and method == "GET":
-                cur.execute("SELECT consultation_type_id,doctor_id,consultation_name,duration_minutes,fee,slot_capacity,is_active,created_at,updated_at FROM consultation_types WHERE doctor_id=%s ORDER BY duration_minutes", (doctor_id,))
+                cur.execute("""SELECT d.consultation_type_id,d.doctor_id,c.consultation_name,c.duration_minutes,
+                    d.fee,d.slot_capacity,d.is_active,d.created_at,d.updated_at
+                    FROM doctor_consultation_types d
+                    JOIN consultation_types c ON c.consultation_type_id=d.consultation_type_id
+                    WHERE d.doctor_id=%s ORDER BY c.duration_minutes,c.consultation_type_id""", (doctor_id,))
                 return response(200, {"consultation_types": cur.fetchall()})
             if path == "/consultation-types" and method == "POST":
                 name = _required(body, "consultation_name")
-                consultation_rules = {
-                    "Quick Consult": (15, 1),
-                    "Standard Consult": (30, 1),
-                    "Detailed Consult": (60, 1),
-                    "Health Camp Session": (60, None),
-                }
-                if name not in consultation_rules:
+                catalog = _catalog_type_by_name(cur, name)
+                if not catalog:
                     raise ValueError("Choose one of the four approved consultation types")
-                duration, fee, capacity = int(_required(body, "duration_minutes")), float(_required(body, "fee")), int(_required(body, "slot_capacity"))
-                required_duration, fixed_capacity = consultation_rules[name]
-                if duration != required_duration:
+                type_id = int(catalog["consultation_type_id"])
+                fee, capacity = float(_required(body, "fee")), int(_required(body, "slot_capacity"))
+                # Duration is defined by the catalog; a client may send it but it must match.
+                required_duration = int(catalog["duration_minutes"])
+                if body.get("duration_minutes") not in (None, "") and int(body["duration_minutes"]) != required_duration:
                     raise ValueError(f"{name} duration must be {required_duration} minutes")
                 if fee < 0:
                     raise ValueError("fee must be zero or greater")
-                if fixed_capacity is not None and capacity != fixed_capacity:
-                    raise ValueError(f"{name} slot capacity must be 1")
-                if fixed_capacity is None and not 2 <= capacity <= 10:
-                    raise ValueError("Health Camp Session capacity must be between 2 and 10")
-                cur.execute("SELECT consultation_type_id,is_active FROM consultation_types WHERE doctor_id=%s AND consultation_name=%s LIMIT 1", (doctor_id,name))
+                _validate_capacity(name, catalog, capacity)
+                cur.execute("SELECT is_active FROM doctor_consultation_types WHERE doctor_id=%s AND consultation_type_id=%s LIMIT 1", (doctor_id, type_id))
                 existing_type = cur.fetchone()
                 if existing_type and existing_type["is_active"]:
                     raise ValueError("This consultation type already exists in your account")
                 if existing_type:
                     # Previously deactivated: bring it back with the submitted fee/capacity.
-                    cur.execute("UPDATE consultation_types SET duration_minutes=%s,fee=%s,slot_capacity=%s,is_active=1 WHERE consultation_type_id=%s AND doctor_id=%s",
-                                (duration, fee, capacity, existing_type["consultation_type_id"], doctor_id))
+                    cur.execute("UPDATE doctor_consultation_types SET fee=%s,slot_capacity=%s,is_active=1 WHERE doctor_id=%s AND consultation_type_id=%s",
+                                (fee, capacity, doctor_id, type_id))
                     conn.commit()
                     _log_event("consultation_type_reactivated", doctor_id=doctor_id,
-                               consultation_type_id=existing_type["consultation_type_id"], consultation_name=name)
-                    return response(200, {"message": "Consultation type reactivated", "consultation_type_id": existing_type["consultation_type_id"],
+                               consultation_type_id=type_id, consultation_name=name)
+                    return response(200, {"message": "Consultation type reactivated", "consultation_type_id": type_id,
                                           "slots": _refresh_slots(doctor_id)})
-                cur.execute("INSERT INTO consultation_types (doctor_id,consultation_name,duration_minutes,fee,slot_capacity,is_active) VALUES (%s,%s,%s,%s,%s,1)", (doctor_id,name,duration,fee,capacity))
+                cur.execute("INSERT INTO doctor_consultation_types (doctor_id,consultation_type_id,fee,slot_capacity,is_active) VALUES (%s,%s,%s,%s,1)", (doctor_id, type_id, fee, capacity))
                 conn.commit()
                 _log_event("consultation_type_created", doctor_id=doctor_id,
-                           consultation_type_id=cur.lastrowid, consultation_name=name)
-                return response(201, {"message": "Consultation type created", "consultation_type_id": cur.lastrowid})
+                           consultation_type_id=type_id, consultation_name=name)
+                return response(201, {"message": "Consultation type created", "consultation_type_id": type_id})
 
             match = re.fullmatch(r"/consultation-types/(\d+)", path)
             if match and method in {"PUT", "PATCH"}:
                 fields = {k: body[k] for k in ("consultation_name", "duration_minutes", "fee", "slot_capacity", "is_active") if k in body}
                 if not fields: raise ValueError("Provide consultation fields to update")
-                cur.execute("SELECT consultation_name,duration_minutes,slot_capacity FROM consultation_types WHERE consultation_type_id=%s AND doctor_id=%s", (int(match.group(1)),doctor_id))
+                type_id = int(match.group(1))
+                cur.execute("""SELECT c.consultation_name,c.duration_minutes,c.min_capacity,c.max_capacity,d.slot_capacity
+                    FROM doctor_consultation_types d JOIN consultation_types c ON c.consultation_type_id=d.consultation_type_id
+                    WHERE d.consultation_type_id=%s AND d.doctor_id=%s""", (type_id, doctor_id))
                 current = cur.fetchone()
                 if not current: return response(404, {"message": "Consultation type not found"})
-                for k in ("duration_minutes", "slot_capacity"):
-                    if k in fields: fields[k] = int(fields[k])
+                name = current["consultation_name"]
+                # Name and duration come from the catalog; they may be sent back unchanged but not altered.
+                if "consultation_name" in fields and fields["consultation_name"] != name:
+                    raise ValueError("The consultation type cannot be changed. Add the other type and deactivate this one.")
+                if "duration_minutes" in fields and int(fields["duration_minutes"]) != int(current["duration_minutes"]):
+                    raise ValueError(f"{name} duration must be {int(current['duration_minutes'])} minutes")
+                fields = {k: fields[k] for k in ("fee", "slot_capacity", "is_active") if k in fields}
+                if "slot_capacity" in fields: fields["slot_capacity"] = int(fields["slot_capacity"])
                 if "fee" in fields: fields["fee"] = float(fields["fee"])
                 if "is_active" in fields: fields["is_active"] = 1 if fields["is_active"] in (1, True, "1", "true", "True") else 0
-                name = fields.get("consultation_name", current["consultation_name"])
-                rules = {"Quick Consult": (15, 1), "Standard Consult": (30, 1), "Detailed Consult": (60, 1), "Health Camp Session": (60, None)}
-                if name not in rules: raise ValueError("Choose one of the four approved consultation types")
-                duration = fields.get("duration_minutes", int(current["duration_minutes"]))
-                capacity = fields.get("slot_capacity", int(current["slot_capacity"]))
-                required_duration, fixed_capacity = rules[name]
-                if duration != required_duration: raise ValueError(f"{name} duration must be {required_duration} minutes")
-                if fixed_capacity is not None and capacity != fixed_capacity: raise ValueError(f"{name} slot capacity must be 1")
-                if fixed_capacity is None and not 2 <= capacity <= 10: raise ValueError("Health Camp Session capacity must be between 2 and 10")
+                _validate_capacity(name, current, fields.get("slot_capacity", int(current["slot_capacity"])))
                 if "fee" in fields and fields["fee"] < 0: raise ValueError("fee cannot be negative")
-                if "consultation_name" in fields:
-                    cur.execute("SELECT 1 FROM consultation_types WHERE doctor_id=%s AND consultation_name=%s AND consultation_type_id<>%s LIMIT 1", (doctor_id,name,int(match.group(1))))
-                    if cur.fetchone(): raise ValueError("This consultation type already exists in your account")
-                cur.execute("UPDATE consultation_types SET " + ",".join(f"{k}=%s" for k in fields) + " WHERE consultation_type_id=%s AND doctor_id=%s", list(fields.values())+[int(match.group(1)),doctor_id])
+                if fields:
+                    cur.execute("UPDATE doctor_consultation_types SET " + ",".join(f"{k}=%s" for k in fields) + " WHERE consultation_type_id=%s AND doctor_id=%s", list(fields.values())+[type_id,doctor_id])
                 conn.commit()
                 _log_event("consultation_type_updated", doctor_id=doctor_id,
                            consultation_type_id=int(match.group(1)), fields=sorted(fields))
                 return response(200, {"message": "Consultation type updated", "slots": _refresh_slots(doctor_id)})
             if match and method == "DELETE":
-                cur.execute("UPDATE consultation_types SET is_active=0 WHERE consultation_type_id=%s AND doctor_id=%s", (int(match.group(1)),doctor_id))
+                cur.execute("UPDATE doctor_consultation_types SET is_active=0 WHERE consultation_type_id=%s AND doctor_id=%s", (int(match.group(1)),doctor_id))
                 if not cur.rowcount: return response(404, {"message": "Consultation type not found"})
                 conn.commit()
                 _log_event("consultation_type_deactivated", doctor_id=doctor_id,
@@ -583,7 +623,7 @@ def _handle_api(event, context):
                 effective_to = date.fromisoformat(str(body["effective_to"])) if body.get("effective_to") else None
                 if effective_to and effective_to < effective_from: raise ValueError("effective_to cannot precede effective_from")
                 consultation_id = int(_required(body,"consultation_type_id"))
-                cur.execute("SELECT 1 FROM consultation_types WHERE consultation_type_id=%s AND doctor_id=%s AND is_active=1",(consultation_id,doctor_id))
+                cur.execute("SELECT 1 FROM doctor_consultation_types WHERE consultation_type_id=%s AND doctor_id=%s AND is_active=1",(consultation_id,doctor_id))
                 if not cur.fetchone(): raise ValueError("Invalid active consultation_type_id")
                 _check_window(cur, doctor_id, consultation_id, start, end)
                 _check_overlap(cur, doctor_id, weekday, start, end, effective_from, effective_to)
@@ -606,7 +646,7 @@ def _handle_api(event, context):
                 if "effective_to" in fields and fields["effective_to"] is not None: fields["effective_to"] = date.fromisoformat(str(fields["effective_to"]))
                 if "consultation_type_id" in fields:
                     consultation_id = int(fields["consultation_type_id"])
-                    cur.execute("SELECT 1 FROM consultation_types WHERE consultation_type_id=%s AND doctor_id=%s AND is_active=1",(consultation_id,doctor_id))
+                    cur.execute("SELECT 1 FROM doctor_consultation_types WHERE consultation_type_id=%s AND doctor_id=%s AND is_active=1",(consultation_id,doctor_id))
                     if not cur.fetchone(): raise ValueError("Invalid active consultation_type_id")
                     fields["consultation_type_id"] = consultation_id
                 cur.execute("SELECT consultation_type_id,weekday,start_time,end_time,effective_from,effective_to,timezone_name FROM availability_patterns WHERE availability_pattern_id=%s AND doctor_id=%s",(int(match.group(1)),doctor_id))
@@ -661,7 +701,7 @@ def _handle_api(event, context):
                         ExpressionAttributeValues={":status":"BLACKED_OUT"})
                 marked_items = existing.get("Items", [])
                 booked_slots = sum(1 for s in marked_items if int(s.get("booked_count", 0)) > 0)
-                # Booked appointments are NOT cancelled or refunded by a blackout: warn so it is visible.
+                # Booked appointments are NOT cancelled by a blackout: warn so it is visible.
                 _log_event("blackout_created", logging.WARNING if booked_slots else logging.INFO,
                            doctor_id=doctor_id, blackout_id=blackout_id,
                            blackout_date=blackout_date.isoformat(), slots_marked=len(marked_items),
@@ -785,10 +825,12 @@ def materialize_doctor(doctor_id, start_day=None, days=30):
         with conn.cursor() as cur:
             cur.execute("""SELECT a.availability_pattern_id,a.consultation_type_id,a.weekday,
                 a.start_time,a.end_time,a.timezone_name,a.effective_from,a.effective_to,
-                c.consultation_name,c.duration_minutes,c.fee,c.slot_capacity
-                FROM availability_patterns a JOIN consultation_types c
-                ON c.consultation_type_id=a.consultation_type_id AND c.doctor_id=a.doctor_id
-                WHERE a.doctor_id=%s AND a.is_active=1 AND c.is_active=1""",(doctor_id,))
+                c.consultation_name,c.duration_minutes,d.fee,d.slot_capacity
+                FROM availability_patterns a
+                JOIN doctor_consultation_types d
+                ON d.doctor_id=a.doctor_id AND d.consultation_type_id=a.consultation_type_id
+                JOIN consultation_types c ON c.consultation_type_id=d.consultation_type_id
+                WHERE a.doctor_id=%s AND a.is_active=1 AND d.is_active=1""",(doctor_id,))
             patterns = cur.fetchall()
             if start_day is None:
                 start_day = (datetime.now(ZoneInfo(patterns[0]["timezone_name"])).date()

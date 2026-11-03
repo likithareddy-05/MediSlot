@@ -267,6 +267,34 @@ def login_handler(event, context):
         if connection:
             connection.close()
 
+def lookups_handler(event, context):
+    """Public reference lists for the registration and profile dropdowns."""
+    connection = None
+    try:
+        connection = get_db_connection()
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT hospital_id, hospital_name, city, state "
+                "FROM hospitals WHERE is_active = 1 ORDER BY hospital_name"
+            )
+            hospitals = cursor.fetchall()
+            cursor.execute(
+                "SELECT specialization_id, specialization_name "
+                "FROM specializations WHERE is_active = 1 ORDER BY specialization_name"
+            )
+            specializations = cursor.fetchall()
+        return response(200, {"hospitals": hospitals, "specializations": specializations})
+    except Exception:
+        logger.exception(json.dumps({
+            "event": "lookups_failed",
+            "request_id": getattr(context, "aws_request_id", None),
+        }))
+        return response(500, {"message": "Unable to load the hospital and specialization lists"})
+    finally:
+        if connection:
+            connection.close()
+
+
 # One deployed authentication Lambda dispatches these API Gateway routes.
 from register import lambda_handler as register_handler
 from refresh import lambda_handler as refresh_handler
@@ -279,6 +307,7 @@ ROUTES = {
     ("POST", "/auth/doctors/login"): login_handler,
     ("POST", "/auth/refresh"): refresh_handler,
     ("POST", "/auth/logout"): logout_handler,
+    ("GET", "/lookups"): lookups_handler,
 }
 
 def lambda_handler(event, context):

@@ -1045,7 +1045,36 @@ Resources:
       Principal: events.amazonaws.com
       SourceArn: !GetAtt SlotMaterializerSchedule.Arn
 
-  ApiDeploymentMilestone4:
+  # ---------------------------------------------------------
+  # /lookups (public): hospital and specialization dropdown lists
+  # ---------------------------------------------------------
+  LookupsResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref MediSlotRestApi
+      ParentId: !GetAtt MediSlotRestApi.RootResourceId
+      PathPart: lookups
+
+  LookupsGetMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref MediSlotRestApi
+      ResourceId: !Ref LookupsResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Credentials:
+          Fn::ImportValue:
+            Fn::Sub: medislot-${EnvironmentName}-ApiGatewayInvokeLambdaRoleArn
+        Uri:
+          Fn::Sub:
+            - arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FunctionArn}/invocations
+            - FunctionArn: !GetAtt AuthFunction.Arn
+
+  # A new deployment id is needed so the new /lookups route is published to the stage.
+  ApiDeploymentMilestone5:
     Type: AWS::ApiGateway::Deployment
     DependsOn:
       - RegisterMethod
@@ -1075,6 +1104,7 @@ Resources:
       - DoctorAppointmentOutcomePostMethod
       - DoctorSlotIdDeleteMethod
       - DoctorMaterializePostMethod
+      - LookupsGetMethod
     Properties:
       RestApiId: !Ref MediSlotRestApi
       Description: !Sub MediSlot ${EnvironmentName} explicit authentication and doctor API routes
@@ -1083,7 +1113,7 @@ Resources:
     Type: AWS::ApiGateway::Stage
     Properties:
       RestApiId: !Ref MediSlotRestApi
-      DeploymentId: !Ref ApiDeploymentMilestone4
+      DeploymentId: !Ref ApiDeploymentMilestone5
       StageName: !Ref EnvironmentName
       Description: !Sub MediSlot ${EnvironmentName} stage
       AccessLogSetting:

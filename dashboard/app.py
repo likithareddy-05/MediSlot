@@ -100,6 +100,17 @@ def bff_session():
                     "user": session.get("user", {})})
 
 
+@app.get("/bff/lookups")
+def bff_lookups():
+    """Hospital and specialization dropdown lists (public reference data, no sign-in needed)."""
+    try:
+        response = _api_call("lookups")
+    except requests.RequestException:
+        app.logger.exception("Lookups API request failed")
+        return jsonify({"message": "Unable to load the hospital and specialization lists."}), 502
+    return _json_response(response)
+
+
 @app.post("/bff/register")
 def bff_register():
     if not _csrf_valid():

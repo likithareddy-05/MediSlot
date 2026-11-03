@@ -287,66 +287,6 @@ Resources:
 
 
   # ---------------------------------------------------------
-  # Explicit doctor registration/login aliases; same shared auth handlers.
-  # ---------------------------------------------------------
-  AuthDoctorsResource:
-    Type: AWS::ApiGateway::Resource
-    Properties:
-      RestApiId: !Ref MediSlotRestApi
-      ParentId: !Ref AuthResource
-      PathPart: doctors
-
-  AuthDoctorsRegisterResource:
-    Type: AWS::ApiGateway::Resource
-    Properties:
-      RestApiId: !Ref MediSlotRestApi
-      ParentId: !Ref AuthDoctorsResource
-      PathPart: register
-
-  AuthDoctorsRegisterMethod:
-    Type: AWS::ApiGateway::Method
-    Properties:
-      RestApiId: !Ref MediSlotRestApi
-      ResourceId: !Ref AuthDoctorsRegisterResource
-      HttpMethod: POST
-      AuthorizationType: NONE
-      Integration:
-        Type: AWS_PROXY
-        IntegrationHttpMethod: POST
-        Credentials:
-          Fn::ImportValue:
-            Fn::Sub: medislot-${EnvironmentName}-ApiGatewayInvokeLambdaRoleArn
-        Uri:
-          Fn::Sub:
-            - arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FunctionArn}/invocations
-            - FunctionArn: !GetAtt AuthFunction.Arn
-
-  AuthDoctorsLoginResource:
-    Type: AWS::ApiGateway::Resource
-    Properties:
-      RestApiId: !Ref MediSlotRestApi
-      ParentId: !Ref AuthDoctorsResource
-      PathPart: login
-
-  AuthDoctorsLoginMethod:
-    Type: AWS::ApiGateway::Method
-    Properties:
-      RestApiId: !Ref MediSlotRestApi
-      ResourceId: !Ref AuthDoctorsLoginResource
-      HttpMethod: POST
-      AuthorizationType: NONE
-      Integration:
-        Type: AWS_PROXY
-        IntegrationHttpMethod: POST
-        Credentials:
-          Fn::ImportValue:
-            Fn::Sub: medislot-${EnvironmentName}-ApiGatewayInvokeLambdaRoleArn
-        Uri:
-          Fn::Sub:
-            - arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FunctionArn}/invocations
-            - FunctionArn: !GetAtt AuthFunction.Arn
-
-  # ---------------------------------------------------------
   # /auth/refresh
   # ---------------------------------------------------------
   RefreshResource:
@@ -1073,8 +1013,8 @@ Resources:
             - arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FunctionArn}/invocations
             - FunctionArn: !GetAtt AuthFunction.Arn
 
-  # A new deployment id is needed so the new /lookups route is published to the stage.
-  ApiDeploymentMilestone5:
+  # A new deployment id is needed so route changes (here: removal of /auth/doctors/*) are published to the stage.
+  ApiDeploymentMilestone6:
     Type: AWS::ApiGateway::Deployment
     DependsOn:
       - RegisterMethod
@@ -1082,8 +1022,6 @@ Resources:
       - RefreshMethod
       - LogoutMethod
       - PatientMeMethod
-      - AuthDoctorsRegisterMethod
-      - AuthDoctorsLoginMethod
       - DoctorsMeGetMethod
       - DoctorsMePutMethod
       - DoctorPhotoPostMethod
@@ -1113,7 +1051,7 @@ Resources:
     Type: AWS::ApiGateway::Stage
     Properties:
       RestApiId: !Ref MediSlotRestApi
-      DeploymentId: !Ref ApiDeploymentMilestone5
+      DeploymentId: !Ref ApiDeploymentMilestone6
       StageName: !Ref EnvironmentName
       Description: !Sub MediSlot ${EnvironmentName} stage
       AccessLogSetting:

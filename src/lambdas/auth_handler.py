@@ -303,8 +303,6 @@ from logout import lambda_handler as logout_handler
 ROUTES = {
     ("POST", "/auth/register"): register_handler,
     ("POST", "/auth/login"): login_handler,
-    ("POST", "/auth/doctors/register"): register_handler,
-    ("POST", "/auth/doctors/login"): login_handler,
     ("POST", "/auth/refresh"): refresh_handler,
     ("POST", "/auth/logout"): logout_handler,
     ("GET", "/lookups"): lookups_handler,

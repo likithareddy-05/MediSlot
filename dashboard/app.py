@@ -120,7 +120,7 @@ def bff_register():
         return jsonify({"message": "Invalid registration data."}), 400
     payload["role"] = "DOCTOR"
     try:
-        response = _api_call("auth/doctors/register", "POST", body=payload)
+        response = _api_call("auth/register", "POST", body=payload)
     except requests.RequestException:
         app.logger.exception("Doctor registration API request failed")
         return jsonify({"message": "Unable to reach the registration service. Please try again."}), 502
@@ -136,7 +136,7 @@ def bff_login():
     if not isinstance(email, str) or not isinstance(password, str) or not email.strip() or not password:
         return jsonify({"message": "Email and password are required."}), 400
     try:
-        response = _api_call("auth/doctors/login", "POST",
+        response = _api_call("auth/login", "POST",
                              body={"email": email.strip(), "password": password})
     except requests.RequestException:
         app.logger.exception("Authentication API request failed")

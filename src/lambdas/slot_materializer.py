@@ -174,9 +174,9 @@ def handler(event, context):
 
                     ct.consultation_type_id,
                     ct.consultation_name,
-                    ct.fee,
+                    dct.fee,
                     ct.duration_minutes,
-                    ct.slot_capacity
+                    dct.slot_capacity
 
                 FROM doctors d
 
@@ -184,11 +184,15 @@ def handler(event, context):
                     ON ap.doctor_id = d.doctor_id
                     AND ap.is_active = 1
 
+                JOIN doctor_consultation_types dct
+                    ON dct.doctor_id = ap.doctor_id
+                    AND dct.consultation_type_id =
+                        ap.consultation_type_id
+                    AND dct.is_active = 1
+
                 JOIN consultation_types ct
                     ON ct.consultation_type_id =
-                       ap.consultation_type_id
-                    AND ct.doctor_id = ap.doctor_id
-                    AND ct.is_active = 1
+                       dct.consultation_type_id
 
             """)
 

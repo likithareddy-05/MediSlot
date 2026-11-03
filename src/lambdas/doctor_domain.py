@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import re
+from time import monotonic as _monotonic
 from urllib.parse import unquote
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -21,6 +22,15 @@ from slot_time import valid_local_time, put_if_absent
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
+
+
+def _log_event(event_name, level=logging.INFO, **fields):
+    """Emit one structured JSON log line (searchable with CloudWatch Logs Insights).
+
+    Only ids, counts and field names belong here. Never pass emails, phone
+    numbers, names, addresses, passwords or tokens.
+    """
+    logger.log(level, json.dumps({"event": event_name, **fields}, default=str))
 ssm = boto3.client("ssm")
 secrets = boto3.client("secretsmanager")
 ddb = boto3.resource("dynamodb")
@@ -232,6 +242,7 @@ def _cancel_slot(conn, cursor, doctor_id, slot_id):
     table = ddb.Table(SLOT_TABLE_NAME)
     item = table.get_item(Key={"slot_id":slot_id}).get("Item")
     if not item or str(item.get("doctor_id")) != str(doctor_id):
+        _log_event("slot_cancel_not_found", logging.WARNING, doctor_id=doctor_id, slot_id=slot_id)
         return response(404,{"message":"Slot not found"})
     cursor.execute("""SELECT a.appointment_id,a.patient_id,c.fee
         FROM appointments a JOIN consultation_types c
@@ -257,7 +268,14 @@ def _cancel_slot(conn, cursor, doctor_id, slot_id):
         # Already cancelled is fine; the cancel call is idempotent.
         code = getattr(exc,"response",{}).get("Error",{}).get("Code")
         if code != "ConditionalCheckFailedException":
+            # MySQL is already committed (appointments cancelled, refunds queued)
+            # but DynamoDB still shows the slot as open: flag it for follow-up.
+            _log_event("slot_cancel_state_mismatch", logging.ERROR, doctor_id=doctor_id,
+                       slot_id=slot_id, affected_appointments=len(affected), error_code=code)
             raise
+    _log_event("slot_cancelled", doctor_id=doctor_id, slot_id=slot_id,
+               affected_appointments=len(affected), refunds_created=len(affected),
+               refund_total=sum(float(a["fee"]) for a in affected))
     return response(200,{"message":"Slot cancelled","slot_id":slot_id,
         "affected_appointments":len(affected),"refunds_created":len(affected),
         "refund_status":"PENDING_PAYMENT_PROCESSOR"})
@@ -361,6 +379,7 @@ def _handle_api(event, context):
                     VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""", [user_id] + values)
                 doctor_id = cur.lastrowid
                 conn.commit()
+                _log_event("doctor_profile_created", doctor_id=doctor_id, user_id=user_id)
                 return response(201, {"message": "Doctor profile created", "profile": _profile(cur, doctor_id)})
             if doctor_id is None:
                 return response(404, {"message": "Doctor profile not found. Create it using POST /doctor/profile."})
@@ -392,6 +411,7 @@ def _handle_api(event, context):
                 sql = "UPDATE doctors SET " + ",".join(f"{k}=%s" for k in updates) + " WHERE doctor_id=%s"
                 cur.execute(sql, list(updates.values()) + [doctor_id])
                 conn.commit()
+                _log_event("doctor_profile_updated", doctor_id=doctor_id, fields=sorted(updates))
                 return response(200, {"message": "Doctor profile updated", "profile": _profile(cur, doctor_id)})
 
             if path == "/profile/photo-url" and method == "GET":
@@ -413,6 +433,7 @@ def _handle_api(event, context):
                 cur.execute("""INSERT INTO doctor_profile_assets (doctor_id,photo_key) VALUES (%s,%s)
                     ON DUPLICATE KEY UPDATE photo_key=VALUES(photo_key),updated_at=CURRENT_TIMESTAMP(6)""", (doctor_id, key))
                 conn.commit()
+                _log_event("doctor_photo_upload_url_issued", doctor_id=doctor_id, photo_key=key, content_type=content_type)
                 return response(200, {"upload_url": url, "photo_key": key, "method": "PUT",
                     "headers": {"Content-Type": content_type, "x-amz-server-side-encryption": "AES256"}, "expires_in_seconds": 300})
 
@@ -448,10 +469,14 @@ def _handle_api(event, context):
                     cur.execute("UPDATE consultation_types SET duration_minutes=%s,fee=%s,slot_capacity=%s,is_active=1 WHERE consultation_type_id=%s AND doctor_id=%s",
                                 (duration, fee, capacity, existing_type["consultation_type_id"], doctor_id))
                     conn.commit()
+                    _log_event("consultation_type_reactivated", doctor_id=doctor_id,
+                               consultation_type_id=existing_type["consultation_type_id"], consultation_name=name)
                     return response(200, {"message": "Consultation type reactivated", "consultation_type_id": existing_type["consultation_type_id"],
                                           "slots": _refresh_slots(doctor_id)})
                 cur.execute("INSERT INTO consultation_types (doctor_id,consultation_name,duration_minutes,fee,slot_capacity,is_active) VALUES (%s,%s,%s,%s,%s,1)", (doctor_id,name,duration,fee,capacity))
                 conn.commit()
+                _log_event("consultation_type_created", doctor_id=doctor_id,
+                           consultation_type_id=cur.lastrowid, consultation_name=name)
                 return response(201, {"message": "Consultation type created", "consultation_type_id": cur.lastrowid})
 
             match = re.fullmatch(r"/consultation-types/(\d+)", path)
@@ -479,11 +504,17 @@ def _handle_api(event, context):
                     cur.execute("SELECT 1 FROM consultation_types WHERE doctor_id=%s AND consultation_name=%s AND consultation_type_id<>%s LIMIT 1", (doctor_id,name,int(match.group(1))))
                     if cur.fetchone(): raise ValueError("This consultation type already exists in your account")
                 cur.execute("UPDATE consultation_types SET " + ",".join(f"{k}=%s" for k in fields) + " WHERE consultation_type_id=%s AND doctor_id=%s", list(fields.values())+[int(match.group(1)),doctor_id])
-                conn.commit(); return response(200, {"message": "Consultation type updated", "slots": _refresh_slots(doctor_id)})
+                conn.commit()
+                _log_event("consultation_type_updated", doctor_id=doctor_id,
+                           consultation_type_id=int(match.group(1)), fields=sorted(fields))
+                return response(200, {"message": "Consultation type updated", "slots": _refresh_slots(doctor_id)})
             if match and method == "DELETE":
                 cur.execute("UPDATE consultation_types SET is_active=0 WHERE consultation_type_id=%s AND doctor_id=%s", (int(match.group(1)),doctor_id))
                 if not cur.rowcount: return response(404, {"message": "Consultation type not found"})
-                conn.commit(); return response(200, {"message": "Consultation type deactivated", "slots": _refresh_slots(doctor_id)})
+                conn.commit()
+                _log_event("consultation_type_deactivated", doctor_id=doctor_id,
+                           consultation_type_id=int(match.group(1)))
+                return response(200, {"message": "Consultation type deactivated", "slots": _refresh_slots(doctor_id)})
 
             if path == "/availability" and method == "PUT":
                 # Replace the doctor's active weekly patterns in one transaction.
@@ -527,6 +558,8 @@ def _handle_api(event, context):
                         VALUES (%s,%s,%s,%s,%s,%s,%s,NULL,1)""",
                         (doctor_id, consultation_id, weekday, start_value, end_value, str(timezone_name), effective_from))
                 conn.commit()
+                _log_event("availability_replaced", doctor_id=doctor_id, patterns_saved=len(validated),
+                           timezone_name=str(timezone_name))
                 slots = _refresh_slots(doctor_id)
                 return response(200, {"message": "Weekly availability replaced", "patterns_saved": len(validated), "timezone_name": str(timezone_name), "slots": slots})
 
@@ -555,7 +588,10 @@ def _handle_api(event, context):
                 _check_window(cur, doctor_id, consultation_id, start, end)
                 _check_overlap(cur, doctor_id, weekday, start, end, effective_from, effective_to)
                 cur.execute("INSERT INTO availability_patterns (doctor_id,consultation_type_id,weekday,start_time,end_time,timezone_name,effective_from,effective_to,is_active) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,1)",(doctor_id,consultation_id,weekday,start,end,tz,effective_from,effective_to))
-                conn.commit(); new_id = cur.lastrowid; return response(201,{"message":"Availability pattern created","availability_id":new_id,"slots":_refresh_slots(doctor_id)})
+                conn.commit(); new_id = cur.lastrowid
+                _log_event("availability_created", doctor_id=doctor_id, availability_pattern_id=new_id,
+                           weekday=weekday, timezone_name=tz)
+                return response(201,{"message":"Availability pattern created","availability_id":new_id,"slots":_refresh_slots(doctor_id)})
             match = re.fullmatch(r"/availability/(\d+)", path)
             if match and method in {"PUT", "PATCH"}:
                 fields = {k: body[k] for k in ("weekday", "start_time", "end_time", "timezone_name", "effective_from", "effective_to", "consultation_type_id") if k in body}
@@ -592,11 +628,17 @@ def _handle_api(event, context):
                     zones = {row["timezone_name"] for row in cur.fetchall()}
                     if zones and fields["timezone_name"] not in zones: raise ValueError("All active availability patterns for one doctor must use the same timezone")
                 cur.execute("UPDATE availability_patterns SET " + ",".join(f"{k}=%s" for k in fields) + " WHERE availability_pattern_id=%s AND doctor_id=%s",list(fields.values())+[int(match.group(1)),doctor_id])
-                conn.commit(); return response(200,{"message":"Availability pattern updated","slots":_refresh_slots(doctor_id)})
+                conn.commit()
+                _log_event("availability_updated", doctor_id=doctor_id,
+                           availability_pattern_id=int(match.group(1)), fields=sorted(fields))
+                return response(200,{"message":"Availability pattern updated","slots":_refresh_slots(doctor_id)})
             if match and method == "DELETE":
                 cur.execute("UPDATE availability_patterns SET is_active=0 WHERE availability_pattern_id=%s AND doctor_id=%s",(int(match.group(1)),doctor_id))
                 if not cur.rowcount: return response(404,{"message":"Availability pattern not found"})
-                conn.commit(); return response(200,{"message":"Availability pattern deactivated","slots":_refresh_slots(doctor_id)})
+                conn.commit()
+                _log_event("availability_deactivated", doctor_id=doctor_id,
+                           availability_pattern_id=int(match.group(1)))
+                return response(200,{"message":"Availability pattern deactivated","slots":_refresh_slots(doctor_id)})
 
             if path == "/blackouts" and method == "GET":
                 cur.execute("SELECT * FROM doctor_blackouts WHERE doctor_id=%s ORDER BY blackout_date",(doctor_id,))
@@ -617,13 +659,22 @@ def _handle_api(event, context):
                         UpdateExpression="SET #status = :status",
                         ExpressionAttributeNames={"#status":"status"},
                         ExpressionAttributeValues={":status":"BLACKED_OUT"})
+                marked_items = existing.get("Items", [])
+                booked_slots = sum(1 for s in marked_items if int(s.get("booked_count", 0)) > 0)
+                # Booked appointments are NOT cancelled or refunded by a blackout: warn so it is visible.
+                _log_event("blackout_created", logging.WARNING if booked_slots else logging.INFO,
+                           doctor_id=doctor_id, blackout_id=blackout_id,
+                           blackout_date=blackout_date.isoformat(), slots_marked=len(marked_items),
+                           slots_with_bookings=booked_slots)
                 return response(201,{"message":"Blackout date created","blackout_id":blackout_id,
                     "existing_slots_marked":len(existing.get("Items", []))})
             match = re.fullmatch(r"/blackouts/(\d+)",path)
             if match and method == "DELETE":
                 cur.execute("DELETE FROM doctor_blackouts WHERE blackout_id=%s AND doctor_id=%s",(int(match.group(1)),doctor_id))
                 if not cur.rowcount: return response(404,{"message":"Blackout date not found"})
-                conn.commit(); return response(200,{"message":"Blackout date removed","slots":_refresh_slots(doctor_id)})
+                conn.commit()
+                _log_event("blackout_removed", doctor_id=doctor_id, blackout_id=int(match.group(1)))
+                return response(200,{"message":"Blackout date removed","slots":_refresh_slots(doctor_id)})
 
             if path == "/schedule" and method == "GET":
                 return response(200, _schedule_for_day(cur, conn, doctor_id, date.fromisoformat(str(_required(query,"date")))))
@@ -656,8 +707,12 @@ def _handle_api(event, context):
                     WHERE appointment_id=%s AND doctor_id=%s AND status='BOOKED'""",
                     (outcome,outcome,int(match.group(1)),doctor_id))
                 if not cur.rowcount:
+                    _log_event("appointment_outcome_rejected", logging.WARNING, doctor_id=doctor_id,
+                               appointment_id=int(match.group(1)), outcome=outcome)
                     return response(404,{"message":"Booked appointment not found"})
                 conn.commit()
+                _log_event("appointment_outcome_recorded", doctor_id=doctor_id,
+                           appointment_id=int(match.group(1)), outcome=outcome)
                 return response(200,{"message":f"Appointment marked {outcome}"})
 
             match = re.fullmatch(r"/slots/(.+)",path)
@@ -673,6 +728,9 @@ def _handle_api(event, context):
         return response(404,{"message":"Doctor endpoint not found","path":path})
     except (ValueError, TypeError, json.JSONDecodeError, ZoneInfoNotFoundError) as exc:
         if conn: conn.rollback()
+        _log_event("doctor_api_validation_failed", logging.WARNING,
+                   request_id=getattr(context, "aws_request_id", None), method=method, path=path,
+                   error_type=type(exc).__name__, message=str(exc)[:200])
         return response(400,{"message":str(exc)})
     except pymysql.err.IntegrityError as exc:
         if conn: conn.rollback()
@@ -808,6 +866,11 @@ def materialize_doctor(doctor_id, start_day=None, days=30):
                     if str(slot.get("start_time_utc") or slot.get("start_at_utc") or "") <= now_utc: continue
                     if _set_status(table, sid, "REMOVED", "AVAILABLE"):
                         removed += 1
+        # skipped > 0 means local wall times were dropped (DST gap): surface it as a warning.
+        _log_event("materialize_doctor_completed", logging.WARNING if skipped else logging.INFO,
+                   doctor_id=doctor_id, start_date=start_day.isoformat(), days=days,
+                   patterns=len(patterns), blackout_days=len(blackouts), created=created,
+                   restored=restored, removed=removed, dst_wall_times_skipped=skipped)
         return {"doctor_id":doctor_id,"start_date":start_day.isoformat(),"days":days,
                 "created":created,"restored":restored,"removed":removed,
                 "dst_wall_times_skipped":skipped,"idempotent":True}
@@ -841,14 +904,38 @@ def materializer_handler(event, context):
             doctors = cur.fetchall()
     finally:
         conn.close()
+    _log_event("slot_materialisation_started", doctors=len(doctors))
     for doctor in doctors:
-        local_today = datetime.now(ZoneInfo(doctor["timezone_name"])).date()
-        summaries.append(materialize_doctor(doctor["doctor_id"],local_today,30))
-    logger.info("Slot materialisation completed: %s",json.dumps(summaries,default=str))
+        try:
+            local_today = datetime.now(ZoneInfo(doctor["timezone_name"])).date()
+            summaries.append(materialize_doctor(doctor["doctor_id"],local_today,30))
+        except Exception:
+            logger.exception("Slot materialisation failed for doctor_id=%s", doctor["doctor_id"])
+            raise
+    _log_event("slot_materialisation_completed", doctors_processed=len(summaries),
+               created=sum(s["created"] for s in summaries), restored=sum(s["restored"] for s in summaries),
+               removed=sum(s["removed"] for s in summaries),
+               dst_wall_times_skipped=sum(s["dst_wall_times_skipped"] for s in summaries))
     return {"doctors_processed":len(summaries),"results":summaries}
 
 
 def lambda_handler(event, context):
     # Scheduled invocation is handled by the dedicated handler; API requests use
     # the authenticated doctor identity injected by the existing JWT authorizer.
-    return _handle_api(event,context)
+    started = _monotonic()
+    request_id = getattr(context, "aws_request_id", None)
+    try:
+        result = _handle_api(event, context)
+    except Exception:
+        logger.exception("Doctor API unhandled error; request_id=%s", request_id)
+        raise
+    status = result.get("statusCode") if isinstance(result, dict) else None
+    duration_ms = int((_monotonic() - started) * 1000)
+    level = logging.INFO if not status or status < 400 else logging.WARNING if status < 500 else logging.ERROR
+    if level == logging.INFO and duration_ms > 20000:
+        level = logging.WARNING  # API Gateway gives up at 29 s
+    auth = ((event.get("requestContext") or {}).get("authorizer") or {})
+    _log_event("doctor_api_request", level, request_id=request_id,
+               method=event.get("httpMethod"), resource=event.get("resource"),
+               user_id=auth.get("userId"), status=status, duration_ms=duration_ms)
+    return result

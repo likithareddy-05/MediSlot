@@ -10,6 +10,7 @@ Safe to re-run:
 import os
 import json
 import logging
+import time as _time
 
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -26,6 +27,11 @@ from slot_time import build_slots, put_if_absent
 
 log = logging.getLogger()
 log.setLevel(logging.INFO)
+
+
+def _log_event(event_name, level=logging.INFO, **fields):
+    """One structured JSON log line. Ids and counts only, never personal data."""
+    log.log(level, json.dumps({"event": event_name, **fields}, default=str))
 
 
 # ------------------------------------------------------------
@@ -117,6 +123,12 @@ def handler(event, context):
     if not 1 <= days <= 60:
         raise ValueError("days must be between 1 and 60")
 
+    started = _time.monotonic()
+    request_id = getattr(context, "aws_request_id", None)
+    _log_event("slot_materializer_started", request_id=request_id, days=days,
+               requested_start=requested_start.isoformat() if requested_start else None,
+               trigger="schedule" if event.get("source") == "aws.events" else "manual")
+
     conn = connection()
     table = ddb.Table(TABLE)
 
@@ -202,6 +214,12 @@ def handler(event, context):
                 )
                 for row in blackout_rows
             }
+
+            _log_event("slot_materializer_loaded", request_id=request_id,
+                       patterns=len(patterns), blackout_days=len(blackouts),
+                       doctors=len({int(p["doctor_id"]) for p in patterns}))
+            if not patterns:
+                _log_event("slot_materializer_no_active_patterns", logging.WARNING, request_id=request_id)
 
         # ----------------------------------------------------
         # Materialize slots for each doctor availability pattern.
@@ -328,6 +346,10 @@ def handler(event, context):
         # Successful response.
         # ----------------------------------------------------
 
+        _log_event("slot_materializer_completed", request_id=request_id, created=created,
+                   already_present=skipped, days=days,
+                   duration_ms=int((_time.monotonic() - started) * 1000))
+
         return {
             "statusCode": 200,
             "body": json.dumps({
@@ -339,6 +361,17 @@ def handler(event, context):
                 "days": days
             })
         }
+
+    except Exception:
+        failing = locals().get("pattern") or {}
+        log.exception(json.dumps({
+            "event": "slot_materializer_failed",
+            "request_id": request_id,
+            "doctor_id": failing.get("doctor_id"),
+            "availability_pattern_id": failing.get("availability_pattern_id"),
+            "slots_created_before_failure": created,
+        }, default=str))
+        raise
 
     finally:
         conn.close()

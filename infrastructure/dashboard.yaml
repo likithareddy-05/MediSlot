@@ -21,11 +21,22 @@ Parameters:
     Type: String
     Default: t3.micro
     AllowedValues: [t3.micro, t3.small, t3.medium]
+  LogRetentionInDays:
+    Type: Number
+    Default: 30
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1096, 1827, 2192, 2557, 2922, 3288, 3653]
+    Description: How long CloudWatch keeps the dashboard host logs (days).
   LatestAmiId:
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
     Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
 
 Resources:
+  DashboardLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /medislot/${EnvironmentName}/dashboard
+      RetentionInDays: !Ref LogRetentionInDays
+
   DashboardInstanceRole:
     Type: AWS::IAM::Role
     Properties:
@@ -47,6 +58,22 @@ Resources:
               - Effect: Allow
                 Action: s3:GetObject
                 Resource: !Sub arn:${AWS::Partition}:s3:::${DashboardArtifactBucket}/${DashboardArtifactS3Key}
+        - PolicyName: WriteDashboardLogs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                Resource:
+                  - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${DashboardLogGroup}
+                  - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${DashboardLogGroup}:*
+              - Effect: Allow
+                Action: logs:DescribeLogGroups
+                Resource: "*"
       Tags:
         - Key: Project
           Value: MediSlot
@@ -86,16 +113,17 @@ Resources:
           set -euxo pipefail
           exec > >(tee -a /var/log/medislot-dashboard-setup.log) 2>&1
           dnf update -y
-          dnf install -y python3 python3-pip nginx unzip awscli-2
-          mkdir -p /opt/medislot /var/lib/medislot/sessions
+          dnf install -y python3 python3-pip nginx unzip awscli-2 amazon-cloudwatch-agent
+          mkdir -p /opt/medislot /var/lib/medislot/sessions /var/log/medislot
           aws s3 cp "s3://${DashboardArtifactBucket}/${DashboardArtifactS3Key}" /tmp/medislot-dashboard.zip --region ${AWS::Region}
           unzip -o /tmp/medislot-dashboard.zip -d /opt/medislot
-          chown -R ec2-user:ec2-user /opt/medislot /var/lib/medislot
+          chown -R ec2-user:ec2-user /opt/medislot /var/lib/medislot /var/log/medislot
           cat > /etc/medislot-dashboard.env <<ENVVARS
           MEDISLOT_API_BASE_URL=${ApiBaseUrl}
           FLASK_SECRET_KEY=$(openssl rand -hex 32)
           SESSION_FILE_DIR=/var/lib/medislot/sessions
           SESSION_COOKIE_SECURE=false
+          LOG_LEVEL=INFO
           ENVVARS
           chown root:ec2-user /etc/medislot-dashboard.env
           chmod 640 /etc/medislot-dashboard.env
@@ -113,7 +141,7 @@ Resources:
           Group=ec2-user
           WorkingDirectory=/opt/medislot
           EnvironmentFile=/etc/medislot-dashboard.env
-          ExecStart=/opt/medislot/.venv/bin/gunicorn --workers 2 --bind 127.0.0.1:8000 dashboard.app:app
+          ExecStart=/opt/medislot/.venv/bin/gunicorn --workers 2 --bind 127.0.0.1:8000 --log-level info --capture-output --access-logfile /var/log/medislot/gunicorn-access.log --error-logfile /var/log/medislot/gunicorn-error.log dashboard.app:app
           Restart=always
           RestartSec=5
           [Install]
@@ -136,8 +164,38 @@ Resources:
           NGINX
           nginx -t
           systemctl daemon-reload
+          cat > /etc/logrotate.d/medislot <<'LOGROTATE'
+          /var/log/medislot/*.log {
+              daily
+              rotate 7
+              compress
+              missingok
+              notifempty
+              copytruncate
+          }
+          LOGROTATE
           systemctl enable --now medislot-dashboard
           systemctl enable --now nginx
+          cat > /opt/aws/amazon-cloudwatch-agent/etc/medislot-dashboard.json <<'CWCONFIG'
+          {
+            "agent": { "run_as_user": "root" },
+            "logs": {
+              "logs_collected": {
+                "files": {
+                  "collect_list": [
+                    { "file_path": "/var/log/nginx/access.log", "log_group_name": "${DashboardLogGroup}", "log_stream_name": "{instance_id}/nginx-access" },
+                    { "file_path": "/var/log/nginx/error.log", "log_group_name": "${DashboardLogGroup}", "log_stream_name": "{instance_id}/nginx-error" },
+                    { "file_path": "/var/log/medislot/gunicorn-access.log", "log_group_name": "${DashboardLogGroup}", "log_stream_name": "{instance_id}/gunicorn-access" },
+                    { "file_path": "/var/log/medislot/gunicorn-error.log", "log_group_name": "${DashboardLogGroup}", "log_stream_name": "{instance_id}/app" },
+                    { "file_path": "/var/log/medislot-dashboard-setup.log", "log_group_name": "${DashboardLogGroup}", "log_stream_name": "{instance_id}/setup" },
+                    { "file_path": "/var/log/cloud-init-output.log", "log_group_name": "${DashboardLogGroup}", "log_stream_name": "{instance_id}/cloud-init" }
+                  ]
+                }
+              }
+            }
+          }
+          CWCONFIG
+          /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s -c file:/opt/aws/amazon-cloudwatch-agent/etc/medislot-dashboard.json
       Tags:
         - Key: Name
           Value: !Sub medislot-${EnvironmentName}-dashboard-ec2
@@ -159,3 +217,6 @@ Outputs:
   DashboardUrl:
     Description: Direct EC2 dashboard URL. Use a custom domain and TLS reverse proxy for HTTPS.
     Value: !Sub http://${DashboardInstance.PublicDnsName}/doctor/dashboard
+  DashboardLogGroupName:
+    Description: CloudWatch Logs group with nginx, gunicorn and Flask app logs from the dashboard host.
+    Value: !Ref DashboardLogGroup

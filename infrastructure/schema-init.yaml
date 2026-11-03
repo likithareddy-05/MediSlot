@@ -19,7 +19,19 @@ Parameters:
     Type: String
     Description: S3 key for the schema initializer ZIP.
 
+  LogRetentionInDays:
+    Type: Number
+    Default: 30
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1096, 1827, 2192, 2557, 2922, 3288, 3653]
+    Description: How long CloudWatch keeps the schema initializer logs (days).
+
 Resources:
+  SchemaInitLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/medislot/${EnvironmentName}/lambda/schema-init"
+      RetentionInDays: !Ref LogRetentionInDays
+
   SchemaInitFunction:
     Type: AWS::Lambda::Function
     Properties:
@@ -35,6 +47,8 @@ Resources:
         S3Key: !Ref SchemaInitLambdaS3Key
       Timeout: 60
       MemorySize: 256
+      LoggingConfig:
+        LogGroup: !Ref SchemaInitLogGroup
       VpcConfig:
         SecurityGroupIds:
           - Fn::ImportValue:

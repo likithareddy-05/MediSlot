@@ -167,6 +167,12 @@ def login_handler(event, context):
 
         # Use the same response for unknown emails and incorrect passwords.
         if not user:
+            logger.warning(json.dumps({
+                "event": "login_failed",
+                "reason": "unknown_account",
+                "request_id": getattr(context, "aws_request_id", None),
+                "source_ip": ((event.get("requestContext") or {}).get("identity") or {}).get("sourceIp"),
+            }))
             return response(401, {"message": "Invalid email or password"})
         stored_hash = user.get("password_hash")
         if not isinstance(stored_hash, str) or not stored_hash:
@@ -177,8 +183,21 @@ def login_handler(event, context):
         except (ValueError, TypeError):
             password_matches = False
         if not password_matches:
+            logger.warning(json.dumps({
+                "event": "login_failed",
+                "reason": "bad_password",
+                "request_id": getattr(context, "aws_request_id", None),
+                "user_id": str(user["user_id"]),
+                "source_ip": ((event.get("requestContext") or {}).get("identity") or {}).get("sourceIp"),
+            }))
             return response(401, {"message": "Invalid email or password"})
         if user.get("account_status") != "ACTIVE":
+            logger.warning(json.dumps({
+                "event": "login_blocked_inactive_account",
+                "request_id": getattr(context, "aws_request_id", None),
+                "user_id": str(user["user_id"]),
+                "account_status": user.get("account_status"),
+            }))
             return response(403, {"message": "This account is not active"})
 
         role = user.get("role")
@@ -210,6 +229,7 @@ def login_handler(event, context):
         logger.info(json.dumps({
             "event": "login_success",
             "request_id": getattr(context, "aws_request_id", None),
+            "user_id": user_id,
             "role": role,
         }))
         return response(200, {
@@ -268,6 +288,12 @@ def lambda_handler(event, context):
     resource = "/" + resource.lstrip("/")
     handler = ROUTES.get((method, resource))
     if handler is None:
+        logger.warning(json.dumps({
+            "event": "auth_route_not_found",
+            "request_id": getattr(context, "aws_request_id", None),
+            "method": method,
+            "resource": resource,
+        }))
         return {
             "statusCode": 404,
             "headers": {

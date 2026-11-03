@@ -662,6 +662,10 @@ def lambda_handler(event, context):
 
         # Error 1062 indicates a duplicate unique value.
         if exc.args and exc.args[0] == 1062:
+            logger.info(json.dumps({
+                "event": "registration_duplicate",
+                "request_id": getattr(context, "aws_request_id", None),
+            }))
             return response(
                 409,
                 {

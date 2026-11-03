@@ -1,4 +1,5 @@
 """MediSlot doctor dashboard and same-origin backend-for-frontend."""
+import logging
 import os
 import secrets
 from pathlib import Path
@@ -28,6 +29,9 @@ app.config.update(
 )
 Session(app)
 
+# Flask's logger defaults to WARNING under gunicorn, which would drop every INFO line.
+app.logger.setLevel(getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO))
+
 HTTP = requests.Session()
 TIMEOUT = (5, 25)
 
@@ -37,6 +41,10 @@ def _json_response(response):
         payload = response.json()
     except ValueError:
         payload = {"message": "The backend returned an invalid response"}
+        app.logger.error("upstream_invalid_json status=%s", response.status_code)
+    if response.status_code >= 400:
+        message = payload.get("message") if isinstance(payload, dict) else None
+        app.logger.warning("upstream_error status=%s message=%s", response.status_code, str(message)[:200])
     return jsonify(payload), response.status_code
 
 
@@ -64,9 +72,12 @@ def _refresh_access_token():
         return False
     response = _api_call("auth/refresh", "POST", body={"refresh_token": refresh_token})
     if response.status_code != 200:
+        app.logger.warning("bff_token_refresh_failed status=%s user_id=%s",
+                           response.status_code, (session.get("user") or {}).get("user_id"))
         session.clear()
         return False
     session["access_token"] = response.json()["access_token"]
+    app.logger.info("bff_token_refreshed user_id=%s", (session.get("user") or {}).get("user_id"))
     return True
 
 
@@ -120,12 +131,15 @@ def bff_login():
         app.logger.exception("Authentication API request failed")
         return jsonify({"message": "Unable to reach the sign-in service. Please try again."}), 502
     if response.status_code != 200:
+        app.logger.warning("bff_login_rejected status=%s source_ip=%s", response.status_code, request.remote_addr)
         return _json_response(response)
     data = response.json()
     user = data.get("user") or {}
     if user.get("role") != "DOCTOR":
+        app.logger.warning("bff_login_wrong_role user_id=%s role=%s", user.get("user_id"), user.get("role"))
         return jsonify({"message": "This portal is only for doctor accounts."}), 403
     if not data.get("access_token") or not data.get("refresh_token"):
+        app.logger.error("bff_login_incomplete_session user_id=%s", user.get("user_id"))
         return jsonify({"message": "The sign-in service returned an incomplete session."}), 502
     session.clear()
     try:
@@ -138,6 +152,7 @@ def bff_login():
     session["user"] = {"user_id": user.get("user_id"), "email": user.get("email"),
                        "role": user.get("role")}
     session["csrf_token"] = secrets.token_urlsafe(32)
+    app.logger.info("bff_login_success user_id=%s", user.get("user_id"))
     return jsonify({"message": "Login successful", "user": session["user"],
                     "csrf_token": session["csrf_token"]})
 
@@ -147,6 +162,7 @@ def bff_logout():
     if not _csrf_valid():
         return jsonify({"message": "Invalid session request."}), 403
     access_token, refresh_token = session.get("access_token"), session.get("refresh_token")
+    app.logger.info("bff_logout user_id=%s", (session.get("user") or {}).get("user_id"))
     if access_token and refresh_token:
         try:
             result = _api_call("auth/logout", "POST", token=access_token,
@@ -213,8 +229,21 @@ def bff_api(api_path):
         app.logger.exception("Doctor API request failed")
         return jsonify({"message": "Unable to reach the MediSlot service. Please try again."}), 502
     if upstream.status_code == 401:
+        app.logger.warning("bff_session_expired user_id=%s path=%s",
+                           (session.get("user") or {}).get("user_id"), upstream_path)
         session.clear()
     return _json_response(upstream)
+
+
+@app.after_request
+def _log_failed_bff_requests(resp):
+    """One WARNING/ERROR line for every failed dashboard API call (4xx/5xx)."""
+    if request.path.startswith("/bff/") and resp.status_code >= 400:
+        level = logging.ERROR if resp.status_code >= 500 else logging.WARNING
+        app.logger.log(level, "bff_request_failed method=%s path=%s status=%s user_id=%s",
+                       request.method, request.path, resp.status_code,
+                       (session.get("user") or {}).get("user_id"))
+    return resp
 
 
 if __name__ == "__main__":

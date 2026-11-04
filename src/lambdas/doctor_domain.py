@@ -810,13 +810,27 @@ def _set_status(table, slot_id, status, expected):
         raise
 
 
+def _delete_slot(table, slot_id, expected_statuses):
+    """Hard-delete an unbooked slot; refuses if it was booked in the meantime."""
+    try:
+        table.delete_item(Key={"slot_id": slot_id},
+            ConditionExpression="booked_count = :zero AND #s IN (" + ",".join(f":e{i}" for i in range(len(expected_statuses))) + ")",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={":zero": 0, **{f":e{i}": v for i, v in enumerate(expected_statuses)}})
+        return True
+    except Exception as exc:
+        if getattr(exc, "response", {}).get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            return False
+        raise
+
+
 def materialize_doctor(doctor_id, start_day=None, days=30):
     """Create/refresh this doctor's slots for the rolling window starting at start_day.
 
     - Idempotent: slot ids are deterministic (doctor#consultation#UTC start).
     - Existing slots are never overwritten; booking counters are untouched.
-    - Unbooked future slots that no longer match the active patterns are marked
-      REMOVED; they are restored automatically if the pattern returns.
+    - Unbooked future slots that no longer match the active patterns (edited or
+      removed patterns) are deleted; slots with bookings are kept.
     """
     conn = db_connect()
     table = ddb.Table(SLOT_TABLE_NAME)
@@ -870,6 +884,12 @@ def materialize_doctor(doctor_id, start_day=None, days=30):
                             if current.get("status") in ("REMOVED", "BLACKED_OUT") and int(current.get("booked_count", 0)) == 0:
                                 if _set_status(table, slot_id, "AVAILABLE", current["status"]):
                                     restored += 1
+                            # Same slot still wanted after an edit: point it at the current pattern.
+                            if (current.get("status") == "AVAILABLE"
+                                    and int(current.get("availability_pattern_id", -1)) != int(p["availability_pattern_id"])):
+                                table.update_item(Key={"slot_id": slot_id},
+                                    UpdateExpression="SET availability_pattern_id = :pid",
+                                    ExpressionAttributeValues={":pid": int(p["availability_pattern_id"])})
                             cursor += timedelta(minutes=duration)
                             continue
                         start_text = start_utc.isoformat().replace("+00:00", "Z")
@@ -903,10 +923,12 @@ def materialize_doctor(doctor_id, start_day=None, days=30):
             # by the blackout endpoint (status BLACKED_OUT).
             if day not in blackouts:
                 for sid, slot in existing.items():
-                    if sid in desired or slot.get("status") != "AVAILABLE": continue
+                    if sid in desired or slot.get("status") not in ("AVAILABLE", "REMOVED"): continue
                     if int(slot.get("booked_count", 0)) != 0: continue
                     if str(slot.get("start_time_utc") or slot.get("start_at_utc") or "") <= now_utc: continue
-                    if _set_status(table, sid, "REMOVED", "AVAILABLE"):
+                    # Old pattern's unbooked future slots are deleted outright; slots that
+                    # hold patients (booked_count > 0) are never touched.
+                    if _delete_slot(table, sid, ("AVAILABLE", "REMOVED")):
                         removed += 1
         # skipped > 0 means local wall times were dropped (DST gap): surface it as a warning.
         _log_event("materialize_doctor_completed", logging.WARNING if skipped else logging.INFO,

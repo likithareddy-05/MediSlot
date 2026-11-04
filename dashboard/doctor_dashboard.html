@@ -201,7 +201,7 @@ $('#availabilityForm').addEventListener('submit',async e=>{
     // whose consultation type is currently inactive) are never touched.
     if(editIndex!==undefined){
       const current=state.availability[Number(editIndex)];
-      await api('/availability/'+current.availability_pattern_id,'PATCH',pattern);
+      await api('/availability/'+current.availability_pattern_id,'PUT',pattern);
     }else{
       await api('/availability','POST',pattern);
     }

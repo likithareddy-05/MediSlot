@@ -70,8 +70,7 @@ CREATE TABLE IF NOT EXISTS users (
 -- ============================================================
 
 CREATE TABLE IF NOT EXISTS patients (
-    patient_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-
+    -- Same value as users.user_id: the account id IS the patient id.
     user_id BIGINT UNSIGNED NOT NULL,
 
     first_name VARCHAR(50) NOT NULL,
@@ -93,10 +92,8 @@ CREATE TABLE IF NOT EXISTS patients (
         DEFAULT CURRENT_TIMESTAMP(6)
         ON UPDATE CURRENT_TIMESTAMP(6),
 
-    PRIMARY KEY (patient_id),
-
-    -- One patient profile per account
-    UNIQUE KEY uq_patients_user_id (user_id),
+    -- One patient profile per account (primary key = users.user_id)
+    PRIMARY KEY (user_id),
 
     KEY idx_patients_name (last_name, first_name),
 
@@ -231,8 +228,7 @@ INSERT IGNORE INTO specializations (specialization_id, specialization_name) VALU
 -- ============================================================
 
 CREATE TABLE IF NOT EXISTS doctors (
-    doctor_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-
+    -- Same value as users.user_id: the account id IS the doctor id.
     user_id BIGINT UNSIGNED NOT NULL,
 
     first_name VARCHAR(50) NOT NULL,
@@ -267,10 +263,8 @@ CREATE TABLE IF NOT EXISTS doctors (
         DEFAULT CURRENT_TIMESTAMP(6)
         ON UPDATE CURRENT_TIMESTAMP(6),
 
-    PRIMARY KEY (doctor_id),
-
-    -- One doctor profile per account
-    UNIQUE KEY uq_doctors_user_id (user_id),
+    -- One doctor profile per account (primary key = users.user_id)
+    PRIMARY KEY (user_id),
 
     -- Every doctor must have a unique license number
     UNIQUE KEY uq_doctors_license_number (license_number),
@@ -372,6 +366,7 @@ INSERT IGNORE INTO consultation_types (consultation_type_id, consultation_name, 
 -- doctor's own fee, slot capacity and active flag.
 -- ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS doctor_consultation_types (
+    -- doctor_id holds the doctor's users.user_id
     doctor_id BIGINT UNSIGNED NOT NULL,
     consultation_type_id BIGINT UNSIGNED NOT NULL,
     fee DECIMAL(10,2) NOT NULL DEFAULT 0.00,
@@ -383,13 +378,16 @@ CREATE TABLE IF NOT EXISTS doctor_consultation_types (
     KEY idx_doctor_consultation_type (consultation_type_id),
     KEY idx_doctor_consultation_active (doctor_id, is_active),
     CONSTRAINT fk_doctor_consultation_doctor FOREIGN KEY (doctor_id)
-        REFERENCES doctors (doctor_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+        REFERENCES doctors (user_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
     CONSTRAINT fk_doctor_consultation_type FOREIGN KEY (consultation_type_id)
         REFERENCES consultation_types (consultation_type_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
     CONSTRAINT chk_doctor_consultation_fee CHECK (fee >= 0),
     CONSTRAINT chk_doctor_consultation_capacity CHECK (slot_capacity BETWEEN 1 AND 50)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
+-- A consultation type cannot be removed while availability exists for it:
+-- fk_availability_doctor_consultation is RESTRICT, and the API refuses to
+-- deactivate a type that still has active availability (remove that first).
 CREATE TABLE IF NOT EXISTS availability_patterns (
     availability_pattern_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     doctor_id BIGINT UNSIGNED NOT NULL,
@@ -407,7 +405,7 @@ CREATE TABLE IF NOT EXISTS availability_patterns (
     KEY idx_availability_doctor_weekday (doctor_id, weekday, is_active),
     KEY idx_availability_doctor_consultation (doctor_id, consultation_type_id),
     CONSTRAINT fk_availability_doctor FOREIGN KEY (doctor_id)
-        REFERENCES doctors (doctor_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+        REFERENCES doctors (user_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
     CONSTRAINT fk_availability_doctor_consultation FOREIGN KEY (doctor_id, consultation_type_id)
         REFERENCES doctor_consultation_types (doctor_id, consultation_type_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
     CONSTRAINT chk_availability_weekday CHECK (weekday BETWEEN 0 AND 6),
@@ -425,7 +423,7 @@ CREATE TABLE IF NOT EXISTS doctor_blackouts (
     UNIQUE KEY uq_doctor_blackout_date (doctor_id, blackout_date),
     KEY idx_blackout_date (blackout_date),
     CONSTRAINT fk_doctor_blackouts_doctor FOREIGN KEY (doctor_id)
-        REFERENCES doctors (doctor_id) ON UPDATE RESTRICT ON DELETE RESTRICT
+        REFERENCES doctors (user_id) ON UPDATE RESTRICT ON DELETE RESTRICT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 -- ============================================================
@@ -436,6 +434,7 @@ CREATE TABLE IF NOT EXISTS doctor_blackouts (
 
 CREATE TABLE IF NOT EXISTS appointments (
     appointment_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    -- doctor_id / patient_id hold the two people's users.user_id values
     doctor_id BIGINT UNSIGNED NOT NULL,
     patient_id BIGINT UNSIGNED NOT NULL,
     slot_id VARCHAR(128) NOT NULL,
@@ -452,9 +451,9 @@ CREATE TABLE IF NOT EXISTS appointments (
     KEY idx_appointments_doctor_status (doctor_id, status),
     KEY idx_appointments_doctor_consultation (doctor_id, consultation_type_id),
     CONSTRAINT fk_appointment_doctor FOREIGN KEY (doctor_id)
-        REFERENCES doctors (doctor_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+        REFERENCES doctors (user_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
     CONSTRAINT fk_appointment_patient FOREIGN KEY (patient_id)
-        REFERENCES patients (patient_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+        REFERENCES patients (user_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
     CONSTRAINT fk_appointment_doctor_consultation FOREIGN KEY (doctor_id, consultation_type_id)
         REFERENCES doctor_consultation_types (doctor_id, consultation_type_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
     CONSTRAINT chk_appointment_status CHECK (status IN ('BOOKED','CANCELLED','COMPLETED','NO_SHOW')),

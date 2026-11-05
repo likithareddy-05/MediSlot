@@ -155,7 +155,7 @@ def handler(event, context):
 
             cur.execute("""
                 SELECT
-                    d.doctor_id,
+                    d.user_id AS doctor_id,
                     ap.availability_pattern_id,
                     ap.timezone_name AS home_timezone,
                     ap.weekday AS day_of_week,
@@ -181,7 +181,7 @@ def handler(event, context):
                 FROM doctors d
 
                 JOIN availability_patterns ap
-                    ON ap.doctor_id = d.doctor_id
+                    ON ap.doctor_id = d.user_id
                     AND ap.is_active = 1
 
                 JOIN doctor_consultation_types dct

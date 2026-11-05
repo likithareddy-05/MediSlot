@@ -100,9 +100,10 @@ def _json_body(event):
 
 
 def _doctor_id(cursor, user_id):
-    cursor.execute("SELECT doctor_id FROM doctors WHERE user_id=%s LIMIT 1", (user_id,))
+    """A doctor's id IS the account's user_id; this only confirms a doctor profile exists."""
+    cursor.execute("SELECT user_id FROM doctors WHERE user_id=%s LIMIT 1", (user_id,))
     row = cursor.fetchone()
-    return row["doctor_id"] if row else None
+    return int(row["user_id"]) if row else None
 
 
 INDIAN_MOBILE_PATTERN = re.compile(r"[6-9][0-9]{9}")
@@ -135,7 +136,10 @@ def _validate_capacity(name, catalog, capacity):
 
 
 def _check_window(cursor, doctor_id, consultation_id, start_value, end_value):
-    """The availability window must fit at least one slot of the consultation duration."""
+    """The availability window must fit at least one slot of the consultation duration.
+
+    Returns the consultation duration in minutes (needed for the overlap check).
+    """
     cursor.execute("""SELECT c.duration_minutes FROM doctor_consultation_types d
         JOIN consultation_types c ON c.consultation_type_id=d.consultation_type_id
         WHERE d.consultation_type_id=%s AND d.doctor_id=%s AND d.is_active=1""",
@@ -148,6 +152,7 @@ def _check_window(cursor, doctor_id, consultation_id, start_value, end_value):
     if window < int(row["duration_minutes"]):
         raise ValueError(f"The availability window ({window} min) is shorter than the consultation duration "
                          f"({int(row['duration_minutes'])} min). Slots are generated automatically from the duration.")
+    return int(row["duration_minutes"])
 
 
 DAY_NAMES = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
@@ -155,6 +160,23 @@ DAY_NAMES = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sund
 
 def _minutes(value):
     return value.hour * 60 + value.minute
+
+
+def _effective_end(start_value, end_value, duration):
+    """Minute at which the last whole slot of a window ends.
+
+    Slots never run past the end time, so minutes at the tail that cannot hold
+    another slot stay free. 09:00-09:34 with 15-minute slots gives slots at
+    09:00 and 09:15 and occupies the doctor only until 09:30 (the other 4
+    minutes remain available for another window).
+    """
+    start = _minutes(start_value)
+    window = _minutes(end_value) - start
+    return start + (window // int(duration)) * int(duration)
+
+
+def _fmt_minutes(total):
+    return f"{total // 60:02d}:{total % 60:02d}"
 
 
 def _ranges_overlap(a_start, a_end, b_start, b_end):
@@ -165,25 +187,32 @@ def _dates_overlap(from_a, to_a, from_b, to_b):
     return (to_a is None or from_b <= to_a) and (to_b is None or from_a <= to_b)
 
 
-def _check_overlap(cursor, doctor_id, weekday, start_value, end_value, eff_from, eff_to, exclude_id=None):
-    """One time range on a weekday may belong to only one availability pattern.
+def _check_overlap(cursor, doctor_id, weekday, start_value, end_value, duration, eff_from, eff_to, exclude_id=None):
+    """One stretch of time on a weekday may belong to only one availability pattern.
 
     Overlapping windows for different consultation types would offer the same
     clock time as different slot grids (e.g. 15-min and 60-min), so they are rejected.
+    Windows are compared by the time their slots actually occupy (see _effective_end),
+    not by the raw end time typed in: leftover minutes too short for another slot
+    do not block a following window.
     """
+    new_start = _minutes(start_value)
+    new_end = _effective_end(start_value, end_value, duration)
     cursor.execute("""SELECT a.availability_pattern_id,a.start_time,a.end_time,a.effective_from,a.effective_to,
-        c.consultation_name FROM availability_patterns a
+        c.consultation_name,c.duration_minutes FROM availability_patterns a
         JOIN consultation_types c ON c.consultation_type_id=a.consultation_type_id
         WHERE a.doctor_id=%s AND a.is_active=1 AND a.weekday=%s""", (doctor_id, weekday))
     for row in cursor.fetchall():
         if exclude_id is not None and int(row["availability_pattern_id"]) == int(exclude_id):
             continue
         other_start, other_end = _as_time(row["start_time"]), _as_time(row["end_time"])
-        if (_ranges_overlap(_minutes(start_value), _minutes(end_value), _minutes(other_start), _minutes(other_end))
+        other_from = _minutes(other_start)
+        other_to = _effective_end(other_start, other_end, int(row["duration_minutes"]))
+        if (_ranges_overlap(new_start, new_end, other_from, other_to)
                 and _dates_overlap(eff_from, eff_to, row["effective_from"], row["effective_to"])):
             raise ValueError(
                 f"This window overlaps your existing {DAY_NAMES[weekday]} availability "
-                f"{other_start.strftime('%H:%M')}–{other_end.strftime('%H:%M')} ({row['consultation_name']}). "
+                f"{_fmt_minutes(other_from)}–{_fmt_minutes(other_to)} ({row['consultation_name']}). "
                 "The same time cannot be offered under two consultation types; "
                 "choose a different time range or edit/remove the existing one.")
 
@@ -207,7 +236,7 @@ def _as_time(value):
 
 def _profile(cursor, doctor_id):
     # `specialization` stays in the response as the readable name; the ids are what is stored.
-    cursor.execute("""SELECT d.doctor_id,d.user_id,u.email,d.first_name,d.last_name,d.phone,
+    cursor.execute("""SELECT d.user_id,u.email,d.first_name,d.last_name,d.phone,
         d.date_of_birth,d.gender,d.address,d.specialization_id,s.specialization_name AS specialization,
         d.hospital_id,h.hospital_name,h.city AS hospital_city,d.license_number,
         d.years_of_experience,d.clinic_address,d.created_at,d.updated_at,
@@ -215,7 +244,7 @@ def _profile(cursor, doctor_id):
         JOIN users u ON u.user_id=d.user_id
         JOIN specializations s ON s.specialization_id=d.specialization_id
         JOIN hospitals h ON h.hospital_id=d.hospital_id
-        WHERE d.doctor_id=%s""", (doctor_id,))
+        WHERE d.user_id=%s""", (doctor_id,))
     return cursor.fetchone()
 
 
@@ -242,8 +271,8 @@ def _lookup_id(cursor, table, id_column, value, label, current=None):
 APPOINTMENT_STATUSES = {"BOOKED","CANCELLED","COMPLETED","NO_SHOW"}
 APPOINTMENT_SELECT = """SELECT a.appointment_id,a.slot_id,a.status,a.outcome,
     a.scheduled_start_utc,a.scheduled_end_utc,
-    p.patient_id,p.first_name,p.last_name,p.phone,c.consultation_name
-    FROM appointments a JOIN patients p ON p.patient_id=a.patient_id
+    p.user_id AS patient_id,p.first_name,p.last_name,p.phone,c.consultation_name
+    FROM appointments a JOIN patients p ON p.user_id=a.patient_id
     JOIN consultation_types c ON c.consultation_type_id=a.consultation_type_id"""
 
 
@@ -276,8 +305,11 @@ def _appointments_for_slots(cursor, doctor_id, slot_ids):
 
 
 def _cancel_slot(conn, cursor, doctor_id, slot_id):
-    """Cancel a slot and mark every booked appointment on it as CANCELLED.
+    """Cancel one slot: close it in DynamoDB, then mark its booked appointments CANCELLED.
 
+    Order matters. The slot is closed first so no new patient can book it while
+    the appointments are being cancelled. Both steps are idempotent, so if the
+    MySQL step fails the doctor can simply press Cancel again.
     There is no refund table: no refund record is created.
     """
     table = ddb.Table(SLOT_TABLE_NAME)
@@ -285,13 +317,9 @@ def _cancel_slot(conn, cursor, doctor_id, slot_id):
     if not item or str(item.get("doctor_id")) != str(doctor_id):
         _log_event("slot_cancel_not_found", logging.WARNING, doctor_id=doctor_id, slot_id=slot_id)
         return response(404,{"message":"Slot not found"})
-    cursor.execute("""SELECT a.appointment_id,a.patient_id FROM appointments a
-        WHERE a.slot_id=%s AND a.doctor_id=%s AND a.status='BOOKED'""",(slot_id,doctor_id))
-    affected = cursor.fetchall()
-    for appt in affected:
-        cursor.execute("UPDATE appointments SET status='CANCELLED' WHERE appointment_id=%s AND status='BOOKED'",
-                       (appt["appointment_id"],))
-    conn.commit()
+    end_text = str(item.get("end_time_utc") or item.get("end_at_utc") or "")
+    if end_text and datetime.fromisoformat(end_text.replace("Z", "+00:00")) <= datetime.now(timezone.utc):
+        raise ValueError("This slot has already ended and can no longer be cancelled.")
     try:
         table.update_item(Key={"slot_id":slot_id},
             UpdateExpression="SET #s=:cancelled, updated_at=:now",
@@ -302,15 +330,42 @@ def _cancel_slot(conn, cursor, doctor_id, slot_id):
         # Already cancelled is fine; the cancel call is idempotent.
         code = getattr(exc,"response",{}).get("Error",{}).get("Code")
         if code != "ConditionalCheckFailedException":
-            # MySQL is already committed (appointments cancelled)
-            # but DynamoDB still shows the slot as open: flag it for follow-up.
-            _log_event("slot_cancel_state_mismatch", logging.ERROR, doctor_id=doctor_id,
-                       slot_id=slot_id, affected_appointments=len(affected), error_code=code)
+            _log_event("slot_cancel_failed", logging.ERROR, doctor_id=doctor_id, slot_id=slot_id, error_code=code)
             raise
+    cursor.execute("""SELECT appointment_id FROM appointments
+        WHERE slot_id=%s AND doctor_id=%s AND status='BOOKED'""",(slot_id,doctor_id))
+    affected = cursor.fetchall()
+    for appt in affected:
+        cursor.execute("UPDATE appointments SET status='CANCELLED' WHERE appointment_id=%s AND status='BOOKED'",
+                       (appt["appointment_id"],))
+    conn.commit()
     _log_event("slot_cancelled", doctor_id=doctor_id, slot_id=slot_id,
                affected_appointments=len(affected))
     return response(200,{"message":"Slot cancelled","slot_id":slot_id,
         "affected_appointments":len(affected)})
+
+
+def _consultation_type_in_use(cursor, doctor_id, type_id):
+    """Why a consultation type cannot be deactivated yet, or None when it is free.
+
+    A type is a parent of the doctor's availability and bookings. It may only be
+    removed once the availability built on it is removed and nothing upcoming is
+    booked, so no slots or bookings are lost by a stray click.
+    """
+    cursor.execute("""SELECT COUNT(*) AS n FROM availability_patterns
+        WHERE doctor_id=%s AND consultation_type_id=%s AND is_active=1""", (doctor_id, type_id))
+    patterns = int((cursor.fetchone() or {}).get("n") or 0)
+    if patterns:
+        return (f"This consultation type still has {patterns} weekly availability pattern(s). "
+                "Remove its availability on the Availability tab first, then deactivate the consultation type.")
+    cursor.execute("""SELECT COUNT(*) AS n FROM appointments
+        WHERE doctor_id=%s AND consultation_type_id=%s AND status='BOOKED'
+        AND scheduled_end_utc > UTC_TIMESTAMP(6)""", (doctor_id, type_id))
+    booked = int((cursor.fetchone() or {}).get("n") or 0)
+    if booked:
+        return (f"This consultation type has {booked} upcoming booked appointment(s). "
+                "Cancel those slots from My Schedule first, then deactivate the consultation type.")
+    return None
 
 
 SCHEDULE_MESSAGES = {
@@ -412,7 +467,7 @@ def _handle_api(event, context):
                 cur.execute("""INSERT INTO doctors (user_id,first_name,last_name,phone,date_of_birth,gender,
                     address,specialization_id,license_number,years_of_experience,clinic_address,hospital_id)
                     VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""", [user_id] + values)
-                doctor_id = cur.lastrowid
+                doctor_id = int(user_id)  # the doctor id is the account's user_id
                 conn.commit()
                 _log_event("doctor_profile_created", doctor_id=doctor_id, user_id=user_id)
                 return response(201, {"message": "Doctor profile created", "profile": _profile(cur, doctor_id)})
@@ -444,7 +499,7 @@ def _handle_api(event, context):
                 if "date_of_birth" in updates:
                     date.fromisoformat(str(updates["date_of_birth"]))
                 if "specialization_id" in updates or "hospital_id" in updates:
-                    cur.execute("SELECT specialization_id,hospital_id FROM doctors WHERE doctor_id=%s", (doctor_id,))
+                    cur.execute("SELECT specialization_id,hospital_id FROM doctors WHERE user_id=%s", (doctor_id,))
                     current_ids = cur.fetchone()
                     if "specialization_id" in updates:
                         updates["specialization_id"] = _lookup_id(cur, "specializations", "specialization_id",
@@ -452,14 +507,14 @@ def _handle_api(event, context):
                     if "hospital_id" in updates:
                         updates["hospital_id"] = _lookup_id(cur, "hospitals", "hospital_id",
                             updates["hospital_id"], "hospital", current_ids["hospital_id"])
-                sql = "UPDATE doctors SET " + ",".join(f"{k}=%s" for k in updates) + " WHERE doctor_id=%s"
+                sql = "UPDATE doctors SET " + ",".join(f"{k}=%s" for k in updates) + " WHERE user_id=%s"
                 cur.execute(sql, list(updates.values()) + [doctor_id])
                 conn.commit()
                 _log_event("doctor_profile_updated", doctor_id=doctor_id, fields=sorted(updates))
                 return response(200, {"message": "Doctor profile updated", "profile": _profile(cur, doctor_id)})
 
             if path == "/profile/photo-url" and method == "GET":
-                cur.execute("SELECT photo_key FROM doctors WHERE doctor_id=%s",(doctor_id,))
+                cur.execute("SELECT photo_key FROM doctors WHERE user_id=%s",(doctor_id,))
                 photo = cur.fetchone()
                 if not photo or not photo["photo_key"]:
                     return response(404,{"message":"Profile photo not found"})
@@ -474,7 +529,7 @@ def _handle_api(event, context):
                 key = f"doctor-photos/{doctor_id}/{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}-{os.urandom(6).hex()}.{ext}"
                 url = s3.generate_presigned_url("put_object", Params={"Bucket": ASSETS_BUCKET, "Key": key,
                     "ContentType": content_type, "ServerSideEncryption": "AES256"}, ExpiresIn=300)
-                cur.execute("UPDATE doctors SET photo_key=%s WHERE doctor_id=%s", (key, doctor_id))
+                cur.execute("UPDATE doctors SET photo_key=%s WHERE user_id=%s", (key, doctor_id))
                 conn.commit()
                 _log_event("doctor_photo_upload_url_issued", doctor_id=doctor_id, photo_key=key, content_type=content_type)
                 return response(200, {"upload_url": url, "photo_key": key, "method": "PUT",
@@ -482,7 +537,9 @@ def _handle_api(event, context):
 
             if path == "/consultation-types" and method == "GET":
                 cur.execute("""SELECT d.consultation_type_id,d.doctor_id,c.consultation_name,c.duration_minutes,
-                    d.fee,d.slot_capacity,d.is_active,d.created_at,d.updated_at
+                    d.fee,d.slot_capacity,d.is_active,d.created_at,d.updated_at,
+                    (SELECT COUNT(*) FROM availability_patterns a WHERE a.doctor_id=d.doctor_id
+                        AND a.consultation_type_id=d.consultation_type_id AND a.is_active=1) AS active_availability_count
                     FROM doctor_consultation_types d
                     JOIN consultation_types c ON c.consultation_type_id=d.consultation_type_id
                     WHERE d.doctor_id=%s ORDER BY c.duration_minutes,c.consultation_type_id""", (doctor_id,))
@@ -540,6 +597,10 @@ def _handle_api(event, context):
                 if "slot_capacity" in fields: fields["slot_capacity"] = int(fields["slot_capacity"])
                 if "fee" in fields: fields["fee"] = float(fields["fee"])
                 if "is_active" in fields: fields["is_active"] = 1 if fields["is_active"] in (1, True, "1", "true", "True") else 0
+                if fields.get("is_active") == 0:
+                    blocked = _consultation_type_in_use(cur, doctor_id, type_id)
+                    if blocked:
+                        return response(409, {"message": blocked})
                 _validate_capacity(name, current, fields.get("slot_capacity", int(current["slot_capacity"])))
                 if "fee" in fields and fields["fee"] < 0: raise ValueError("fee cannot be negative")
                 if fields:
@@ -549,6 +610,11 @@ def _handle_api(event, context):
                            consultation_type_id=int(match.group(1)), fields=sorted(fields))
                 return response(200, {"message": "Consultation type updated", "slots": _refresh_slots(doctor_id)})
             if match and method == "DELETE":
+                cur.execute("SELECT 1 FROM doctor_consultation_types WHERE consultation_type_id=%s AND doctor_id=%s", (int(match.group(1)),doctor_id))
+                if not cur.fetchone(): return response(404, {"message": "Consultation type not found"})
+                blocked = _consultation_type_in_use(cur, doctor_id, int(match.group(1)))
+                if blocked:
+                    return response(409, {"message": blocked})
                 cur.execute("UPDATE doctor_consultation_types SET is_active=0 WHERE consultation_type_id=%s AND doctor_id=%s", (int(match.group(1)),doctor_id))
                 if not cur.rowcount: return response(404, {"message": "Consultation type not found"})
                 conn.commit()
@@ -584,15 +650,17 @@ def _handle_api(event, context):
                     if start_value >= end_value:
                         raise ValueError("start_time must be before end_time")
                     consultation_id = int(_required(item, "consultation_type_id"))
-                    _check_window(cur, doctor_id, consultation_id, start_value, end_value)
-                    for _, other_day, other_start, other_end in validated:
-                        if other_day == weekday and _ranges_overlap(_minutes(start_value), _minutes(end_value),
-                                                                    _minutes(other_start), _minutes(other_end)):
+                    duration = _check_window(cur, doctor_id, consultation_id, start_value, end_value)
+                    new_end = _effective_end(start_value, end_value, duration)
+                    for _, other_day, other_start, _other_end, other_effective_end in validated:
+                        if other_day == weekday and _ranges_overlap(_minutes(start_value), new_end,
+                                                                    _minutes(other_start), other_effective_end):
                             raise ValueError(f"Overlapping {DAY_NAMES[weekday]} availability windows are not allowed")
-                    validated.append((consultation_id, weekday, start_value, end_value))
+                    # The window is stored exactly as entered; new_end is only used for the overlap check.
+                    validated.append((consultation_id, weekday, start_value, end_value, new_end))
 
                 cur.execute("UPDATE availability_patterns SET is_active=0 WHERE doctor_id=%s AND is_active=1", (doctor_id,))
-                for consultation_id, weekday, start_value, end_value in validated:
+                for consultation_id, weekday, start_value, end_value, _effective in validated:
                     cur.execute("""INSERT INTO availability_patterns
                         (doctor_id,consultation_type_id,weekday,start_time,end_time,timezone_name,effective_from,effective_to,is_active)
                         VALUES (%s,%s,%s,%s,%s,%s,%s,NULL,1)""",
@@ -606,9 +674,15 @@ def _handle_api(event, context):
             if path == "/availability" and method == "GET":
                 cur.execute("SELECT * FROM availability_patterns WHERE doctor_id=%s AND is_active=1 ORDER BY weekday,start_time", (doctor_id,))
                 rows = cur.fetchall()
+                cur.execute("SELECT consultation_type_id,duration_minutes FROM consultation_types")
+                durations = {int(r["consultation_type_id"]): int(r["duration_minutes"]) for r in cur.fetchall()}
                 for row in rows:
-                    row["start_time"] = _as_time(row["start_time"]).strftime("%H:%M:%S")
-                    row["end_time"] = _as_time(row["end_time"]).strftime("%H:%M:%S")
+                    start_t, end_t = _as_time(row["start_time"]), _as_time(row["end_time"])
+                    duration = durations.get(int(row["consultation_type_id"]))
+                    # last_slot_end: where the final whole slot ends (differs from end_time when minutes are left over)
+                    row["last_slot_end"] = _fmt_minutes(_effective_end(start_t, end_t, duration)) if duration else None
+                    row["start_time"] = start_t.strftime("%H:%M:%S")
+                    row["end_time"] = end_t.strftime("%H:%M:%S")
                 timezone_name = rows[0]["timezone_name"] if rows else "Asia/Kolkata"
                 return response(200, {"availability_patterns": rows, "timezone_name": timezone_name})
             if path == "/availability" and method == "POST":
@@ -625,8 +699,8 @@ def _handle_api(event, context):
                 consultation_id = int(_required(body,"consultation_type_id"))
                 cur.execute("SELECT 1 FROM doctor_consultation_types WHERE consultation_type_id=%s AND doctor_id=%s AND is_active=1",(consultation_id,doctor_id))
                 if not cur.fetchone(): raise ValueError("Invalid active consultation_type_id")
-                _check_window(cur, doctor_id, consultation_id, start, end)
-                _check_overlap(cur, doctor_id, weekday, start, end, effective_from, effective_to)
+                duration = _check_window(cur, doctor_id, consultation_id, start, end)
+                _check_overlap(cur, doctor_id, weekday, start, end, duration, effective_from, effective_to)
                 cur.execute("INSERT INTO availability_patterns (doctor_id,consultation_type_id,weekday,start_time,end_time,timezone_name,effective_from,effective_to,is_active) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,1)",(doctor_id,consultation_id,weekday,start,end,tz,effective_from,effective_to))
                 conn.commit(); new_id = cur.lastrowid
                 _log_event("availability_created", doctor_id=doctor_id, availability_pattern_id=new_id,
@@ -656,8 +730,8 @@ def _handle_api(event, context):
                 start_value = _as_time(fields.get("start_time",existing["start_time"]))
                 end_value = _as_time(fields.get("end_time",existing["end_time"]))
                 if start_value >= end_value: raise ValueError("start_time must be before end_time")
-                _check_window(cur, doctor_id, int(fields.get("consultation_type_id", existing["consultation_type_id"])), start_value, end_value)
-                _check_overlap(cur, doctor_id, int(fields.get("weekday", existing_weekday)), start_value, end_value,
+                duration = _check_window(cur, doctor_id, int(fields.get("consultation_type_id", existing["consultation_type_id"])), start_value, end_value)
+                _check_overlap(cur, doctor_id, int(fields.get("weekday", existing_weekday)), start_value, end_value, duration,
                                fields.get("effective_from", existing["effective_from"]),
                                fields.get("effective_to", existing["effective_to"]), exclude_id=int(match.group(1)))
                 from_value = fields.get("effective_from",existing["effective_from"])
@@ -695,6 +769,8 @@ def _handle_api(event, context):
                 existing = slot_table.query(IndexName="DoctorDateIndex",
                     KeyConditionExpression=Key("doctor_id").eq(str(doctor_id)) & Key("slot_date").eq(blackout_date.isoformat()))
                 for slot in existing.get("Items", []):
+                    if slot.get("status") == "CANCELLED":
+                        continue  # a cancelled slot stays cancelled; removing the blackout must not reopen it
                     slot_table.update_item(Key={"slot_id":slot["slot_id"]},
                         UpdateExpression="SET #status = :status",
                         ExpressionAttributeNames={"#status":"status"},
@@ -758,8 +834,8 @@ def _handle_api(event, context):
             match = re.fullmatch(r"/slots/(.+)",path)
             if match and method == "DELETE":
                 # Slot ids contain '#', so clients send them URL-encoded.
-                slot_id = unquote(match.group(1))
-                return _cancel_slot(conn, cur, doctor_id, slot_id)
+                raw_slot = (event.get("pathParameters") or {}).get("slotId") or match.group(1)
+                return _cancel_slot(conn, cur, doctor_id, unquote(raw_slot))
 
             if path == "/materialize" and method == "POST":
                 start = date.fromisoformat(str(body["start_date"])) if body.get("start_date") else None
@@ -961,8 +1037,8 @@ def materializer_handler(event, context):
     summaries = []
     try:
         with conn.cursor() as cur:
-            cur.execute("""SELECT d.doctor_id, COALESCE((SELECT a.timezone_name
-                FROM availability_patterns a WHERE a.doctor_id=d.doctor_id AND a.is_active=1
+            cur.execute("""SELECT d.user_id AS doctor_id, COALESCE((SELECT a.timezone_name
+                FROM availability_patterns a WHERE a.doctor_id=d.user_id AND a.is_active=1
                 ORDER BY a.availability_pattern_id LIMIT 1), 'UTC') AS timezone_name
                 FROM doctors d""")
             doctors = cur.fetchall()

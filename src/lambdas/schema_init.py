@@ -86,6 +86,24 @@ def lambda_handler(event, context):
                     "Run database/migrations/001_normalize_consultation_types.sql first."
                 )
 
+        # doctors / patients used to have their own doctor_id / patient_id key. The user_id
+        # is now the key; CREATE TABLE IF NOT EXISTS would silently keep the old tables.
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = %s
+                  AND ((table_name = 'doctors' AND column_name = 'doctor_id')
+                    OR (table_name = 'patients' AND column_name = 'patient_id'))
+                """,
+                (database,),
+            )
+            if cursor.fetchone():
+                raise RuntimeError(
+                    "doctors / patients still have their own doctor_id / patient_id key. "
+                    "Run database/migrations/002_user_id_as_primary_key.sql first."
+                )
+
         # An existing doctors table without specialization_id / hospital_id / photo_key
         # would be left untouched by CREATE TABLE IF NOT EXISTS: stop with a clear message.
         with connection.cursor() as cursor:

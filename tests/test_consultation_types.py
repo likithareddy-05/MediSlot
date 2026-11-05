@@ -53,6 +53,18 @@ class SchemaTests(unittest.TestCase):
             sql = table_sql(table)
             self.assertRegex(sql, r"FOREIGN KEY \(doctor_id, consultation_type_id\)\s+REFERENCES doctor_consultation_types")
 
+    def test_user_id_is_the_primary_key_of_doctors_and_patients(self):
+        for table, old_key in (("doctors", "doctor_id"), ("patients", "patient_id")):
+            sql = table_sql(table)
+            self.assertIn("PRIMARY KEY (user_id)", sql)
+            self.assertNotIn(old_key, sql)
+            self.assertIn("FOREIGN KEY (user_id)", sql)
+
+    def test_child_tables_reference_user_id(self):
+        self.assertNotRegex(SCHEMA, r"REFERENCES (doctors|patients) \((doctor|patient)_id\)")
+        self.assertRegex(SCHEMA, r"REFERENCES doctors \(user_id\)")
+        self.assertRegex(SCHEMA, r"REFERENCES patients \(user_id\)")
+
     def test_tables_are_created_in_dependency_order(self):
         order = [SCHEMA.index("CREATE TABLE IF NOT EXISTS " + t + " (") for t in
                  ("consultation_types", "doctor_consultation_types", "availability_patterns", "appointments")]
@@ -105,7 +117,7 @@ class HandlerTests(unittest.TestCase):
              "min_capacity": 1, "max_capacity": 1}
 
     def test_create_inserts_into_the_per_doctor_table_using_the_catalog_id(self):
-        conn = FakeConn([{"doctor_id": 5}, self.quick, None])
+        conn = FakeConn([{"user_id": 5}, self.quick, None])
         status, body = self.call(conn, "POST", "/doctors/me/consultation-types",
                                  {"consultation_name": "Quick Consult", "duration_minutes": 15, "fee": 500, "slot_capacity": 1})
         self.assertEqual((status, body["consultation_type_id"]), (201, 1))
@@ -115,21 +127,21 @@ class HandlerTests(unittest.TestCase):
         self.assertTrue(conn.committed)
 
     def test_unknown_consultation_name_is_rejected(self):
-        conn = FakeConn([{"doctor_id": 5}, None])
+        conn = FakeConn([{"user_id": 5}, None])
         status, body = self.call(conn, "POST", "/doctors/me/consultation-types",
                                  {"consultation_name": "Surgery", "fee": 1, "slot_capacity": 1})
         self.assertEqual(status, 400)
         self.assertIn("four approved", body["message"])
 
     def test_active_duplicate_is_rejected(self):
-        conn = FakeConn([{"doctor_id": 5}, self.quick, {"is_active": 1}])
+        conn = FakeConn([{"user_id": 5}, self.quick, {"is_active": 1}])
         status, body = self.call(conn, "POST", "/doctors/me/consultation-types",
                                  {"consultation_name": "Quick Consult", "fee": 500, "slot_capacity": 1})
         self.assertEqual(status, 400)
         self.assertIn("already exists", body["message"])
 
     def test_inactive_type_is_reactivated_not_duplicated(self):
-        conn = FakeConn([{"doctor_id": 5}, self.quick, {"is_active": 0}])
+        conn = FakeConn([{"user_id": 5}, self.quick, {"is_active": 0}])
         status, body = self.call(conn, "POST", "/doctors/me/consultation-types",
                                  {"consultation_name": "Quick Consult", "fee": 650, "slot_capacity": 1})
         self.assertEqual((status, body["consultation_type_id"]), (200, 1))
@@ -137,14 +149,14 @@ class HandlerTests(unittest.TestCase):
 
     def test_the_type_itself_cannot_be_changed_by_an_edit(self):
         current = {"consultation_name": "Quick Consult", "duration_minutes": 15, "min_capacity": 1, "max_capacity": 1, "slot_capacity": 1}
-        conn = FakeConn([{"doctor_id": 5}, current])
+        conn = FakeConn([{"user_id": 5}, current])
         status, body = self.call(conn, "PUT", "/doctors/me/consultation-types/1", {"consultation_name": "Standard Consult"})
         self.assertEqual(status, 400)
         self.assertIn("cannot be changed", body["message"])
 
     def test_edit_only_updates_per_doctor_columns(self):
         current = {"consultation_name": "Quick Consult", "duration_minutes": 15, "min_capacity": 1, "max_capacity": 1, "slot_capacity": 1}
-        conn = FakeConn([{"doctor_id": 5}, current])
+        conn = FakeConn([{"user_id": 5}, current])
         status, _ = self.call(conn, "PUT", "/doctors/me/consultation-types/1",
                               {"consultation_name": "Quick Consult", "duration_minutes": 15, "fee": 600, "slot_capacity": 1, "is_active": 1})
         self.assertEqual(status, 200)

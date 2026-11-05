@@ -68,8 +68,10 @@ def lambda_handler(event, context):
             autocommit=True,
         )
 
-        # A database still on the old one-table layout must be migrated first;
-        # running the new schema on top of it would fail half-way.
+        # schema.sql is the only definition of the database. CREATE TABLE IF NOT EXISTS
+        # never alters a table that already exists, so a database still on an older
+        # layout must be reset (see README, "Resetting a dev database") instead of
+        # having the new schema run on top of it and fail half-way.
         with connection.cursor() as cursor:
             cursor.execute(
                 """
@@ -83,7 +85,7 @@ def lambda_handler(event, context):
             if cursor.fetchone():
                 raise RuntimeError(
                     "The database still has the old consultation_types layout. "
-                    "Run database/migrations/001_normalize_consultation_types.sql first."
+                    "Drop the MediSlot tables and re-run (README: Resetting a dev database)."
                 )
 
         # doctors / patients used to have their own doctor_id / patient_id key. The user_id
@@ -101,7 +103,7 @@ def lambda_handler(event, context):
             if cursor.fetchone():
                 raise RuntimeError(
                     "doctors / patients still have their own doctor_id / patient_id key. "
-                    "Run database/migrations/002_user_id_as_primary_key.sql first."
+                    "Drop the MediSlot tables and re-run (README: Resetting a dev database)."
                 )
 
         # An existing doctors table without specialization_id / hospital_id / photo_key
@@ -122,7 +124,7 @@ def lambda_handler(event, context):
             if has_table and new_columns != 3:
                 raise RuntimeError(
                     "The existing doctors table is missing specialization_id, hospital_id or "
-                    "photo_key. Update or recreate the doctors table first (see README)."
+                    "photo_key. Drop the MediSlot tables and re-run (README: Resetting a dev database)."
                 )
 
         with connection.cursor() as cursor:

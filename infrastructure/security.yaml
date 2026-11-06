@@ -220,6 +220,12 @@ Resources:
                   - lambda:InvokeFunction
                 Resource:
                   - !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:medislot-${EnvironmentName}-doctor-domain
+              - Sid: InvokePatientDomainLambda
+                Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:medislot-${EnvironmentName}-patient-domain
       Tags:
         - Key: Project
           Value: MediSlot

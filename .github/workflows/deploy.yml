@@ -60,20 +60,24 @@ jobs:
             infrastructure/authentication.yaml \
             infrastructure/schema-init.yaml \
             infrastructure/dashboard.yaml \
-            src/lambdas/auth_handler.py \
-            src/lambdas/register.py \
-            src/lambdas/refresh.py \
-            src/lambdas/logout.py \
-            src/lambdas/authorizer.py \
-            src/lambdas/profile.py \
-            src/lambdas/schema_init.py \
-            src/lambdas/doctor_domain.py \
-            src/lambdas/slot_materializer.py \
-            src/lambdas/slot_time.py \
+            src/lambdas/auth/auth_handler.py \
+            src/lambdas/auth/register.py \
+            src/lambdas/auth/refresh.py \
+            src/lambdas/auth/logout.py \
+            src/lambdas/auth/authorizer.py \
+            src/lambdas/auth/profile.py \
+            src/lambdas/schema/schema_init.py \
+            src/lambdas/doctor/doctor_domain.py \
+            src/lambdas/doctor/slot_materializer.py \
+            src/lambdas/patient/patient_domain.py \
+            src/lambdas/shared/slot_time.py \
+            src/lambdas/shared/common.py \
             src/lambdas/requirements.txt \
             database/schema.sql \
             dashboard/app.py \
             dashboard/doctor_dashboard.html \
+            dashboard/patient_dashboard.html \
+            dashboard/landing.html \
             dashboard/requirements.txt \
             tests/test_dst_materializer.py \
             tests/test_slot_idempotency.py; do
@@ -105,9 +109,10 @@ jobs:
 
           python -m pip install --upgrade pip
           python -m pip install -r src/lambdas/requirements.txt
+          python -m pip install -r dashboard/requirements.txt
 
           python -m compileall -q src/lambdas dashboard
-          python -m unittest discover -s tests -v
+          python -m unittest discover -s tests -v   # unit tests only; tests/integration needs a live API
 
       - name: Validate CloudFormation templates
         shell: bash
@@ -197,7 +202,7 @@ jobs:
               -t "$dir"
 
             for source in "$@"; do
-              cp "src/lambdas/$source" "$dir/"
+              cp "src/lambdas/$source" "$dir/"   # e.g. doctor/doctor_domain.py -> flat in the zip
             done
 
             (cd "$dir" && zip -qr "../lambdas/${name}.zip" .)
@@ -207,11 +212,13 @@ jobs:
               --region "$AWS_REGION"
           }
 
-          package_lambda auth auth_handler.py register.py refresh.py logout.py
-          package_lambda authorizer authorizer.py
-          package_lambda profile profile.py
-          package_lambda doctor-domain doctor_domain.py slot_time.py
-          package_lambda slot-materializer slot_materializer.py slot_time.py
+          # Code is organised per role: auth/ (shared login), doctor/, patient/, shared/ (helpers).
+          package_lambda auth auth/auth_handler.py auth/register.py auth/refresh.py auth/logout.py
+          package_lambda authorizer auth/authorizer.py
+          package_lambda profile auth/profile.py
+          package_lambda doctor-domain doctor/doctor_domain.py shared/slot_time.py
+          package_lambda slot-materializer doctor/slot_materializer.py shared/slot_time.py
+          package_lambda patient-domain patient/patient_domain.py shared/common.py shared/slot_time.py
 
           schema_dir=build/schema-init
 
@@ -220,7 +227,7 @@ jobs:
 
           python -m pip install --only-binary=:all: PyMySQL -t "$schema_dir"
 
-          cp src/lambdas/schema_init.py database/schema.sql "$schema_dir/"
+          cp src/lambdas/schema/schema_init.py database/schema.sql "$schema_dir/"
 
           (cd "$schema_dir" && zip -qr ../lambdas/schema-init.zip .)
 
@@ -246,6 +253,7 @@ jobs:
               "ProfileLambdaS3Key=artifacts/${GITHUB_SHA}/profile.zip" \
               "DoctorDomainLambdaS3Key=artifacts/${GITHUB_SHA}/doctor-domain.zip" \
               "SlotMaterializerLambdaS3Key=artifacts/${GITHUB_SHA}/slot-materializer.zip" \
+              "PatientDomainLambdaS3Key=artifacts/${GITHUB_SHA}/patient-domain.zip" \
             --capabilities CAPABILITY_NAMED_IAM \
             --region "$AWS_REGION" \
             --no-fail-on-empty-changeset
@@ -309,6 +317,8 @@ jobs:
 
           cp dashboard/app.py \
              dashboard/doctor_dashboard.html \
+             dashboard/patient_dashboard.html \
+             dashboard/landing.html \
              dashboard/requirements.txt \
              build/dashboard/dashboard/
 
@@ -421,6 +431,8 @@ jobs:
 
           test -f "$WORK_DIR/extracted/dashboard/app.py"
           test -f "$WORK_DIR/extracted/dashboard/doctor_dashboard.html"
+          test -f "$WORK_DIR/extracted/dashboard/patient_dashboard.html"
+          test -f "$WORK_DIR/extracted/dashboard/landing.html"
           test -f "$WORK_DIR/extracted/dashboard/requirements.txt"
 
           echo '[4/6] Preparing staged dashboard files'
@@ -510,6 +522,21 @@ jobs:
             --query "StandardOutputContent" \
             --output text \
             --region "$AWS_REGION"
+
+      - name: Run integration tests against deployed API
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          API_BASE_URL=$(aws cloudformation describe-stacks \
+            --stack-name "medislot-${ENVIRONMENT_NAME}-authentication" \
+            --query "Stacks[0].Outputs[?OutputKey=='RestApiBaseUrl'].OutputValue" \
+            --output text \
+            --region "$AWS_REGION")
+
+          python -m pip install requests
+          MEDISLOT_API_BASE_URL="$API_BASE_URL" \
+            python -m unittest discover -s tests/integration -v
 
       - name: Show deployment outputs
         shell: bash

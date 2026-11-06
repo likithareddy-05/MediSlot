@@ -7,7 +7,8 @@ from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "src" / "lambdas"))
+for _sub in ("shared", "auth", "doctor", "patient"):
+    sys.path.insert(0, str(ROOT / "src" / "lambdas" / _sub))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 for key, value in {
     "AWS_DEFAULT_REGION": "ap-south-1", "AWS_ACCESS_KEY_ID": "test", "AWS_SECRET_ACCESS_KEY": "test",
@@ -122,7 +123,7 @@ class HandlerTests(unittest.TestCase):
         conn = Cursor(ones=[{"user_id": 7}, {"x": 1}, {"n": 2}])
         status, body = self.call(conn, "DELETE", "/doctors/me/consultation-types/1")
         self.assertEqual(status, 409)
-        self.assertIn("Remove its availability", body["message"])
+        self.assertIn("cannot deactivate this consultation type until its slots are deleted", body["message"])
         self.assertFalse(any(s.startswith("UPDATE doctor_consultation_types") for s, _ in conn.sql))
 
     def test_deactivate_is_blocked_while_future_bookings_exist(self):

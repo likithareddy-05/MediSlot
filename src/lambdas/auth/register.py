@@ -305,6 +305,39 @@ def _validate_address(value, field, errors):
     return value
 
 
+def _validate_city(value, errors):
+    """Validate the patient's city (letters, spaces, apostrophes, dots, hyphens)."""
+    if value is None:
+        return None
+
+    if not 2 <= len(value) <= 100:
+        errors["city"] = "city must be between 2 and 100 characters."
+    elif not re.fullmatch(r"[^\W\d_]+(?:[ '\u2019.-]+[^\W\d_]+)*\.?", value, flags=re.UNICODE):
+        errors["city"] = "city may contain letters, spaces, apostrophes, dots and hyphens only."
+
+    return value
+
+
+def _validate_emergency_contact(values, errors):
+    """Emergency contact name and phone, required for a new patient account."""
+    name = values.get("emergency_contact_name")
+    if name is not None and not 2 <= len(name) <= 100:
+        errors["emergency_contact_name"] = (
+            "emergency_contact_name must be between 2 and 100 characters."
+        )
+
+    phone = values.get("emergency_contact_phone")
+    if phone is not None:
+        normalized = re.sub(r"[\s().-]", "", phone)
+        if not re.fullmatch(r"\+?[1-9]\d{7,14}", normalized):
+            errors["emergency_contact_phone"] = (
+                "emergency_contact_phone must contain 8–15 digits and may start "
+                "with a country-code +."
+            )
+        else:
+            values["emergency_contact_phone"] = normalized
+
+
 def _validate_lookup_id(value, field, label, errors):
     """Validate an id chosen from a dropdown list (a positive whole number)."""
     if isinstance(value, bool):
@@ -407,6 +440,9 @@ def validate_registration(body):
             "date_of_birth",
             "gender",
             "address",
+            "city",
+            "emergency_contact_name",
+            "emergency_contact_phone",
         ),
         "DOCTOR": (
             "phone",
@@ -452,6 +488,10 @@ def validate_registration(body):
             "address",
             errors,
         )
+
+        if role == "PATIENT":
+            values["city"] = _validate_city(values.get("city"), errors)
+            _validate_emergency_contact(values, errors)
 
         if role == "DOCTOR":
             # Specialization and hospital are ids taken from the
@@ -628,9 +668,12 @@ def lambda_handler(event, context):
                             phone,
                             date_of_birth,
                             gender,
-                            address
+                            address,
+                            city,
+                            emergency_contact_name,
+                            emergency_contact_phone
                         )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         user_id,
@@ -640,6 +683,9 @@ def lambda_handler(event, context):
                         data["date_of_birth"],
                         data["gender"],
                         data["address"],
+                        data["city"],
+                        data["emergency_contact_name"],
+                        data["emergency_contact_phone"],
                     ),
                 )
 

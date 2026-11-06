@@ -85,6 +85,14 @@ CREATE TABLE IF NOT EXISTS patients (
 
     address VARCHAR(500) NOT NULL,
 
+    -- Milestone 4: city and emergency contact. NULL only for accounts created
+    -- before Milestone 4; new registrations always supply them.
+    city VARCHAR(100) NULL,
+
+    emergency_contact_name VARCHAR(100) NULL,
+
+    emergency_contact_phone VARCHAR(16) NULL,
+
     created_at DATETIME(6) NOT NULL
         DEFAULT CURRENT_TIMESTAMP(6),
 
@@ -149,7 +157,10 @@ CREATE TABLE IF NOT EXISTS hospitals (
 
     UNIQUE KEY uq_hospitals_name_city (hospital_name, city),
 
-    KEY idx_hospitals_active_name (is_active, hospital_name)
+    KEY idx_hospitals_active_name (is_active, hospital_name),
+
+    -- Milestone 4 doctor search: the city filter resolves hospital ids here first.
+    KEY idx_hospitals_city (city, hospital_name)
 
 ) ENGINE=InnoDB
   DEFAULT CHARSET=utf8mb4
@@ -274,6 +285,13 @@ CREATE TABLE IF NOT EXISTS doctors (
     KEY idx_doctors_hospital (hospital_id),
 
     KEY idx_doctors_name (last_name, first_name),
+
+    -- Milestone 4 doctor search (see docs/patient-domain.md for the reasoning):
+    -- first-name prefix matches (idx_doctors_name only helps the last name), and
+    -- the combined specialisation + hospital filter.
+    KEY idx_doctors_first_name (first_name),
+
+    KEY idx_doctors_spec_hospital (specialization_id, hospital_id),
 
     KEY idx_doctors_phone (phone),
 

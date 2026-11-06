@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MediSlot | Patient Portal</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@600;700;800&family=Instrument+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+
+:root{--ink:#10272b;--teal:#0f766e;--teal-d:#0b4f4a;--mint:#e3f1ee;--bg:#eef3f1;--paper:#fbfdfc;--line:#c9d9d5;--muted:#59706f;--signal:#ff5b4a;--red:#b3261e;--green:#0f766e;--head:"Bricolage Grotesque","Trebuchet MS",system-ui,sans-serif;--body:"Instrument Sans","Segoe UI",system-ui,sans-serif}
+*{box-sizing:border-box}html{scroll-padding-top:80px}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 var(--body)}
+button,input,select,textarea{font:inherit;color:inherit}button{cursor:pointer}
+:focus-visible{outline:3px solid var(--signal);outline-offset:2px}
+.hidden{display:none!important}
+/* header rail */
+.shell{display:flex;flex-direction:column;min-height:100vh}
+.sidebar{position:sticky;top:0;z-index:20;background:var(--ink);color:#d5e6e2;display:flex;align-items:center;gap:28px;padding:0 32px;min-height:62px;overflow-x:auto}
+.brand{display:flex;align-items:center;gap:10px;font:800 22px/1 var(--head);color:var(--paper);letter-spacing:-.5px;white-space:nowrap}
+.brand-mark{width:30px;height:30px;border-radius:50% 50% 50% 4px;background:var(--signal);color:var(--ink);display:grid;place-items:center;font:800 16px var(--head)}
+.sidebar>div:nth-child(2){flex:1;min-width:0}
+.side-label,.side-note{display:none}
+.nav{display:flex;gap:4px;align-items:stretch}
+.nav button{border:0;background:none;color:#9fbdb7;padding:21px 14px 18px;font-weight:600;white-space:nowrap;border-bottom:3px solid transparent}
+.nav button:hover{color:#fff}
+.nav button.active{color:#fff;border-bottom-color:var(--signal)}
+/* page header with ruler */
+.main{min-width:0;flex:1}
+.topbar{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;flex-wrap:wrap;max-width:1280px;margin:0 auto;padding:34px 32px 26px;position:relative}
+.topbar h1{margin:0;font:800 clamp(28px,4vw,42px)/1.05 var(--head);letter-spacing:-1px}
+.topbar small{display:block;margin-top:6px;color:var(--muted);font-size:15px}
+.topbar::after{content:"";position:absolute;left:32px;right:32px;bottom:0;height:14px;background:repeating-linear-gradient(90deg,var(--ink) 0 1.5px,transparent 1.5px 12px),repeating-linear-gradient(90deg,var(--ink) 0 2px,transparent 2px 60px);background-size:100% 7px,100% 14px;background-repeat:repeat-x;background-position:0 100%,0 100%;opacity:.55}
+.content{max-width:1280px;margin:0 auto;padding:28px 32px 64px}
+/* forms */
+.fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px}.full{grid-column:1/-1}
+.field label{display:block;font-size:13px;font-weight:700;margin-bottom:6px}
+.field input,.field select,.field textarea{width:100%;border:1.5px solid var(--line);border-radius:10px;padding:11px 12px;background:#fff;min-height:44px}
+.field textarea{min-height:84px;resize:vertical}
+.field input:focus,.field select:focus,.field textarea:focus{border-color:var(--teal);box-shadow:0 0 0 3px rgba(15,118,110,.18);outline:0}
+.field input[readonly]{background:var(--mint);color:var(--muted)}
+.btn{border:1.5px solid var(--ink);background:var(--ink);color:#fff;border-radius:999px;padding:10px 20px;font-weight:700;transition:background .15s,color .15s}
+.btn:hover{background:var(--teal-d);border-color:var(--teal-d)}
+.btn.secondary{background:transparent;color:var(--ink)}.btn.secondary:hover{background:var(--mint);color:var(--ink);border-color:var(--ink)}
+.btn.danger{background:transparent;color:var(--red);border-color:var(--red)}.btn.danger:hover{background:var(--red);color:#fff}
+.btn.small{padding:6px 14px;font-size:13px}.btn:disabled{opacity:.5;cursor:wait}
+.actions,.filebox{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.actions{margin-top:18px}
+/* sheets */
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:22px;align-items:start}
+.card{background:var(--paper);border:1.5px solid var(--ink);border-radius:4px 22px 4px 22px;padding:24px;box-shadow:6px 6px 0 var(--mint)}
+.card h3{margin:0 0 12px;font:700 18px var(--head);display:flex;align-items:center;gap:9px}
+.card h3::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--signal)}
+.panel{display:none}.panel.active{display:block}
+.section-head{display:flex;justify-content:space-between;align-items:flex-end;gap:14px;flex-wrap:wrap;margin-bottom:20px}
+.section-head h2{margin:0;font:700 26px var(--head);letter-spacing:-.4px}.section-head p{margin:4px 0 0;color:var(--muted);max-width:60ch}
+.muted{color:var(--muted)}.hint{background:var(--mint);border-left:4px solid var(--teal);padding:12px 16px;border-radius:0 10px 10px 0;margin-bottom:20px}
+.status{margin:0 0 18px;padding:10px 14px;border-radius:10px;font-weight:600;min-height:0}.status:empty{display:none}
+.status.ok{background:var(--mint);color:var(--teal-d)}.status.err{background:#fde8e5;color:var(--red)}
+.empty{padding:22px;border:1.5px dashed var(--line);border-radius:12px;color:var(--muted);text-align:center}
+.table-wrap{overflow-x:auto}table{width:100%;border-collapse:collapse}th{text-align:left;font-size:13px;color:var(--muted);font-weight:700;padding:8px 10px;border-bottom:1.5px solid var(--ink)}td{padding:12px 10px;border-bottom:1px solid var(--line);vertical-align:middle}
+.pill{display:inline-block;padding:2px 11px;border-radius:999px;background:var(--mint);color:var(--teal-d);font-weight:700;font-size:12px;border:1px solid var(--teal)}
+.pill.off{background:#eceff0;color:#5b6769;border-color:#a9b4b6}
+/* schedule: time blocks */
+.slot-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:14px;margin-top:16px}
+.slot{background:#fff;border:1.5px solid var(--line);border-left:6px solid var(--teal);border-radius:4px 14px 14px 4px;padding:14px 16px}
+.slot strong{font:700 16px var(--head)}
+.slot.cancelled{border-left-color:var(--red);background:#fbf3f2}.slot.cancelled strong,.slot.cancelled>div:first-of-type{text-decoration:line-through;color:var(--muted)}
+.slot .slot-actions{margin-top:10px}.btn.small[disabled]{cursor:not-allowed}
+small.note{display:block;margin-top:4px;color:var(--muted)}
+/* schedule: week view */
+.week-grid{display:grid;grid-template-columns:repeat(7,minmax(170px,1fr));gap:10px;margin-top:16px;overflow-x:auto;padding-bottom:6px}
+.day-col{background:#fff;border:1.5px solid var(--line);border-radius:12px;padding:10px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.day-col.today{border-color:var(--teal);box-shadow:0 0 0 3px rgba(15,118,110,.15)}.day-col.blackout{background:#fbf3f2}
+.day-head{display:flex;justify-content:space-between;align-items:baseline;gap:6px;border-bottom:1px solid var(--line);padding-bottom:6px;font:700 14px var(--head)}
+.day-head small{color:var(--muted);font:600 12px var(--body)}
+.day-empty{color:var(--muted);font-size:13px;padding:6px 2px}
+.wslot{border:1.5px solid var(--line);border-left:5px solid var(--teal);border-radius:4px 10px 10px 4px;padding:8px 10px;background:var(--paper);font-size:13px}
+.wslot strong{display:block;font:700 14px var(--head)}.wslot .meta{color:var(--muted)}
+.wslot.full{border-left-color:var(--signal)}.wslot.cancelled{border-left-color:var(--red);background:#fbf3f2}.wslot.cancelled strong{text-decoration:line-through;color:var(--muted)}
+.wslot details{margin-top:4px}.wslot summary{cursor:pointer;color:var(--teal-d);font-weight:600}.wslot .slot-actions{margin-top:6px}
+/* profile */
+.profile-top{display:flex;gap:22px;align-items:center;flex-wrap:wrap;margin-bottom:24px;padding-bottom:22px;border-bottom:1.5px dashed var(--line)}
+.avatar{width:104px;height:104px;border-radius:50% 50% 50% 8px;object-fit:cover;border:2px solid var(--ink);background:var(--mint) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 104 104'%3E%3Cpath d='M8 56h24l8-22 14 44 10-30 6 8h26' fill='none' stroke='%230f766e' stroke-width='3.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center/cover;color:transparent;font-size:0}
+.toast{position:fixed;left:50%;bottom:26px;transform:translate(-50%,30px);background:var(--ink);color:#fff;padding:12px 20px;border-radius:999px;opacity:0;pointer-events:none;transition:.25s;z-index:60;max-width:92vw}.toast.show{opacity:1;transform:translate(-50%,0)}
+/* sign in */
+.login-wrap{min-height:100vh;display:grid;place-items:center;padding:24px;background:var(--ink) repeating-linear-gradient(90deg,rgba(255,255,255,.05) 0 1.5px,transparent 1.5px 12px)}
+.login-card{background:var(--paper);border:2px solid var(--signal);border-radius:4px 28px 4px 28px;padding:34px;box-shadow:10px 10px 0 var(--teal)}
+.login-card h1{font:800 32px/1.1 var(--head);letter-spacing:-.8px;margin:0 0 8px}.login-card p{color:var(--muted)}
+.login-card form .field{margin-bottom:14px}.login-card .fields .field{margin:0}
+.login-error{color:var(--red);font-weight:600;margin-top:12px;white-space:pre-line}
+@media(max-width:700px){.sidebar{padding:0 14px;gap:14px}.topbar,.content{padding-left:16px;padding-right:16px}.topbar::after{left:16px;right:16px}.card{padding:18px}}
+@media(prefers-reduced-motion:reduce){*{transition:none!important}}
+/* patient portal */
+.filters{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px;align-items:end}
+.doc-list{display:grid;gap:14px;margin-top:18px}
+.doc-card{display:grid;grid-template-columns:auto 1fr auto;gap:16px;align-items:center;background:#fff;border:1.5px solid var(--ink);border-radius:4px 18px 4px 18px;padding:16px 18px}
+.doc-card h3{margin:0 0 2px;font:700 18px var(--head)}
+.doc-avatar{width:64px;height:64px;border-radius:50% 50% 50% 8px;background:var(--mint);border:2px solid var(--ink);object-fit:cover;display:grid;place-items:center;font:800 20px var(--head);color:var(--teal-d)}
+.fee{font-weight:700;color:var(--teal-d)}
+.pager{display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap;margin-top:18px}
+.field-errors{color:var(--red);font-weight:600;white-space:pre-line;margin-top:12px}.field-errors:empty{display:none}
+.danger-zone{margin-top:28px;border-top:1.5px dashed var(--red);padding-top:18px}
+.login-card a,.muted a{color:var(--teal-d);font-weight:600}
+@media(max-width:700px){.doc-card{grid-template-columns:auto 1fr}.doc-card .actions{grid-column:1/-1}}
+</style>
+</head>
+<body>
+<section class="login-wrap" id="loginScreen"><div class="login-card" style="width:min(760px,100%);max-height:94vh;overflow:auto">
+<div class="brand" style="color:var(--ink);padding:0;margin-bottom:22px"><span class="brand-mark">M</span> MediSlot</div>
+<div id="loginView"><h1>Patient sign in</h1><p>Sign in with your patient account to find doctors and see their available slots.</p>
+<form id="loginForm"><div class="field"><label for="loginEmail">Email address</label><input id="loginEmail" type="email" autocomplete="username" required maxlength="254"></div>
+<div class="field"><label for="loginPassword">Password</label><input id="loginPassword" type="password" autocomplete="current-password" required></div>
+<button class="btn" id="loginButton" type="submit">Sign in</button><div class="login-error" id="loginError" role="alert"></div></form>
+<p style="margin:18px 0 0">New to MediSlot? <button class="btn secondary" type="button" id="showRegister">Create patient account</button></p>
+<p class="muted" style="margin:14px 0 0"><a href="/">&larr; Home</a> &nbsp;·&nbsp; Are you a doctor? <a href="/doctor/dashboard">Doctor sign in</a></p></div>
+<div id="registerView" class="hidden"><h1>Create patient account</h1><p>Tell us a little about yourself. After registering, sign in with your email and password.</p>
+<form id="registerForm"><div class="fields">
+<div class="field"><label>First name</label><input name="first_name" required maxlength="50" autocomplete="given-name"></div>
+<div class="field"><label>Last name</label><input name="last_name" required maxlength="50" autocomplete="family-name"></div>
+<div class="field"><label>Email address</label><input name="email" type="email" required maxlength="254" autocomplete="email"></div>
+<div class="field"><label>Password (minimum 10 characters, letters and numbers)</label><input name="password" type="password" required minlength="10" autocomplete="new-password"></div>
+<div class="field"><label>Phone number</label><input name="phone" type="tel" required maxlength="20" autocomplete="tel" placeholder="9876543210 or +919876543210"></div>
+<div class="field"><label>Date of birth</label><input name="date_of_birth" type="date" required></div>
+<div class="field"><label>Gender</label><select name="gender" required><option value="">Select gender</option><option value="MALE">Male</option><option value="FEMALE">Female</option><option value="OTHER">Other</option><option value="PREFER_NOT_TO_SAY">Prefer not to say</option></select></div>
+<div class="field"><label>City</label><input name="city" required maxlength="100" autocomplete="address-level2"></div>
+<div class="field full"><label>Address</label><textarea name="address" required minlength="5" maxlength="500"></textarea></div>
+<div class="field"><label>Emergency contact name</label><input name="emergency_contact_name" required maxlength="100"></div>
+<div class="field"><label>Emergency contact phone</label><input name="emergency_contact_phone" type="tel" required maxlength="20" placeholder="9876543211"></div>
+</div><div class="actions"><button class="btn" id="registerButton" type="submit">Create account</button><button class="btn secondary" type="button" id="backToLogin">Back to sign in</button></div>
+<div class="login-error" id="registerError" role="alert"></div></form></div>
+</div></section>
+
+<div class="shell hidden" id="appShell">
+<aside class="sidebar"><div class="brand"><span class="brand-mark">M</span> MediSlot</div><div><nav class="nav" aria-label="Patient portal">
+<button class="active" data-panel="search">Find Doctors</button><button data-panel="slots">Slot Browser</button><button data-panel="profile">My Profile</button>
+</nav></div></aside>
+<main class="main"><header class="topbar"><div><h1 id="pageTitle">Find a doctor</h1><small id="welcome">Search by name, hospital, specialisation or city</small></div>
+<div class="filebox"><button class="btn danger" id="logoutButton">Logout</button></div></header>
+<div class="content"><div id="connectionStatus" class="status" aria-live="polite"></div>
+
+<section class="panel active" id="panel-search">
+<div class="card"><h3>Search doctors</h3>
+<form id="searchForm"><div class="filters">
+<div class="field"><label for="fName">Doctor name</label><input id="fName" name="name" maxlength="100" placeholder="e.g. Asha or Rao" autocomplete="off"></div>
+<div class="field"><label for="fHospital">Hospital</label><input id="fHospital" name="hospital" maxlength="100" list="hospitalList" placeholder="e.g. Apollo" autocomplete="off"><datalist id="hospitalList"></datalist></div>
+<div class="field"><label for="fSpec">Specialisation</label><select id="fSpec" name="specialisation"><option value="">All specialisations</option></select></div>
+<div class="field"><label for="fCity">City</label><input id="fCity" name="city" maxlength="100" list="cityList" placeholder="e.g. Hyderabad" autocomplete="off"><datalist id="cityList"></datalist></div>
+</div><div class="actions"><button class="btn" type="submit">Search</button><button class="btn secondary" type="button" id="resetSearch">Reset</button></div></form></div>
+<div id="searchSummary" class="status" style="margin-top:18px"></div>
+<div id="doctorList" class="doc-list"><div class="empty">Loading doctors…</div></div>
+<div class="pager hidden" id="pager"><button class="btn secondary small" id="prevPage" type="button">◀ Previous</button><span id="pageInfo" class="muted"></span><button class="btn secondary small" id="nextPage" type="button">Next ▶</button></div>
+</section>
+
+<section class="panel" id="panel-doctor">
+<div class="section-head"><div><h2 id="doctorTitle">Doctor profile</h2><p>Public details and consultation fees.</p></div><div class="filebox"><button class="btn secondary" id="backToResults" type="button">◀ Back to results</button></div></div>
+<div class="card" id="doctorDetail"><div class="empty">Select a doctor to see their profile.</div></div>
+</section>
+
+<section class="panel" id="panel-slots">
+<div class="section-head"><div><h2 id="slotsTitle">Slot browser</h2><p id="slotsSubtitle">Pick a doctor from the search results to see their available slots.</p></div></div>
+<div id="slotsEmpty" class="empty">No doctor selected yet. <button class="btn small" type="button" data-go="search">Find a doctor</button></div>
+<div id="slotsBody" class="hidden">
+<div class="hint">Booking opens in the next release. For now you can see exactly which slots are free and how many seats are left.</div>
+<div class="card"><div class="filters">
+<div class="field"><label for="slotType">Consultation type</label><select id="slotType"><option value="">All types</option></select></div>
+<div class="field"><label for="slotFrom">Starting from</label><input id="slotFrom" type="date"></div>
+<div class="field"><label>&nbsp;</label><div class="filebox"><button class="btn secondary" id="prevDays" type="button" aria-label="Previous 7 days">◀ Previous 7 days</button><button class="btn secondary" id="nextDays" type="button" aria-label="Next 7 days">Next 7 days ▶</button></div></div>
+</div>
+<div id="slotsSummary" class="status" style="margin-top:16px"></div>
+<div id="slotGrid" class="week-grid"></div></div>
+</div>
+</section>
+
+<section class="panel" id="panel-profile">
+<div class="section-head"><div><h2>My profile</h2><p>Keep your contact details and emergency contact up to date.</p></div></div>
+<div class="card"><div id="profileNotice" class="hint hidden">Your profile has not been completed yet. Fill in the form and save it to finish.</div>
+<form id="profileForm" novalidate><div class="fields">
+<div class="field"><label>Email address (registered account)</label><input name="email" type="email" readonly></div>
+<div class="field"><label>First name</label><input name="first_name" required maxlength="50"></div>
+<div class="field"><label>Last name</label><input name="last_name" required maxlength="50"></div>
+<div class="field"><label>Phone</label><input name="phone" type="tel" required maxlength="20"></div>
+<div class="field"><label>Date of birth</label><input name="date_of_birth" type="date" required></div>
+<div class="field"><label>Gender</label><select name="gender" required><option value="">Select gender</option><option value="FEMALE">Female</option><option value="MALE">Male</option><option value="OTHER">Other</option><option value="PREFER_NOT_TO_SAY">Prefer not to say</option></select></div>
+<div class="field"><label>City</label><input name="city" required maxlength="100"></div>
+<div class="field"><label>Emergency contact name</label><input name="emergency_contact_name" required maxlength="100"></div>
+<div class="field"><label>Emergency contact phone</label><input name="emergency_contact_phone" type="tel" required maxlength="20"></div>
+<div class="field full"><label>Address</label><textarea name="address" required maxlength="500"></textarea></div>
+</div><div id="profileErrors" class="field-errors" role="alert"></div>
+<div class="actions"><button class="btn" id="saveProfile" type="submit">Save profile</button></div></form>
+<div class="danger-zone"><h3 style="margin-top:0">Delete my account</h3><p class="muted">This removes your profile and signs you out. Accounts with upcoming appointments cannot be deleted until those are cancelled.</p><button class="btn danger" id="deleteAccount" type="button">Delete my account</button></div>
+</div></section>
+
+</div></main></div><div class="toast" id="toast"></div>
+<script>
+(()=>{'use strict';
+const $=s=>document.querySelector(s),$$=s=>Array.from(document.querySelectorAll(s));
+const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const state={csrf:'',user:null,profileExists:false,hospitals:[],specializations:[],query:{},page:1,pageSize:10,doctorId:null,doctor:null};
+const PHONE_RE=/^\+?[1-9]\d{7,14}$/;
+const PROFILE_FIELDS=['first_name','last_name','phone','date_of_birth','gender','address','city','emergency_contact_name','emergency_contact_phone'];
+function toast(msg){const t=$('#toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),3800)}
+function setStatus(msg,kind=''){const el=$('#connectionStatus');el.textContent=msg;el.className='status '+kind}
+const todayISO=()=>new Intl.DateTimeFormat('en-CA').format(new Date());
+function addDays(iso,n){const d=new Date(iso+'T00:00:00Z');d.setUTCDate(d.getUTCDate()+n);return d.toISOString().slice(0,10)}
+function fmtDay(iso,opts){return new Date(iso+'T00:00:00Z').toLocaleDateString([],{timeZone:'UTC',...opts})}
+const money=v=>'₹'+Number(v).toLocaleString('en-IN',{maximumFractionDigits:2});
+const doctorName=d=>`Dr. ${d.first_name} ${d.last_name}`;
+const initials=d=>((d.first_name||'?')[0]+(d.last_name||'')[0]).toUpperCase();
+
+async function api(path,method='GET',body){
+  const opts={method,credentials:'same-origin',headers:{Accept:'application/json','X-CSRF-Token':state.csrf}};
+  if(body!==undefined){opts.headers['Content-Type']='application/json';opts.body=JSON.stringify(body)}
+  const res=await fetch('/bff/patient/api'+path,opts);let data={};try{data=await res.json()}catch{}
+  if(!res.ok){
+    if(res.status===401)showLogin('Your session expired. Please sign in again.');
+    if(res.status===403&&/Patient access/.test(data.message||''))location.href='/';
+    const err=new Error(data.message||`Request failed (${res.status})`);err.errors=data.errors;err.status=res.status;throw err}
+  return data}
+
+/* ---------- navigation ---------- */
+function showPanel(name){
+  $$('.panel').forEach(p=>p.classList.toggle('active',p.id==='panel-'+name));
+  const nav=name==='doctor'?'search':name;
+  $$('.nav button').forEach(b=>b.classList.toggle('active',b.dataset.panel===nav));
+  $('#pageTitle').textContent={search:'Find a doctor',doctor:'Doctor profile',slots:'Slot browser',profile:'My profile'}[name]||'MediSlot';
+}
+$$('.nav button').forEach(b=>b.addEventListener('click',()=>showPanel(b.dataset.panel)));
+$$('[data-go]').forEach(b=>b.addEventListener('click',()=>showPanel(b.dataset.go)));
+
+/* ---------- lookups (hospital / specialisation / city suggestions) ---------- */
+async function loadLookups(){
+  const r=await fetch('/bff/lookups',{credentials:'same-origin'});const d=await r.json().catch(()=>({}));
+  if(!r.ok)throw new Error(d.message||'Unable to load the hospital and specialisation lists');
+  state.hospitals=d.hospitals||[];state.specializations=d.specializations||[];
+  $('#fSpec').innerHTML='<option value="">All specialisations</option>'+state.specializations.map(s=>`<option value="${esc(s.specialization_name)}">${esc(s.specialization_name)}</option>`).join('');
+  $('#hospitalList').innerHTML=state.hospitals.map(h=>`<option value="${esc(h.hospital_name)}"></option>`).join('');
+  $('#cityList').innerHTML=[...new Set(state.hospitals.map(h=>h.city))].sort().map(c=>`<option value="${esc(c)}"></option>`).join('');
+}
+
+/* ---------- doctor search ---------- */
+function renderDoctors(d){
+  const list=$('#doctorList'),p=d.pagination||{};
+  $('#searchSummary').textContent='';$('#searchSummary').className='status';
+  if(!d.doctors.length){list.innerHTML='<div class="empty">No doctors match your search. Try fewer filters.</div>';$('#pager').classList.add('hidden');return}
+  list.innerHTML=d.doctors.map(x=>`<article class="doc-card">
+    ${x.photo_url?`<img class="doc-avatar" src="${esc(x.photo_url)}" alt="">`:`<div class="doc-avatar" aria-hidden="true">${esc(initials(x))}</div>`}
+    <div><h3>${esc(doctorName(x))}</h3>
+      <div class="muted">${esc(x.specialization)} · ${esc(x.years_of_experience)} yr${Number(x.years_of_experience)===1?'':'s'} experience</div>
+      <div>${esc(x.hospital_name)}, ${esc(x.city)}</div>
+      <div class="fee">${x.starting_fee!=null?'Consultations from '+money(x.starting_fee):'<span class="muted">Fees not published yet</span>'}</div></div>
+    <div class="actions" style="margin:0"><button class="btn secondary small" data-view="${x.doctor_id}">View profile</button><button class="btn small" data-slots="${x.doctor_id}">Browse slots</button></div></article>`).join('');
+  list.querySelectorAll('[data-view]').forEach(b=>b.onclick=()=>viewDoctor(Number(b.dataset.view)));
+  list.querySelectorAll('[data-slots]').forEach(b=>b.onclick=()=>openSlots(Number(b.dataset.slots)));
+  $('#pager').classList.remove('hidden');
+  $('#pageInfo').textContent=`Page ${p.page} of ${Math.max(p.total_pages,1)} · ${p.total} doctor${p.total===1?'':'s'}`;
+  $('#prevPage').disabled=p.page<=1;$('#nextPage').disabled=p.page>=p.total_pages;
+}
+async function searchDoctors(page=1){
+  state.page=page;
+  const params=new URLSearchParams({...state.query,page:String(page),page_size:String(state.pageSize)});
+  $('#doctorList').innerHTML='<div class="empty">Searching…</div>';
+  try{renderDoctors(await api('/doctors?'+params.toString()))}
+  catch(e){$('#doctorList').innerHTML='';$('#pager').classList.add('hidden');const s=$('#searchSummary');s.textContent=e.message;s.className='status err'}
+}
+$('#searchForm').addEventListener('submit',e=>{e.preventDefault();const q={};for(const k of ['name','hospital','specialisation','city']){const v=e.target.elements[k].value.trim();if(v)q[k]=v}state.query=q;searchDoctors(1)});
+$('#resetSearch').onclick=()=>{$('#searchForm').reset();state.query={};searchDoctors(1)};
+$('#prevPage').onclick=()=>searchDoctors(state.page-1);$('#nextPage').onclick=()=>searchDoctors(state.page+1);
+
+/* ---------- public doctor profile ---------- */
+async function loadDoctor(id){
+  if(state.doctor&&state.doctor.doctor_id===id)return state.doctor;
+  const d=await api('/doctors/'+id);state.doctor=d.doctor;return state.doctor;
+}
+async function viewDoctor(id){
+  try{
+    const d=await loadDoctor(id);
+    $('#doctorTitle').textContent=doctorName(d);
+    const types=d.consultation_types||[];
+    $('#doctorDetail').innerHTML=`<div class="profile-top">${d.photo_url?`<img class="avatar" src="${esc(d.photo_url)}" alt="">`:`<div class="avatar" role="img" aria-label="No photo"></div>`}
+      <div><h3 style="margin:0 0 4px">${esc(doctorName(d))}</h3><div class="muted">${esc(d.specialization)} · ${esc(d.years_of_experience)} yr${Number(d.years_of_experience)===1?'':'s'} experience</div>
+      <div>${esc(d.hospital_name)}, ${esc(d.city)}, ${esc(d.state)}</div><div class="muted">Clinic: ${esc(d.clinic_address)}</div></div></div>
+      <h3>Consultation types and fees</h3>${types.length?`<div class="table-wrap"><table><thead><tr><th>Consultation</th><th>Duration</th><th>Seats per slot</th><th>Fee</th></tr></thead><tbody>${types.map(t=>`<tr><td><b>${esc(t.consultation_name)}</b></td><td>${esc(t.duration_minutes)} min</td><td>${esc(t.slot_capacity)}</td><td class="fee">${money(t.fee)}</td></tr>`).join('')}</tbody></table></div>`:'<div class="empty">This doctor has not published any consultation types yet.</div>'}
+      <div class="actions"><button class="btn" id="detailSlots" type="button">Browse available slots</button></div>`;
+    $('#detailSlots').onclick=()=>openSlots(id);
+    showPanel('doctor');
+  }catch(e){toast(e.message)}
+}
+$('#backToResults').onclick=()=>showPanel('search');
+
+/* ---------- slot browser ---------- */
+async function openSlots(id){
+  try{
+    const d=await loadDoctor(id);state.doctorId=id;
+    $('#slotsTitle').textContent=`Slots · ${doctorName(d)}`;
+    $('#slotsSubtitle').textContent=`${d.specialization} · ${d.hospital_name}, ${d.city}`;
+    $('#slotType').innerHTML='<option value="">All types</option>'+(d.consultation_types||[]).map(t=>`<option value="${t.consultation_type_id}">${esc(t.consultation_name)} (${esc(t.duration_minutes)} min) · ${money(t.fee)}</option>`).join('');
+    $('#slotFrom').value=todayISO();
+    $('#slotsEmpty').classList.add('hidden');$('#slotsBody').classList.remove('hidden');
+    showPanel('slots');await loadSlots();
+  }catch(e){toast(e.message)}
+}
+async function loadSlots(){
+  if(!state.doctorId)return;
+  let from=$('#slotFrom').value||todayISO();if(from<todayISO())from=todayISO();$('#slotFrom').value=from;
+  const to=addDays(from,6),type=$('#slotType').value;
+  const params=new URLSearchParams({from,to});if(type)params.set('consultationTypeId',type);
+  $('#prevDays').disabled=from<=todayISO();
+  const grid=$('#slotGrid');grid.innerHTML='<div class="empty" style="grid-column:1/-1">Loading slots…</div>';
+  try{
+    const d=await api(`/doctors/${state.doctorId}/slots?`+params.toString());
+    const byDay={};d.slots.forEach(s=>(byDay[s.slot_date]=byDay[s.slot_date]||[]).push(s));
+    const free=d.slots.reduce((n,s)=>n+s.free_seats,0),tz=(d.slots[0]||{}).timezone;
+    $('#slotsSummary').textContent=d.count?`${d.count} slot(s) · ${free} seat(s) free${tz?' · times in '+tz:''}`:'No upcoming slots in this period.';
+    $('#slotsSummary').className='status'+(d.count?' ok':'');
+    const days=Array.from({length:7},(_,i)=>addDays(from,i));
+    grid.innerHTML=days.map(day=>{const slots=byDay[day]||[];
+      return `<div class="day-col ${day===todayISO()?'today':''}"><div class="day-head"><span>${esc(fmtDay(day,{weekday:'short'}))}</span><small>${esc(fmtDay(day,{day:'numeric',month:'short'}))}</small></div>
+      ${slots.length?slots.map(slotChip).join(''):'<div class="day-empty">No slots</div>'}</div>`}).join('');
+  }catch(e){grid.innerHTML='';$('#slotsSummary').textContent=e.message;$('#slotsSummary').className='status err'}
+}
+function slotChip(s){
+  const fmt=t=>new Date(t).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',timeZone:s.timezone||undefined});
+  const full=s.free_seats<=0;
+  return `<div class="wslot ${full?'full':''}"><strong>${esc(fmt(s.start_time_utc))} – ${esc(fmt(s.end_time_utc))}</strong>
+    <div class="meta">${esc(s.consultation_name)} · ${money(s.fee)}</div>
+    <div class="meta"><span class="pill ${full?'off':''}">${full?'Full':esc(s.free_seats)+' of '+esc(s.capacity)+' free'}</span></div></div>`;
+}
+$('#slotType').onchange=loadSlots;$('#slotFrom').onchange=loadSlots;
+$('#prevDays').onclick=()=>{$('#slotFrom').value=addDays($('#slotFrom').value||todayISO(),-7);loadSlots()};
+$('#nextDays').onclick=()=>{$('#slotFrom').value=addDays($('#slotFrom').value||todayISO(),7);loadSlots()};
+
+/* ---------- profile ---------- */
+function showFieldErrors(err){$('#profileErrors').textContent=err.errors?Object.values(err.errors).join('\n'):''}
+async function loadProfile(){
+  const f=$('#profileForm');
+  try{
+    const d=await api('/profile');const p=d.profile||{};state.profileExists=true;$('#profileNotice').classList.add('hidden');
+    Object.entries(p).forEach(([k,v])=>{if(f.elements[k])f.elements[k].value=k==='date_of_birth'?String(v??'').slice(0,10):String(v??'')});
+    $('#welcome').textContent=`Welcome, ${p.first_name||'there'}`;
+  }catch(e){
+    if(e.status===404){state.profileExists=false;$('#profileNotice').classList.remove('hidden');if(state.user)f.elements.email.value=state.user.email||''}
+    else throw e;
+  }
+}
+$('#profileForm').addEventListener('submit',async e=>{
+  e.preventDefault();showFieldErrors({});
+  const f=e.target,body={};PROFILE_FIELDS.forEach(k=>{body[k]=f.elements[k].value.trim()});
+  const bad=['phone','emergency_contact_phone'].find(k=>!PHONE_RE.test(body[k].replace(/[\s().-]/g,'')));
+  if(bad){showFieldErrors({errors:{[bad]:`${bad.replace(/_/g,' ')} must contain 8-15 digits and may start with +.`}});return}
+  const btn=$('#saveProfile');btn.disabled=true;
+  try{await api('/profile',state.profileExists?'PUT':'POST',body);toast(state.profileExists?'Profile updated':'Profile saved');await loadProfile()}
+  catch(err){showFieldErrors(err);toast(err.message)}finally{btn.disabled=false}
+});
+$('#deleteAccount').onclick=async()=>{
+  if(!confirm('Delete your MediSlot account? This cannot be undone.'))return;
+  try{await api('/profile','DELETE');resetState();showLogin('Your account has been deleted.')}catch(e){toast(e.message)}
+};
+
+/* ---------- session, sign in, register ---------- */
+function resetState(){state.user=null;state.doctor=null;state.doctorId=null;state.query={};state.profileExists=false;$('#slotsBody').classList.add('hidden');$('#slotsEmpty').classList.remove('hidden')}
+function showLogin(message=''){$('#appShell').classList.add('hidden');$('#loginScreen').classList.remove('hidden');$('#loginError').textContent=message}
+async function loadAll(){
+  const tasks=[['lookups',loadLookups],['profile',loadProfile]];
+  const results=await Promise.allSettled(tasks.map(([,fn])=>fn()));
+  const failed=results.map((r,i)=>r.status==='rejected'?`${tasks[i][0]}: ${r.reason.message}`:null).filter(Boolean);
+  await searchDoctors(1);
+  if(failed.length)setStatus('Some data could not be loaded: '+failed.join(' · '),'err');else setStatus('');
+}
+function enterApp(){$('#loginScreen').classList.add('hidden');$('#appShell').classList.remove('hidden');showPanel('search')}
+async function initialise(){
+  try{
+    const r=await fetch('/bff/session',{credentials:'same-origin'});const d=await r.json();state.csrf=d.csrf_token||'';
+    if(!d.authenticated){showLogin();return}
+    if(d.user&&d.user.role!=='PATIENT'){location.href='/';return}
+    state.user=d.user;enterApp();await loadAll();
+  }catch(e){showLogin('Unable to connect to MediSlot. Please refresh the page.')}
+}
+$('#loginForm').addEventListener('submit',async e=>{
+  e.preventDefault();const button=$('#loginButton');button.disabled=true;$('#loginError').textContent='';
+  try{
+    const r=await fetch('/bff/patient/login',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-CSRF-Token':state.csrf},body:JSON.stringify({email:$('#loginEmail').value.trim(),password:$('#loginPassword').value})});
+    const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.message||'Sign in failed');
+    state.csrf=d.csrf_token;state.user=d.user;$('#loginPassword').value='';enterApp();await loadAll();
+  }catch(err){$('#loginError').textContent=err.message}finally{button.disabled=false}
+});
+$('#showRegister').addEventListener('click',()=>{$('#loginView').classList.add('hidden');$('#registerView').classList.remove('hidden');$('#registerError').textContent=''});
+$('#backToLogin').addEventListener('click',()=>{$('#registerView').classList.add('hidden');$('#loginView').classList.remove('hidden');$('#registerError').textContent=''});
+$('#registerForm').addEventListener('submit',async e=>{
+  e.preventDefault();const button=$('#registerButton');button.disabled=true;$('#registerError').textContent='';
+  const form=e.target,payload=Object.fromEntries(new FormData(form).entries());
+  Object.keys(payload).forEach(k=>{if(k!=='password')payload[k]=String(payload[k]).trim()});
+  const bad=['phone','emergency_contact_phone'].find(k=>!PHONE_RE.test(payload[k].replace(/[\s().-]/g,'')));
+  if(bad){$('#registerError').textContent=`${bad.replace(/_/g,' ')} must contain 8-15 digits and may start with +.`;button.disabled=false;return}
+  try{
+    const r=await fetch('/bff/patient/register',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-CSRF-Token':state.csrf},body:JSON.stringify(payload)});
+    let d={};try{d=await r.json()}catch{}
+    if(!r.ok){const details=d.errors?Object.entries(d.errors).map(([k,v])=>`${k}: ${v}`).join('\n'):'';throw new Error(details||d.message||`Registration failed (${r.status})`)}
+    form.reset();$('#registerView').classList.add('hidden');$('#loginView').classList.remove('hidden');
+    $('#loginError').textContent='Registration successful! Please sign in with your new account.';$('#loginEmail').value=payload.email;$('#loginPassword').value='';
+  }catch(err){$('#registerError').textContent=err.message}finally{button.disabled=false}
+});
+$('#logoutButton').addEventListener('click',async()=>{try{await fetch('/bff/logout',{method:'POST',credentials:'same-origin',headers:{'X-CSRF-Token':state.csrf}})}finally{resetState();showLogin('You have been signed out.')}});
+initialise();
+})();
+</script></body></html>

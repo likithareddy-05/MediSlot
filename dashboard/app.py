@@ -1,6 +1,15 @@
-"""MediSlot doctor dashboard and same-origin backend-for-frontend."""
+"""MediSlot web application: landing page, doctor portal, patient portal and the
+same-origin backend-for-frontend (BFF).
+
+One Flask app serves both user types. It is a pure API client: it holds no database
+credentials and every read and write goes through API Gateway. After sign-in the JWT
+lives in the server-side session, and the role claim decides which portal is allowed:
+a patient session reaching any /doctor/* page is redirected to the landing page, and
+the reverse also holds.
+"""
 import logging
 import os
+import re
 import secrets
 from pathlib import Path
 from urllib.parse import quote
@@ -81,14 +90,63 @@ def _refresh_access_token():
     return True
 
 
+def _session_role():
+    """Role of the signed-in user ('DOCTOR' / 'PATIENT') or None when nobody is signed in."""
+    if not session.get("access_token"):
+        return None
+    return (session.get("user") or {}).get("role")
+
+
+def _page(filename):
+    response = send_from_directory(DASHBOARD_DIR, filename)
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.before_request
+def _portal_route_guard():
+    """Role-based route guard for the two portals (/doctor/* and /patient/*)."""
+    path = request.path
+    if path == "/doctor" or path.startswith("/doctor/"):
+        required = "DOCTOR"
+    elif path == "/patient" or path.startswith("/patient/"):
+        required = "PATIENT"
+    else:
+        return None
+    role = _session_role()
+    if role and role != required:
+        app.logger.warning("portal_guard_redirect role=%s path=%s user_id=%s", role, path,
+                           (session.get("user") or {}).get("user_id"))
+        return redirect("/")
+    return None
+
+
 @app.get("/")
 def home():
+    """Landing page with the two choices: Login as Doctor / Login as Patient."""
+    return _page("landing.html")
+
+
+@app.get("/doctor")
+@app.get("/doctor/login")
+def doctor_entry():
     return redirect("/doctor/dashboard")
 
 
 @app.get("/doctor/dashboard")
 def doctor_dashboard():
-    return send_from_directory(DASHBOARD_DIR, "doctor_dashboard.html")
+    return _page("doctor_dashboard.html")
+
+
+@app.get("/patient")
+@app.get("/patient/login")
+def patient_entry():
+    return redirect("/patient/dashboard")
+
+
+@app.get("/patient/dashboard")
+def patient_dashboard():
+    return _page("patient_dashboard.html")
 
 
 @app.get("/bff/session")
@@ -111,24 +169,22 @@ def bff_lookups():
     return _json_response(response)
 
 
-@app.post("/bff/register")
-def bff_register():
+def _register(role):
     if not _csrf_valid():
         return jsonify({"message": "Your session expired. Refresh the page and try again."}), 403
     payload = request.get_json(silent=True) or {}
     if not isinstance(payload, dict):
         return jsonify({"message": "Invalid registration data."}), 400
-    payload["role"] = "DOCTOR"
+    payload["role"] = role
     try:
         response = _api_call("auth/register", "POST", body=payload)
     except requests.RequestException:
-        app.logger.exception("Doctor registration API request failed")
+        app.logger.exception("%s registration API request failed", role.title())
         return jsonify({"message": "Unable to reach the registration service. Please try again."}), 502
     return _json_response(response)
 
 
-@app.post("/bff/login")
-def bff_login():
+def _login(role):
     if not _csrf_valid():
         return jsonify({"message": "Your session expired. Refresh the page and try again."}), 403
     payload = request.get_json(silent=True) or {}
@@ -146,9 +202,9 @@ def bff_login():
         return _json_response(response)
     data = response.json()
     user = data.get("user") or {}
-    if user.get("role") != "DOCTOR":
-        app.logger.warning("bff_login_wrong_role user_id=%s role=%s", user.get("user_id"), user.get("role"))
-        return jsonify({"message": "This portal is only for doctor accounts."}), 403
+    if user.get("role") != role:
+        app.logger.warning("bff_login_wrong_role user_id=%s role=%s portal=%s", user.get("user_id"), user.get("role"), role)
+        return jsonify({"message": f"This portal is only for {role.lower()} accounts."}), 403
     if not data.get("access_token") or not data.get("refresh_token"):
         app.logger.error("bff_login_incomplete_session user_id=%s", user.get("user_id"))
         return jsonify({"message": "The sign-in service returned an incomplete session."}), 502
@@ -163,9 +219,31 @@ def bff_login():
     session["user"] = {"user_id": user.get("user_id"), "email": user.get("email"),
                        "role": user.get("role")}
     session["csrf_token"] = secrets.token_urlsafe(32)
-    app.logger.info("bff_login_success user_id=%s", user.get("user_id"))
+    app.logger.info("bff_login_success user_id=%s role=%s", user.get("user_id"), role)
     return jsonify({"message": "Login successful", "user": session["user"],
                     "csrf_token": session["csrf_token"]})
+
+
+@app.post("/bff/register")
+def bff_register():
+    """Doctor registration (kept at its original path)."""
+    return _register("DOCTOR")
+
+
+@app.post("/bff/patient/register")
+def bff_patient_register():
+    return _register("PATIENT")
+
+
+@app.post("/bff/login")
+def bff_login():
+    """Doctor sign-in (kept at its original path)."""
+    return _login("DOCTOR")
+
+
+@app.post("/bff/patient/login")
+def bff_patient_login():
+    return _login("PATIENT")
 
 
 @app.post("/bff/logout")
@@ -219,6 +297,8 @@ def _local_doctor_path(api_path):
 def bff_api(api_path):
     if not session.get("access_token"):
         return jsonify({"message": "Please sign in again."}), 401
+    if _session_role() != "DOCTOR":
+        return jsonify({"message": "Doctor access is required."}), 403
     if request.method not in {"GET", "HEAD"} and not _csrf_valid():
         return jsonify({"message": "Invalid session request. Refresh the page and try again."}), 403
 
@@ -242,6 +322,63 @@ def bff_api(api_path):
     if upstream.status_code == 401:
         app.logger.warning("bff_session_expired user_id=%s path=%s",
                            (session.get("user") or {}).get("user_id"), upstream_path)
+        session.clear()
+    return _json_response(upstream)
+
+
+# Patient portal routes the BFF is willing to forward, mapped to the platform API.
+_PATIENT_ROUTES = (
+    (re.compile(r"/profile"), lambda m: "patients/me"),
+    (re.compile(r"/doctors"), lambda m: "doctors"),
+    (re.compile(r"/doctors/(\d+)"), lambda m: f"doctors/{m.group(1)}"),
+    (re.compile(r"/doctors/(\d+)/slots"), lambda m: f"doctors/{m.group(1)}/slots"),
+)
+
+
+def _local_patient_path(api_path):
+    """Map same-origin patient portal paths to the documented MediSlot API routes."""
+    path = "/" + api_path.strip("/")
+    for pattern, build in _PATIENT_ROUTES:
+        match = pattern.fullmatch(path)
+        if match:
+            return build(match)
+    return None
+
+
+@app.route("/bff/patient/api/<path:api_path>", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
+def bff_patient_api(api_path):
+    if not session.get("access_token"):
+        return jsonify({"message": "Please sign in again."}), 401
+    if _session_role() != "PATIENT":
+        return jsonify({"message": "Patient access is required."}), 403
+    if request.method not in {"GET", "HEAD"} and not _csrf_valid():
+        return jsonify({"message": "Invalid session request. Refresh the page and try again."}), 403
+
+    upstream_path = _local_patient_path(api_path)
+    if not upstream_path:
+        return jsonify({"message": "Patient portal API route is not supported."}), 404
+    # Reads of /doctors* are GET only; only the profile route accepts writes.
+    if upstream_path != "patients/me" and request.method != "GET":
+        return jsonify({"message": "Method not allowed."}), 405
+    body = request.get_json(silent=True) if request.method not in {"GET", "DELETE"} else None
+
+    try:
+        upstream = _api_call(upstream_path, request.method, token=session.get("access_token"),
+                             body=body, params=request.args)
+        if upstream.status_code == 401 and _refresh_access_token():
+            upstream = _api_call(upstream_path, request.method,
+                                 token=session.get("access_token"), body=body,
+                                 params=request.args)
+    except requests.RequestException:
+        app.logger.exception("Patient API request failed")
+        return jsonify({"message": "Unable to reach the MediSlot service. Please try again."}), 502
+    if upstream.status_code == 401:
+        app.logger.warning("bff_session_expired user_id=%s path=%s",
+                           (session.get("user") or {}).get("user_id"), upstream_path)
+        session.clear()
+    elif request.method == "DELETE" and upstream_path == "patients/me" and upstream.status_code == 200:
+        # The account is gone: end this session too.
+        app.logger.info("bff_patient_account_deleted user_id=%s", (session.get("user") or {}).get("user_id"))
         session.clear()
     return _json_response(upstream)
 

@@ -356,15 +356,14 @@ def _consultation_type_in_use(cursor, doctor_id, type_id):
         WHERE doctor_id=%s AND consultation_type_id=%s AND is_active=1""", (doctor_id, type_id))
     patterns = int((cursor.fetchone() or {}).get("n") or 0)
     if patterns:
-        return (f"This consultation type still has {patterns} weekly availability pattern(s). "
-                "Remove its availability on the Availability tab first, then deactivate the consultation type.")
+        return "You cannot deactivate this consultation type until its slots are deleted."
     cursor.execute("""SELECT COUNT(*) AS n FROM appointments
         WHERE doctor_id=%s AND consultation_type_id=%s AND status='BOOKED'
         AND scheduled_end_utc > UTC_TIMESTAMP(6)""", (doctor_id, type_id))
     booked = int((cursor.fetchone() or {}).get("n") or 0)
     if booked:
-        return (f"This consultation type has {booked} upcoming booked appointment(s). "
-                "Cancel those slots from My Schedule first, then deactivate the consultation type.")
+        return ("You cannot deactivate this consultation type while it has upcoming booked appointments. "
+                "Cancel those slots from My Schedule first.")
     return None
 
 
@@ -377,15 +376,21 @@ SCHEDULE_MESSAGES = {
 }
 
 
-def _schedule_for_day(cursor, conn, doctor_id, day):
+def _active_patterns(cursor, doctor_id):
+    cursor.execute("""SELECT weekday,timezone_name,effective_from,effective_to FROM availability_patterns
+        WHERE doctor_id=%s AND is_active=1""", (doctor_id,))
+    return cursor.fetchall()
+
+
+def _schedule_for_day(cursor, conn, doctor_id, day, patterns=None):
     """Schedule payload with an explicit status so the UI can explain an empty day.
 
     status: OK | BLACKOUT | NO_AVAILABILITY | NOT_MATERIALISED | NO_SLOTS
     Slot dates are the doctor's local calendar dates (the zone stored on the pattern).
+    `patterns` may be passed in so a multi-day view reads them only once.
     """
-    cursor.execute("""SELECT weekday,timezone_name,effective_from,effective_to FROM availability_patterns
-        WHERE doctor_id=%s AND is_active=1""", (doctor_id,))
-    patterns = cursor.fetchall()
+    if patterns is None:
+        patterns = _active_patterns(cursor, doctor_id)
     tz_name = patterns[0]["timezone_name"] if patterns else "Asia/Kolkata"
     cursor.execute("SELECT blackout_id,reason FROM doctor_blackouts WHERE doctor_id=%s AND blackout_date=%s LIMIT 1",
                    (doctor_id, day))
@@ -411,6 +416,26 @@ def _schedule_for_day(cursor, conn, doctor_id, day):
     return {"doctor_id": doctor_id, "date": day.isoformat(), "timezone": tz_name, "status": status,
             "is_blackout": bool(blackout), "blackout_reason": (blackout or {}).get("reason"),
             "message": SCHEDULE_MESSAGES[status], "slots": slots, "appointments": appointments}
+
+
+MAX_SCHEDULE_RANGE_DAYS = 14
+
+
+def _schedule_for_range(cursor, conn, doctor_id, first_day, last_day):
+    """Schedule for consecutive days (the week view): one entry per day, same shape as a single day."""
+    if last_day < first_day:
+        raise ValueError("to must not be earlier than from")
+    count = (last_day - first_day).days + 1
+    if count > MAX_SCHEDULE_RANGE_DAYS:
+        raise ValueError(f"The schedule range can cover at most {MAX_SCHEDULE_RANGE_DAYS} days")
+    patterns = _active_patterns(cursor, doctor_id)
+    days = [_schedule_for_day(cursor, conn, doctor_id, first_day + timedelta(days=i), patterns)
+            for i in range(count)]
+    return {"doctor_id": doctor_id, "from": first_day.isoformat(), "to": last_day.isoformat(),
+            "timezone": days[0]["timezone"], "days": days,
+            "summary": {"slots": sum(len(d["slots"]) for d in days),
+                        "appointments": sum(len(d["appointments"]) for d in days),
+                        "blackout_days": sum(1 for d in days if d["is_blackout"])}}
 
 
 def _handle_api(event, context):
@@ -793,6 +818,12 @@ def _handle_api(event, context):
                 return response(200,{"message":"Blackout date removed","slots":_refresh_slots(doctor_id)})
 
             if path == "/schedule" and method == "GET":
+                if query.get("from"):
+                    # Week (or other short range) view: ?from=YYYY-MM-DD[&to=YYYY-MM-DD], default 7 days.
+                    first_day = date.fromisoformat(str(query["from"]))
+                    last_day = (date.fromisoformat(str(query["to"])) if query.get("to")
+                                else first_day + timedelta(days=6))
+                    return response(200, _schedule_for_range(cur, conn, doctor_id, first_day, last_day))
                 return response(200, _schedule_for_day(cur, conn, doctor_id, date.fromisoformat(str(_required(query,"date")))))
 
             if path == "/appointments" and method == "GET":

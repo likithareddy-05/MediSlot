@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MediSlot | Book and manage appointments</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@600;700;800&family=Instrument+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{--ink:#10272b;--teal:#0f766e;--teal-d:#0b4f4a;--mint:#e3f1ee;--bg:#eef3f1;--paper:#fbfdfc;--line:#c9d9d5;--muted:#59706f;--signal:#ff5b4a;--head:"Bricolage Grotesque","Trebuchet MS",system-ui,sans-serif;--body:"Instrument Sans","Segoe UI",system-ui,sans-serif}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;background:var(--ink) repeating-linear-gradient(90deg,rgba(255,255,255,.05) 0 1.5px,transparent 1.5px 12px);color:var(--ink);font:15px/1.55 var(--body)}
+:focus-visible{outline:3px solid var(--signal);outline-offset:3px}
+.wrap{width:min(860px,100%)}
+.brand{display:flex;align-items:center;gap:12px;font:800 30px/1 var(--head);color:var(--paper);letter-spacing:-.6px;margin-bottom:10px}
+.brand-mark{width:42px;height:42px;border-radius:50% 50% 50% 6px;background:var(--signal);color:var(--ink);display:grid;place-items:center;font:800 22px var(--head)}
+.tag{color:#b9d3cd;margin:0 0 28px;font-size:17px;max-width:52ch}
+.choices{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:22px}
+.card{display:block;text-decoration:none;color:inherit;background:var(--paper);border:2px solid var(--signal);border-radius:4px 28px 4px 28px;padding:30px;box-shadow:10px 10px 0 var(--teal);transition:transform .15s,box-shadow .15s}
+.card:hover{transform:translate(-3px,-3px);box-shadow:13px 13px 0 var(--teal)}
+.card h2{margin:0 0 8px;font:800 26px/1.1 var(--head);letter-spacing:-.5px}
+.card p{margin:0 0 18px;color:var(--muted)}
+.btn{display:inline-block;border:1.5px solid var(--ink);background:var(--ink);color:#fff;border-radius:999px;padding:10px 22px;font-weight:700}
+.card:hover .btn{background:var(--teal-d);border-color:var(--teal-d)}
+.signed{display:none;margin:0 0 22px;padding:12px 16px;border-radius:12px;background:var(--mint);color:var(--teal-d);font-weight:600}
+.signed a{color:var(--teal-d)}
+@media(prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+<main class="wrap">
+  <div class="brand"><span class="brand-mark">M</span> MediSlot</div>
+  <p class="tag">Appointments that respect everyone's time. Choose how you want to sign in.</p>
+  <div class="signed" id="signed" role="status"></div>
+  <div class="choices">
+    <a class="card" href="/doctor/dashboard" id="doctorChoice">
+      <h2>Login as Doctor</h2>
+      <p>Manage your profile, consultation types, weekly availability, blackout dates and schedule.</p>
+      <span class="btn">Doctor sign in</span>
+    </a>
+    <a class="card" href="/patient/dashboard" id="patientChoice">
+      <h2>Login as Patient</h2>
+      <p>Find a doctor, check available slots and fees, and keep your profile up to date.</p>
+      <span class="btn">Patient sign in</span>
+    </a>
+  </div>
+</main>
+<script>
+(()=>{'use strict';
+// If someone is already signed in, offer a shortcut to their own portal.
+fetch('/bff/session',{credentials:'same-origin'}).then(r=>r.json()).then(d=>{
+  if(!d.authenticated||!d.user)return;
+  const role=d.user.role,portal=role==='DOCTOR'?'/doctor/dashboard':'/patient/dashboard';
+  const box=document.getElementById('signed');
+  box.style.display='block';
+  box.textContent='';
+  box.append(`You are signed in as a ${role.toLowerCase()}. `);
+  const a=document.createElement('a');a.href=portal;a.textContent='Go to your portal';box.append(a);
+}).catch(()=>{});
+})();
+</script>
+</body>
+</html>

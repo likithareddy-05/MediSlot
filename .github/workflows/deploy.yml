@@ -1,4 +1,3 @@
-
 name: MediSlot Infrastructure Deployment
 
 on:
@@ -127,6 +126,14 @@ jobs:
             infrastructure/schema-init.yaml \
             infrastructure/dashboard.yaml; do
 
+            # Inline template bodies are limited to 51,200 bytes. Larger templates are
+            # validated from S3 once the artifact bucket exists (see the step after
+            # "Resolve deployment artifact bucket").
+            if [[ "$(wc -c < "$template")" -gt 51200 ]]; then
+              echo "Skipping inline validation of $template (over 51,200 bytes); validated from S3 later"
+              continue
+            fi
+
             echo "Validating $template"
 
             aws cloudformation validate-template \
@@ -175,6 +182,25 @@ jobs:
           }
 
           echo "bucket=$bucket" >> "$GITHUB_OUTPUT"
+
+      - name: Validate large CloudFormation templates from S3
+        env:
+          ARTIFACT_BUCKET: ${{ steps.assets.outputs.bucket }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for template in infrastructure/*.yaml; do
+            [[ "$(wc -c < "$template")" -gt 51200 ]] || continue
+
+            key="artifacts/${GITHUB_SHA}/templates/$(basename "$template")"
+            echo "Validating $template from s3://${ARTIFACT_BUCKET}/${key}"
+
+            aws s3 cp "$template" "s3://${ARTIFACT_BUCKET}/${key}" --region "$AWS_REGION"
+            aws cloudformation validate-template \
+              --template-url "https://${ARTIFACT_BUCKET}.s3.${AWS_REGION}.amazonaws.com/${key}" \
+              --region "$AWS_REGION" >/dev/null
+          done
 
       - name: Package and upload Lambda artifacts
         env:
@@ -245,6 +271,8 @@ jobs:
           aws cloudformation deploy \
             --stack-name "medislot-${ENVIRONMENT_NAME}-authentication" \
             --template-file infrastructure/authentication.yaml \
+            --s3-bucket "$ARTIFACT_BUCKET" \
+            --s3-prefix "artifacts/${GITHUB_SHA}/templates" \
             --parameter-overrides \
               "EnvironmentName=${ENVIRONMENT_NAME}" \
               "LambdaArtifactBucket=${ARTIFACT_BUCKET}" \

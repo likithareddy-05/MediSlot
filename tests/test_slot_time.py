@@ -5,7 +5,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from unittest.mock import Mock
 
-sys.path.insert(0, "src/lambdas")
+sys.path.insert(0, "src/lambdas/shared")
 
 from slot_time import valid_local_time, put_if_absent
 

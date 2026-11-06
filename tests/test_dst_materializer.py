@@ -3,7 +3,7 @@ import unittest
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from lambdas.shared.slot_time import build_slots, valid_local_time
+from src.lambdas.shared.slot_time import build_slots, valid_local_time
 
 
 class DstMaterializerTests(unittest.TestCase):

@@ -1,7 +1,7 @@
 """Idempotent DynamoDB put behavior for deterministic slot IDs."""
 import unittest
 
-from lambdas.shared.slot_time import put_if_absent
+from src.lambdas.shared.slot_time import put_if_absent
 
 
 class FakeTable:

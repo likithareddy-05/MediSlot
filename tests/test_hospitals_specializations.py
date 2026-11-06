@@ -7,7 +7,8 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "src" / "lambdas"))
+for _sub in ("shared", "auth", "doctor", "patient"):
+    sys.path.insert(0, str(ROOT / "src" / "lambdas" / _sub))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 for key, value in {
     "AWS_DEFAULT_REGION": "ap-south-1", "AWS_ACCESS_KEY_ID": "test", "AWS_SECRET_ACCESS_KEY": "test",
@@ -97,6 +98,8 @@ class RegistrationIdTests(unittest.TestCase):
     def test_patients_need_no_ids(self):
         body = {k: v for k, v in self.base.items() if k not in ("specialization_id", "hospital_id", "license_number", "years_of_experience", "clinic_address")}
         body["role"] = "PATIENT"
+        # Patients supply a city and an emergency contact instead of doctor details (Milestone 4).
+        body.update(city="Hyderabad", emergency_contact_name="Ravi Rao", emergency_contact_phone="9876543211")
         self.assertEqual(register.validate_registration(body)["role"], "PATIENT")
 
 

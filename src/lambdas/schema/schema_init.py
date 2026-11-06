@@ -14,6 +14,53 @@ ssm = boto3.client("ssm")
 secrets = boto3.client("secretsmanager")
 
 
+# Additive, idempotent changes for databases created before a milestone.
+# CREATE TABLE IF NOT EXISTS never alters an existing table, so columns and
+# indexes added later are applied here only when they are missing. Fresh
+# databases already get them from schema.sql, so every step is a no-op there.
+ADDITIVE_COLUMNS = [
+    # (table, column, DDL fragment)
+    ("patients", "city", "ADD COLUMN city VARCHAR(100) NULL AFTER address"),
+    ("patients", "emergency_contact_name", "ADD COLUMN emergency_contact_name VARCHAR(100) NULL AFTER city"),
+    ("patients", "emergency_contact_phone", "ADD COLUMN emergency_contact_phone VARCHAR(16) NULL AFTER emergency_contact_name"),
+]
+ADDITIVE_INDEXES = [
+    # (table, index, DDL fragment)
+    ("hospitals", "idx_hospitals_city", "ADD KEY idx_hospitals_city (city, hospital_name)"),
+    ("doctors", "idx_doctors_first_name", "ADD KEY idx_doctors_first_name (first_name)"),
+    ("doctors", "idx_doctors_spec_hospital", "ADD KEY idx_doctors_spec_hospital (specialization_id, hospital_id)"),
+]
+
+
+def apply_additive_migrations(connection, database):
+    """Add the Milestone 4 columns and indexes to an older database. Returns what was applied."""
+    applied = []
+    with connection.cursor() as cursor:
+        for table, column, ddl in ADDITIVE_COLUMNS:
+            cursor.execute(
+                """
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = %s AND table_name = %s AND column_name = %s
+                """,
+                (database, table, column),
+            )
+            if not cursor.fetchone():
+                cursor.execute(f"ALTER TABLE {table} {ddl}")
+                applied.append(f"{table}.{column}")
+        for table, index, ddl in ADDITIVE_INDEXES:
+            cursor.execute(
+                """
+                SELECT 1 FROM information_schema.statistics
+                WHERE table_schema = %s AND table_name = %s AND index_name = %s
+                """,
+                (database, table, index),
+            )
+            if not cursor.fetchone():
+                cursor.execute(f"ALTER TABLE {table} {ddl}")
+                applied.append(f"{table}.{index}")
+    return applied
+
+
 def lambda_handler(event, context):
     if event.get("confirm") != "INITIALIZE_MEDISLOT_SCHEMA":
         return {
@@ -131,6 +178,10 @@ def lambda_handler(event, context):
             for index, statement in enumerate(statements, start=1):
                 logger.info("Executing schema statement %s", index)
                 cursor.execute(statement)
+
+        migrated = apply_additive_migrations(connection, database)
+        if migrated:
+            logger.info("Applied additive migrations: %s", migrated)
 
         with connection.cursor() as cursor:
             cursor.execute(

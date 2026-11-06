@@ -18,7 +18,7 @@ from zoneinfo import ZoneInfo
 import boto3
 import pymysql
 
-from lambdas.shared.slot_time import build_slots, put_if_absent
+from slot_time import build_slots, put_if_absent
 
 
 # ------------------------------------------------------------

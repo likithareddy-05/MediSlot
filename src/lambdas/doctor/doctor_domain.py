@@ -18,7 +18,7 @@ import boto3
 import pymysql
 from botocore.config import Config
 from boto3.dynamodb.conditions import Key
-from lambdas.shared.slot_time import valid_local_time, put_if_absent
+from slot_time import valid_local_time, put_if_absent
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)

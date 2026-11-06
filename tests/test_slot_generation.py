@@ -3,7 +3,7 @@ import re
 import unittest
 from datetime import date
 
-from lambdas.shared.slot_time import build_slots
+from src.lambdas.shared.slot_time import build_slots
 
 PHONE = re.compile(r"[6-9][0-9]{9}")
 

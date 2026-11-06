@@ -20,6 +20,7 @@ def install_if_missing():
     class Key:
         def __init__(self, *args, **kwargs): pass
         def eq(self, *args): return self
+        def between(self, *args): return self
         def __and__(self, other): return self
 
     class ClientError(Exception):

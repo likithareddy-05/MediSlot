@@ -25,7 +25,7 @@ import pymysql
 from boto3.dynamodb.conditions import Key
 from botocore.config import Config
 
-from lambdas.shared.common import db_connect, json_body, log_event, logger, response
+from common import db_connect, json_body, log_event, logger, response
 
 ddb = boto3.resource("dynamodb")
 s3 = boto3.client("s3", config=Config(signature_version="s3v4", s3={"addressing_style": "virtual"}))

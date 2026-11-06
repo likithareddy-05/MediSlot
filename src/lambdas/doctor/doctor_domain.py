@@ -373,6 +373,7 @@ SCHEDULE_MESSAGES = {
     "NO_AVAILABILITY": "No weekly availability is configured. Add your weekly availability to generate slots.",
     "NOT_MATERIALISED": "Slots for this date have not been generated yet. They are created automatically when availability is saved and by the daily refresh.",
     "NO_SLOTS": "No slots available for the selected date.",
+    "PAST": "Past date. Slots are only created and shown from today onwards.",
 }
 
 
@@ -392,6 +393,12 @@ def _schedule_for_day(cursor, conn, doctor_id, day, patterns=None):
     if patterns is None:
         patterns = _active_patterns(cursor, doctor_id)
     tz_name = patterns[0]["timezone_name"] if patterns else "Asia/Kolkata"
+    local_today = datetime.now(ZoneInfo(tz_name)).date()
+    if day < local_today:
+        # Slots exist only from today (doctor's local date) onwards: never list earlier days.
+        return {"doctor_id": doctor_id, "date": day.isoformat(), "timezone": tz_name, "status": "PAST",
+                "is_blackout": False, "blackout_reason": None, "message": SCHEDULE_MESSAGES["PAST"],
+                "slots": [], "appointments": []}
     cursor.execute("SELECT blackout_id,reason FROM doctor_blackouts WHERE doctor_id=%s AND blackout_date=%s LIMIT 1",
                    (doctor_id, day))
     blackout = cursor.fetchone()
@@ -409,7 +416,6 @@ def _schedule_for_day(cursor, conn, doctor_id, day, patterns=None):
     else:
         applicable = any(int(p["weekday"]) == day.weekday() and day >= p["effective_from"]
                          and (p["effective_to"] is None or day <= p["effective_to"]) for p in patterns)
-        local_today = datetime.now(ZoneInfo(tz_name)).date()
         status = "NOT_MATERIALISED" if applicable and day >= local_today else "NO_SLOTS"
     appointments = _appointments_for_slots(cursor, doctor_id, [s["slot_id"] for s in slots])
     conn.commit()
@@ -953,9 +959,11 @@ def materialize_doctor(doctor_id, start_day=None, days=30):
                 JOIN consultation_types c ON c.consultation_type_id=d.consultation_type_id
                 WHERE a.doctor_id=%s AND a.is_active=1 AND d.is_active=1""",(doctor_id,))
             patterns = cur.fetchall()
-            if start_day is None:
-                start_day = (datetime.now(ZoneInfo(patterns[0]["timezone_name"])).date()
-                             if patterns else date.today())
+            local_today = (datetime.now(ZoneInfo(patterns[0]["timezone_name"])).date()
+                           if patterns else date.today())
+            # Never create slots for dates before today (doctor's local date).
+            if start_day is None or start_day < local_today:
+                start_day = local_today
             cur.execute("SELECT blackout_date FROM doctor_blackouts WHERE doctor_id=%s AND blackout_date >= %s AND blackout_date < %s",(doctor_id,start_day,start_day+timedelta(days=days)))
             blackouts = {r["blackout_date"] for r in cur.fetchall()}
             conn.commit()

@@ -240,12 +240,13 @@ def handler(event, context):
             # Use doctor's local date when no start date
             # is explicitly provided.
 
+            # Slots are only created from today (the doctor's local date) onwards,
+            # even when an earlier start_date is requested.
+            local_today = datetime.now(timezone.utc).astimezone(zone).date()
             start_day = (
-                requested_start
+                max(requested_start, local_today)
                 if requested_start
-                else datetime.now(timezone.utc)
-                    .astimezone(zone)
-                    .date()
+                else local_today
             )
 
             window_starts.add(start_day.isoformat())

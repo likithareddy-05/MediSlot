@@ -2,7 +2,8 @@
 import os
 import sys
 import unittest
-from datetime import date
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from unittest import mock
 
@@ -52,6 +53,44 @@ class WeekScheduleTests(unittest.TestCase):
         source = (ROOT / "src" / "lambdas" / "doctor" / "doctor_domain.py").read_text()
         self.assertIn("You cannot deactivate this consultation type until its slots are deleted.", source)
         self.assertNotIn("In use by", source)
+
+
+class FakeCursor:
+    def __init__(self): self.sql = []
+    def cursor(self): return self
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+    def execute(self, sql, args=None): self.sql.append(sql)
+    def fetchall(self): return []
+    def fetchone(self): return None
+    def commit(self): pass
+    def close(self): pass
+
+
+class PastDatesTests(unittest.TestCase):
+    today = datetime.now(ZoneInfo("Asia/Kolkata")).date()
+
+    def test_past_day_is_hidden_without_touching_storage(self):
+        cur = FakeCursor()
+        with mock.patch.object(dd, "_query_day") as query:
+            day = dd._schedule_for_day(cur, cur, 7, self.today - timedelta(days=1), patterns=[])
+        self.assertEqual((day["status"], day["slots"], day["appointments"]), ("PAST", [], []))
+        query.assert_not_called()
+        self.assertEqual(cur.sql, [])
+
+    def test_today_is_still_shown(self):
+        cur = FakeCursor()
+        with mock.patch.object(dd, "_query_day", return_value=[]), \
+             mock.patch.object(dd, "_appointments_for_slots", return_value=[]):
+            day = dd._schedule_for_day(cur, cur, 7, self.today, patterns=[])
+        self.assertNotEqual(day["status"], "PAST")
+
+    def test_materialize_never_starts_before_today(self):
+        cur = FakeCursor()
+        with mock.patch.object(dd, "db_connect", return_value=cur), mock.patch.object(dd, "ddb"), \
+             mock.patch.object(dd, "_query_day", return_value=[]):
+            result = dd.materialize_doctor(7, self.today - timedelta(days=5), 3)
+        self.assertEqual(result["start_date"], self.today.isoformat())
 
 
 if __name__ == "__main__":

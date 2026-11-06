@@ -70,7 +70,7 @@ small.note{display:block;margin-top:4px;color:var(--muted)}
 .day-col.today{border-color:var(--teal);box-shadow:0 0 0 3px rgba(15,118,110,.15)}.day-col.blackout{background:#fbf3f2}
 .day-head{display:flex;justify-content:space-between;align-items:baseline;gap:6px;border-bottom:1px solid var(--line);padding-bottom:6px;font:700 14px var(--head)}
 .day-head small{color:var(--muted);font:600 12px var(--body)}
-.day-empty{color:var(--muted);font-size:13px;padding:6px 2px}
+.day-empty{color:var(--muted);font-size:13px;padding:6px 2px}.day-col.past{opacity:.55;background:#f4f6f6}
 .wslot{border:1.5px solid var(--line);border-left:5px solid var(--teal);border-radius:4px 10px 10px 4px;padding:8px 10px;background:var(--paper);font-size:13px}
 .wslot strong{display:block;font:700 14px var(--head)}.wslot .meta{color:var(--muted)}
 .wslot.full{border-left-color:var(--signal)}.wslot.cancelled{border-left-color:var(--red);background:#fbf3f2}.wslot.cancelled strong{text-decoration:line-through;color:var(--muted)}
@@ -228,7 +228,7 @@ async function removeBlackout(id){if(!confirm('Remove this blackout date?'))retu
 function addDays(iso,n){const d=new Date(iso+'T00:00:00Z');d.setUTCDate(d.getUTCDate()+n);return d.toISOString().slice(0,10)}
 function mondayOf(iso){const d=new Date(iso+'T00:00:00Z');d.setUTCDate(d.getUTCDate()-((d.getUTCDay()+6)%7));return d.toISOString().slice(0,10)}
 function fmtDay(iso,opts){return new Date(iso+'T00:00:00Z').toLocaleDateString([],{timeZone:'UTC',...opts})}
-const DAY_NOTE={BLACKOUT:'Blackout day',NO_AVAILABILITY:'No weekly availability set',NOT_MATERIALISED:'Slots not generated yet',NO_SLOTS:'No slots'};
+const DAY_NOTE={BLACKOUT:'Blackout day',NO_AVAILABILITY:'No weekly availability set',NOT_MATERIALISED:'Slots not generated yet',NO_SLOTS:'No slots',PAST:'Past date'};
 function slotCard(slot,appointments,tz){
  const start=new Date(slot.start_time_utc||slot.start_at_utc),end=new Date(slot.end_time_utc||slot.end_at_utc);
  const zone=slot.timezone||slot.timezone_name||tz||'Asia/Kolkata';
@@ -244,6 +244,7 @@ function slotCard(slot,appointments,tz){
 }
 async function loadSchedule(){
  if(!state.weekStart)state.weekStart=mondayOf($('#scheduleDate').value||todayInTimezone(state.homeTimezone));
+ if(state.weekStart<currentWeekStart())state.weekStart=currentWeekStart();
  const start=state.weekStart,end=addDays(start,6);
  try{
   const d=await api('/schedule?from='+encodeURIComponent(start)+'&to='+encodeURIComponent(end));
@@ -258,8 +259,9 @@ async function loadSchedule(){
   host.innerHTML=days.map(day=>{
    const slots=(day.slots||[]).slice().sort((a,b)=>String(a.start_time_utc||a.start_at_utc).localeCompare(String(b.start_time_utc||b.start_at_utc)));
    const note=!slots.length?`<div class="day-empty">${esc(DAY_NOTE[day.status]||DAY_NOTE.NO_SLOTS)}${day.status==='BLACKOUT'&&day.blackout_reason?' · '+esc(day.blackout_reason):''}</div>`:(day.status==='BLACKOUT'?`<div class="day-empty">Blackout day${day.blackout_reason?' · '+esc(day.blackout_reason):''} (existing bookings shown)</div>`:'');
-   return `<div class="day-col ${day.date===today?'today':''} ${day.status==='BLACKOUT'?'blackout':''}"><div class="day-head"><span>${esc(fmtDay(day.date,{weekday:'short'}))}</span><small>${esc(fmtDay(day.date,{day:'numeric',month:'short'}))}</small></div>${note}${slots.map(sl=>slotCard(sl,day.appointments||[],tz)).join('')}</div>`;
+   return `<div class="day-col ${day.date===today?'today':''} ${day.status==='BLACKOUT'?'blackout':''} ${day.status==='PAST'?'past':''}"><div class="day-head"><span>${esc(fmtDay(day.date,{weekday:'short'}))}</span><small>${esc(fmtDay(day.date,{day:'numeric',month:'short'}))}</small></div>${note}${slots.map(sl=>slotCard(sl,day.appointments||[],tz)).join('')}</div>`;
   }).join('');
+  syncWeekNav();
   host.querySelectorAll('[data-cancel-slot]').forEach(b=>b.onclick=()=>cancelSlot(b.dataset.cancelSlot,Number(b.dataset.booked)));
  }catch(e){toast(e.message)}
 }
@@ -272,8 +274,10 @@ async function cancelSlot(slotId,bookedCount){
   toast(d.affected_appointments?`Slot cancelled; ${d.affected_appointments} appointment(s) cancelled`:'Slot cancelled');
  }catch(e){toast(e.message)}
 }
-$('#loadSchedule').onclick=()=>{const v=$('#scheduleDate').value;if(!v){toast('Choose a date');return}state.weekStart=mondayOf(v);loadSchedule()};
-function shiftWeek(n){state.weekStart=addDays(state.weekStart||mondayOf(todayInTimezone(state.homeTimezone)),n*7);$('#scheduleDate').value=state.weekStart;loadSchedule()}
+$('#loadSchedule').onclick=()=>{const v=$('#scheduleDate').value;if(!v){toast('Choose a date');return}if(v<todayInTimezone(state.homeTimezone)){toast('Slots are only available from today onwards');return}state.weekStart=mondayOf(v);loadSchedule()};
+function currentWeekStart(){return mondayOf(todayInTimezone(state.homeTimezone))}
+function shiftWeek(n){const next=addDays(state.weekStart||currentWeekStart(),n*7);if(next<currentWeekStart())return;state.weekStart=next;$('#scheduleDate').value=next;loadSchedule()}
+function syncWeekNav(){const atStart=(state.weekStart||currentWeekStart())<=currentWeekStart();$('#prevWeek').disabled=atStart;$('#scheduleDate').min=todayInTimezone(state.homeTimezone)}
 $('#prevWeek').onclick=()=>shiftWeek(-1);$('#nextWeek').onclick=()=>shiftWeek(1);
 $('#thisWeek').onclick=()=>{const t=todayInTimezone(state.homeTimezone);state.weekStart=mondayOf(t);$('#scheduleDate').value=t;loadSchedule()};
 async function loadAll(){const tasks=[['profile',loadProfile],['consultations',loadConsultations],['availability',loadAvailability],['blackouts',loadBlackouts]];const results=await Promise.allSettled(tasks.map(([,fn])=>fn()));const failed=results.map((r,i)=>r.status==='rejected'?`${tasks[i][0]}: ${r.reason.message}`:null).filter(Boolean);if(!failed.length){try{await loadSchedule()}catch(e){failed.push(`schedule: ${e.message}`)}}state.lastErrors=failed;if(failed.length){setStatus('Some dashboard data could not be loaded: '+failed.join(' · '),'err');throw new Error(failed.join(' | '))}setStatus('Your doctor workspace is up to date.','ok')}

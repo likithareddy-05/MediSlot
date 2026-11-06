@@ -87,7 +87,8 @@ class PortalTests(unittest.TestCase):
     def test_bff_apis_are_role_scoped(self):
         self.sign_in("PATIENT")
         self.assertEqual(self.client.get("/bff/api/profile").status_code, 403)
-        self.client.post("/bff/logout", headers={"X-CSRF-Token": self.csrf()})
+        with mock.patch.object(web, "_api_call", return_value=FakeResponse(200, {})):
+            self.client.post("/bff/logout", headers={"X-CSRF-Token": self.csrf()})
         self.sign_in("DOCTOR")
         self.assertEqual(self.client.get("/bff/patient/api/profile").status_code, 403)
 

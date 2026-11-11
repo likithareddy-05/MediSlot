@@ -258,7 +258,9 @@ def _lookup_id(cursor, table, id_column, value, label, current=None):
         if isinstance(value, bool):
             raise ValueError
         number = int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError) as exc:
+        _log_event("lookup_id_invalid", logging.WARNING, lookup=table,
+                   error_type=type(exc).__name__)
         raise ValueError(f"Select a valid {label}")
     if current is not None and number == int(current):
         return number
@@ -557,7 +559,7 @@ def _handle_api(event, context):
                 if content_type not in {"image/jpeg", "image/png", "image/webp"}:
                     raise ValueError("content_type must be image/jpeg, image/png, or image/webp")
                 ext = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}[content_type]
-                key = f"doctor-photos/{doctor_id}/{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}-{os.urandom(6).hex()}.{ext}"
+                key = f"doctor-photos/{doctor_id}/{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%f')}.{ext}"
                 url = s3.generate_presigned_url("put_object", Params={"Bucket": ASSETS_BUCKET, "Key": key,
                     "ContentType": content_type, "ServerSideEncryption": "AES256"}, ExpiresIn=300)
                 cur.execute("UPDATE doctors SET photo_key=%s WHERE user_id=%s", (key, doctor_id))
@@ -791,6 +793,12 @@ def _handle_api(event, context):
             if path == "/blackouts" and method == "POST":
                 blackout_date = date.fromisoformat(str(_required(body,"blackout_date")))
                 reason = body.get("reason")
+                # Check first: a rejected INSERT would still use up an AUTO_INCREMENT id.
+                cur.execute("SELECT 1 FROM doctor_blackouts WHERE doctor_id=%s AND blackout_date=%s",(doctor_id,blackout_date))
+                if cur.fetchone():
+                    _log_event("blackout_duplicate", logging.INFO, doctor_id=doctor_id,
+                               blackout_date=blackout_date.isoformat())
+                    return response(409,{"message":"The requested record conflicts with existing data"})
                 cur.execute("INSERT INTO doctor_blackouts (doctor_id,blackout_date,reason) VALUES (%s,%s,%s)",(doctor_id,blackout_date,reason))
                 blackout_id = cur.lastrowid
                 conn.commit()
@@ -887,11 +895,15 @@ def _handle_api(event, context):
         return response(400,{"message":str(exc)})
     except pymysql.err.IntegrityError as exc:
         if conn: conn.rollback()
-        logger.info("Doctor domain integrity validation: %s",str(exc))
+        _log_event("doctor_api_integrity_conflict", logging.WARNING,
+                   request_id=getattr(context, "aws_request_id", None), method=method, path=path,
+                   mysql_error_code=exc.args[0] if exc.args else None)
         return response(409,{"message":"The requested record conflicts with existing data"})
     except Exception:
         if conn: conn.rollback()
-        logger.exception("Doctor domain request failed; request_id=%s",getattr(context,"aws_request_id",None))
+        logger.exception(json.dumps({"event": "doctor_api_failed",
+                                     "request_id": getattr(context, "aws_request_id", None),
+                                     "method": method, "path": path}))
         return response(500,{"message":"Doctor domain request failed"})
     finally:
         if conn: conn.close()
@@ -918,8 +930,14 @@ def _set_status(table, slot_id, status, expected):
             ExpressionAttributeValues={":s": status, ":expected": expected, ":zero": 0})
         return True
     except Exception as exc:
-        if getattr(exc, "response", {}).get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+        code = getattr(exc, "response", {}).get("Error", {}).get("Code")
+        if code == "ConditionalCheckFailedException":
+            # Expected when the slot was booked or changed in the meantime.
+            _log_event("slot_status_change_skipped", logging.INFO, slot_id=slot_id,
+                       new_status=status, expected_status=expected)
             return False
+        _log_event("slot_status_change_failed", logging.ERROR, slot_id=slot_id,
+                   new_status=status, error_code=code, error_type=type(exc).__name__)
         raise
 
 
@@ -932,8 +950,13 @@ def _delete_slot(table, slot_id, expected_statuses):
             ExpressionAttributeValues={":zero": 0, **{f":e{i}": v for i, v in enumerate(expected_statuses)}})
         return True
     except Exception as exc:
-        if getattr(exc, "response", {}).get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+        code = getattr(exc, "response", {}).get("Error", {}).get("Code")
+        if code == "ConditionalCheckFailedException":
+            # Expected when the slot was booked or changed in the meantime.
+            _log_event("slot_delete_skipped", logging.INFO, slot_id=slot_id)
             return False
+        _log_event("slot_delete_failed", logging.ERROR, slot_id=slot_id,
+                   error_code=code, error_type=type(exc).__name__)
         raise
 
 

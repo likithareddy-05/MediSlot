@@ -138,7 +138,12 @@ def decode_access_token(token):
 
         return claims
 
-    except jwt.InvalidTokenError:
+    except jwt.InvalidTokenError as exc:
+        # Never log the token itself, only why it was rejected.
+        logger.warning(json.dumps({
+            "event": "logout_access_token_invalid",
+            "error_type": type(exc).__name__
+        }))
         return None
 
 
@@ -262,7 +267,12 @@ def lambda_handler(event, context):
                 if isinstance(body_text, str)
                 else body_text
             )
-        except (json.JSONDecodeError, TypeError):
+        except (json.JSONDecodeError, TypeError) as exc:
+            logger.warning(json.dumps({
+                "event": "logout_invalid_json",
+                "request_id": getattr(context, "aws_request_id", None),
+                "error_type": type(exc).__name__
+            }))
             return response(
                 400,
                 {"message": "Request body must be valid JSON"}

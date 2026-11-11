@@ -40,6 +40,11 @@ def get_db_config():
         try:
             port = int(values[DB_PORT_PARAMETER])
         except (TypeError, ValueError) as exc:
+            logger.error(json.dumps({
+                "event": "db_config_invalid",
+                "reason": "port_not_an_integer",
+                "error_type": type(exc).__name__,
+            }))
             raise RuntimeError("Database port SSM parameter must be an integer") from exc
         if not 1 <= port <= 65535:
             raise RuntimeError("Database port SSM parameter is outside the valid range")

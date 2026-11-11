@@ -14,6 +14,7 @@ Routes
 (The doctor's own /doctors/me/... routes belong to the doctor-domain Lambda.)
 Booking, cancellation, waitlists and refunds arrive in the next milestone.
 """
+import json
 import logging
 import os
 import re
@@ -93,7 +94,9 @@ def _clean_profile(body, require_all):
         elif field == "date_of_birth":
             try:
                 parsed = date.fromisoformat(value)
-            except ValueError:
+            except ValueError as exc:
+                log_event("patient_field_invalid", logging.WARNING, field="date_of_birth",
+                          error_type=type(exc).__name__)
                 parsed = None
             if parsed is None or parsed.isoformat() != value:
                 errors[field] = "date_of_birth must be a valid date in YYYY-MM-DD format."
@@ -268,7 +271,9 @@ def _whole_number(query, name, default, low, high):
         return default
     try:
         number = int(str(raw).strip())
-    except ValueError:
+    except ValueError as exc:
+        log_event("query_parameter_invalid", logging.WARNING, parameter=name,
+                  reason="not_a_whole_number", error_type=type(exc).__name__)
         raise ValueError(f"{name} must be a whole number")
     if not low <= number <= high:
         raise ValueError(f"{name} must be between {low} and {high}")
@@ -398,7 +403,9 @@ def _doctor_profile(cursor, doctor_id):
 def _parse_day(value, name):
     try:
         return date.fromisoformat(str(value).strip())
-    except ValueError:
+    except ValueError as exc:
+        log_event("query_parameter_invalid", logging.WARNING, parameter=name,
+                  reason="not_a_date", error_type=type(exc).__name__)
         raise ValueError(f"{name} must be a date in YYYY-MM-DD format")
 
 
@@ -436,7 +443,9 @@ def _doctor_slots(cursor, doctor_id, query):
     if raw_type not in (None, ""):
         try:
             type_filter = int(str(raw_type).strip())
-        except ValueError:
+        except ValueError as exc:
+            log_event("query_parameter_invalid", logging.WARNING, parameter="consultationTypeId",
+                      reason="not_a_whole_number", error_type=type(exc).__name__)
             raise ValueError("consultationTypeId must be a whole number")
 
     # Current fee per consultation type comes from MySQL (the slot only holds the fee at creation time).
@@ -541,6 +550,10 @@ def _handle_api(event, context):
     except FieldErrors as exc:
         if conn:
             conn.rollback()
+        # Field names only; the submitted values are never logged.
+        log_event("patient_api_fields_invalid", logging.WARNING,
+                  request_id=getattr(context, "aws_request_id", None), method=method, path=path,
+                  fields=sorted(exc.errors))
         return response(400, {"message": "Please correct the highlighted fields.", "errors": exc.errors})
     except (ValueError, TypeError) as exc:
         if conn:
@@ -552,12 +565,16 @@ def _handle_api(event, context):
     except pymysql.err.IntegrityError as exc:
         if conn:
             conn.rollback()
-        logger.info("Patient domain integrity validation: %s", str(exc))
+        log_event("patient_api_integrity_conflict", logging.WARNING,
+                  request_id=getattr(context, "aws_request_id", None), method=method, path=path,
+                  mysql_error_code=exc.args[0] if exc.args else None)
         return response(409, {"message": "The requested record conflicts with existing data"})
     except Exception:
         if conn:
             conn.rollback()
-        logger.exception("Patient domain request failed; request_id=%s", getattr(context, "aws_request_id", None))
+        logger.exception(json.dumps({"event": "patient_api_failed",
+                                     "request_id": getattr(context, "aws_request_id", None),
+                                     "method": method, "path": path}))
         return response(500, {"message": "Patient domain request failed"})
     finally:
         if conn:

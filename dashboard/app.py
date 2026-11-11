@@ -211,8 +211,9 @@ def _login(role):
     session.clear()
     try:
         app.session_interface.regenerate(session)
-    except (AttributeError, RuntimeError):
-        pass
+    except (AttributeError, RuntimeError) as exc:
+        # Some session backends cannot regenerate the id; the session was already cleared above.
+        app.logger.warning("bff_session_regenerate_skipped error_type=%s", type(exc).__name__)
     session.permanent = True
     session["access_token"] = data["access_token"]
     session["refresh_token"] = data["refresh_token"]

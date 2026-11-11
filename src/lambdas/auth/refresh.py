@@ -3,7 +3,6 @@ import json
 import time
 import hashlib
 import logging
-import uuid
 import boto3
 import jwt
 
@@ -42,6 +41,35 @@ dynamodb_client = boto3.client("dynamodb")
 
 _jwt_signing_secret = None
 
+# --------------------------------------------------
+# Sequential ids (1, 2, 3, ...) instead of UUIDs
+# --------------------------------------------------
+# DynamoDB cannot auto-number rows, so an atomic counter item is kept in the
+# refresh-tokens table under the reserved partition key "_sequence" (user ids
+# are numeric, so it can never collide with a real user).
+SEQUENCE_PARTITION = "_sequence"
+REFRESH_TOKEN_SEQUENCE = "refresh_token_id"
+ACCESS_TOKEN_SEQUENCE = "access_token_jti"
+
+
+def next_id(table, sequence_name):
+    """Return the next integer for sequence_name (the first call returns 1)."""
+    try:
+        result = table.update_item(
+            Key={"user_id": SEQUENCE_PARTITION, "token_id": sequence_name},
+            UpdateExpression="ADD current_value :one",
+            ExpressionAttributeValues={":one": 1},
+            ReturnValues="UPDATED_NEW"
+        )
+        return int(result["Attributes"]["current_value"])
+    except ClientError as error:
+        logger.error(json.dumps({
+            "event": "id_sequence_failed",
+            "sequence": sequence_name,
+            "error_code": error.response.get("Error", {}).get("Code", "")
+        }))
+        raise
+
 
 # --------------------------------------------------
 # HTTP response helper
@@ -54,8 +82,21 @@ def get_integer_parameter(name, minimum, maximum):
     try:
         value = int(raw_value)
     except (TypeError, ValueError) as exc:
+        logger.error(json.dumps({
+            "event": "config_parameter_invalid",
+            "parameter": name,
+            "reason": "not_an_integer",
+            "error_type": type(exc).__name__,
+        }))
         raise RuntimeError(f"SSM parameter {name} must contain an integer") from exc
     if not minimum <= value <= maximum:
+        logger.error(json.dumps({
+            "event": "config_parameter_invalid",
+            "parameter": name,
+            "reason": "out_of_range",
+            "allowed_min": minimum,
+            "allowed_max": maximum,
+        }))
         raise RuntimeError(f"SSM parameter {name} is outside its allowed range")
     return value
 
@@ -110,7 +151,8 @@ def create_access_token(user_id, role, now):
         "role": role,
         "iat": now,
         "exp": now + ACCESS_TOKEN_TTL,
-        "jti": str(uuid.uuid4()),
+        # jti is the next number from a DynamoDB counter (1, 2, 3, ...), not a UUID.
+        "jti": str(next_id(refresh_tokens_table, ACCESS_TOKEN_SEQUENCE)),
         "iss": JWT_ISSUER
     }
 
@@ -217,6 +259,10 @@ def lambda_handler(event, context):
         stored_token = find_refresh_token(old_hash)
 
         if not stored_token:
+            logger.warning(json.dumps({
+                "event": "refresh_token_not_found",
+                "request_id": getattr(context, "aws_request_id", None)
+            }))
             return response(
                 401,
                 {"message": "Invalid or expired refresh token"}
@@ -250,13 +296,24 @@ def lambda_handler(event, context):
             expires_at = int(
                 stored_token.get("expires_at", 0)
             )
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as exc:
+            logger.error(json.dumps({
+                "event": "refresh_token_expiry_invalid",
+                "request_id": getattr(context, "aws_request_id", None),
+                "user_id": user_id,
+                "error_type": type(exc).__name__
+            }))
             return response(
                 401,
                 {"message": "Invalid or expired refresh token"}
             )
 
         if expires_at <= now:
+            logger.info(json.dumps({
+                "event": "refresh_token_expired",
+                "request_id": getattr(context, "aws_request_id", None),
+                "user_id": user_id
+            }))
             return response(
                 401,
                 {"message": "Invalid or expired refresh token"}
@@ -283,7 +340,12 @@ def lambda_handler(event, context):
             }
         )
 
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as exc:
+        logger.warning(json.dumps({
+            "event": "refresh_invalid_json",
+            "request_id": getattr(context, "aws_request_id", None),
+            "error_type": type(exc).__name__
+        }))
         return response(
             400,
             {"message": "Request body must be valid JSON"}

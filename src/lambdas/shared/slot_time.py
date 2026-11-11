@@ -1,6 +1,10 @@
 """Timezone-safe slot calculations shared by the materialiser and tests."""
+import json
+import logging
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
+
+logger = logging.getLogger()
 
 
 def valid_local_time(local_naive, zone):
@@ -61,5 +65,13 @@ def put_if_absent(table, item):
     except Exception as exc:
         error = getattr(exc, "response", {}).get("Error", {})
         if error.get("Code") == "ConditionalCheckFailedException":
+            # Normal: the deterministic slot already exists, so nothing is overwritten.
+            logger.info(json.dumps({"event": "slot_already_exists", "slot_id": item.get("slot_id")}))
             return False
+        logger.error(json.dumps({
+            "event": "slot_put_failed",
+            "slot_id": item.get("slot_id"),
+            "error_code": error.get("Code"),
+            "error_type": type(exc).__name__,
+        }))
         raise

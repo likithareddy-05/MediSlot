@@ -5,13 +5,14 @@ import logging
 import os
 import secrets
 import time
-import uuid
 
 import bcrypt
 import boto3
 import jwt
 import pymysql
 from botocore.exceptions import ClientError
+
+from refresh import ACCESS_TOKEN_SEQUENCE, REFRESH_TOKEN_SEQUENCE, next_id
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -54,8 +55,21 @@ def get_integer_parameter(name, minimum, maximum):
     try:
         value = int(raw)
     except (TypeError, ValueError) as exc:
+        logger.error(json.dumps({
+            "event": "config_parameter_invalid",
+            "parameter": name,
+            "reason": "not_an_integer",
+            "error_type": type(exc).__name__,
+        }))
         raise RuntimeError(f"SSM parameter {name} must be an integer") from exc
     if not minimum <= value <= maximum:
+        logger.error(json.dumps({
+            "event": "config_parameter_invalid",
+            "parameter": name,
+            "reason": "out_of_range",
+            "allowed_min": minimum,
+            "allowed_max": maximum,
+        }))
         raise RuntimeError(f"SSM parameter {name} is outside its allowed range")
     return value
 
@@ -72,6 +86,11 @@ def get_db_config():
         try:
             port = int(values[DB_PORT_PARAMETER])
         except (TypeError, ValueError) as exc:
+            logger.error(json.dumps({
+                "event": "db_config_invalid",
+                "reason": "port_not_an_integer",
+                "error_type": type(exc).__name__,
+            }))
             raise RuntimeError("Database port SSM parameter must be an integer") from exc
         if not 1 <= port <= 65535:
             raise RuntimeError("Database port SSM parameter is outside the valid range")
@@ -121,12 +140,13 @@ def hash_refresh_token(token):
 
 
 def create_access_token(user_id, role, now, ttl):
+    # jti is the next number from a DynamoDB counter (1, 2, 3, ...), not a UUID.
     claims = {
         "sub": str(user_id),
         "role": role,
         "iat": now,
         "exp": now + ttl,
-        "jti": str(uuid.uuid4()),
+        "jti": str(next_id(refresh_tokens_table, ACCESS_TOKEN_SEQUENCE)),
         "iss": JWT_ISSUER,
     }
     return jwt.encode(claims, get_jwt_secret(), algorithm="HS256")
@@ -180,7 +200,14 @@ def login_handler(event, context):
             return response(500, {"message": "Unable to sign in"})
         try:
             password_matches = bcrypt.checkpw(password.encode("utf-8"), stored_hash.encode("utf-8"))
-        except (ValueError, TypeError):
+        except (ValueError, TypeError) as exc:
+            # bcrypt rejects a malformed stored hash; treat it as a failed login.
+            logger.error(json.dumps({
+                "event": "login_password_check_error",
+                "request_id": getattr(context, "aws_request_id", None),
+                "user_id": str(user["user_id"]),
+                "error_type": type(exc).__name__,
+            }))
             password_matches = False
         if not password_matches:
             logger.warning(json.dumps({
@@ -212,7 +239,7 @@ def login_handler(event, context):
         # Opaque refresh token is created at login and remains unchanged
         # during refresh; only its SHA-256 hash is persisted.
         refresh_token = secrets.token_urlsafe(48)
-        token_id = str(uuid.uuid4())
+        token_id = str(next_id(refresh_tokens_table, REFRESH_TOKEN_SEQUENCE))
         expires_at = now + refresh_ttl
         refresh_tokens_table.put_item(
             Item={
@@ -241,7 +268,12 @@ def login_handler(event, context):
             "refresh_token": refresh_token,
             "refresh_expires_in": refresh_ttl,
         })
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as exc:
+        logger.warning(json.dumps({
+            "event": "login_invalid_json",
+            "request_id": getattr(context, "aws_request_id", None),
+            "error_type": type(exc).__name__,
+        }))
         return response(400, {"message": "Request body must be valid JSON"})
     except ClientError as error:
         code = error.response.get("Error", {}).get("Code", "")

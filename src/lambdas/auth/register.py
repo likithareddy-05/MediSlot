@@ -70,6 +70,11 @@ def get_db_config():
         try:
             port = int(values[DB_PORT_PARAMETER])
         except (TypeError, ValueError) as exc:
+            logger.error(json.dumps({
+                "event": "db_config_invalid",
+                "reason": "port_not_an_integer",
+                "error_type": type(exc).__name__,
+            }))
             raise RuntimeError(
                 "Database port SSM parameter must be an integer"
             ) from exc
@@ -101,6 +106,12 @@ def get_bcrypt_work_factor():
     try:
         rounds = int(raw_value)
     except (TypeError, ValueError) as exc:
+        logger.error(json.dumps({
+            "event": "config_parameter_invalid",
+            "parameter": "bcrypt_work_factor",
+            "reason": "not_an_integer",
+            "error_type": type(exc).__name__,
+        }))
         raise RuntimeError(
             "SSM bcrypt work factor must be an integer"
         ) from exc
@@ -250,7 +261,12 @@ def _validate_date_of_birth(value, errors):
 
     try:
         parsed = date.fromisoformat(value)
-    except ValueError:
+    except ValueError as exc:
+        logger.warning(json.dumps({
+            "event": "registration_field_invalid",
+            "field": "date_of_birth",
+            "error_type": type(exc).__name__,
+        }))
         errors["date_of_birth"] = (
             "date_of_birth must be a valid date in YYYY-MM-DD format."
         )
@@ -585,6 +601,12 @@ def lambda_handler(event, context):
             data = validate_registration(body)
 
         except ValidationError as exc:
+            # Only the names of the bad fields are logged, never their values.
+            logger.warning(json.dumps({
+                "event": "registration_validation_failed",
+                "request_id": getattr(context, "aws_request_id", None),
+                "fields": sorted(exc.errors),
+            }))
             return response(
                 400,
                 {
@@ -630,6 +652,11 @@ def lambda_handler(event, context):
                     lookup_errors["hospital_id"] = "Select a valid hospital."
 
                 if lookup_errors:
+                    logger.warning(json.dumps({
+                        "event": "registration_lookup_invalid",
+                        "request_id": getattr(context, "aws_request_id", None),
+                        "fields": sorted(lookup_errors),
+                    }))
                     return response(
                         400,
                         {
@@ -640,6 +667,41 @@ def lambda_handler(event, context):
                             "errors": lookup_errors,
                         },
                     )
+
+            # Check for duplicates BEFORE inserting. MySQL AUTO_INCREMENT never
+            # hands a number back: a rejected INSERT would use up an id and leave
+            # a gap (1, 2, 4, ...). The unique keys below stay as the final guard
+            # for the rare case of two identical requests at the same moment.
+            duplicate_fields = []
+            cursor.execute(
+                "SELECT 1 FROM users WHERE email = %s LIMIT 1",
+                (data["email"],),
+            )
+            if cursor.fetchone():
+                duplicate_fields.append("email")
+            if data["role"] == "DOCTOR":
+                cursor.execute(
+                    "SELECT 1 FROM doctors WHERE license_number = %s LIMIT 1",
+                    (data["license_number"],),
+                )
+                if cursor.fetchone():
+                    duplicate_fields.append("license_number")
+            if duplicate_fields:
+                logger.info(json.dumps({
+                    "event": "registration_duplicate",
+                    "request_id": getattr(context, "aws_request_id", None),
+                    "fields": duplicate_fields,
+                    "stage": "pre_check",
+                }))
+                return response(
+                    409,
+                    {
+                        "message": (
+                            "A unique value already exists. Check the email "
+                            "and, for doctors, license_number."
+                        )
+                    },
+                )
 
             # Insert common account details.
             cursor.execute(
@@ -752,7 +814,12 @@ def lambda_handler(event, context):
             },
         )
 
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as exc:
+        logger.warning(json.dumps({
+            "event": "registration_invalid_json",
+            "request_id": getattr(context, "aws_request_id", None),
+            "error_type": type(exc).__name__,
+        }))
         return response(
             400,
             {
@@ -769,6 +836,7 @@ def lambda_handler(event, context):
             logger.info(json.dumps({
                 "event": "registration_duplicate",
                 "request_id": getattr(context, "aws_request_id", None),
+                "stage": "database_unique_key",
             }))
             return response(
                 409,

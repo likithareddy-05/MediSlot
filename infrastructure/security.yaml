@@ -86,6 +86,8 @@ Resources:
                   - dynamodb:PutItem
                   - dynamodb:DeleteItem
                   - dynamodb:Query
+                  # UpdateItem advances the id counters (refresh_token_id, access_token_jti).
+                  - dynamodb:UpdateItem
                 Resource:
                   - !Sub
                     - arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${TableName}

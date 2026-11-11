@@ -444,7 +444,30 @@ jobs:
           echo '[1/6] Checking required commands and paths'
           command -v aws
           command -v unzip
+          command -v python3
+
+          # The virtualenv is normally created once by the instance start-up script
+          # (UserData in infrastructure/dashboard.yaml). If that script stopped early
+          # (for example the first artifact download failed) the venv is missing, so
+          # create it here instead of failing the whole deployment.
+          if [ ! -x /opt/medislot/.venv/bin/pip ]; then
+            echo 'Virtualenv /opt/medislot/.venv is missing - creating it'
+            ls -la /opt/medislot || true
+            mkdir -p /opt/medislot
+            python3 -m venv /opt/medislot/.venv
+            chown -R ec2-user:ec2-user /opt/medislot/.venv
+          fi
           test -x /opt/medislot/.venv/bin/pip
+
+          # Without the systemd unit and nginx the instance start-up never finished;
+          # show why instead of failing later with "unit not found".
+          if [ ! -f /etc/systemd/system/medislot-dashboard.service ]; then
+            echo 'ERROR: medislot-dashboard.service is not installed - the instance start-up script did not finish.'
+            echo '--- last lines of /var/log/medislot-dashboard-setup.log ---'
+            tail -n 60 /var/log/medislot-dashboard-setup.log || true
+            echo 'Fix: replace the dashboard instance (redeploy the dashboard stack) so the start-up script runs again.'
+            exit 1
+          fi
 
           echo '[2/6] Downloading dashboard artifact'
           rm -rf "$WORK_DIR"

@@ -164,6 +164,52 @@ jobs:
           deploy_stack "medislot-${ENVIRONMENT_NAME}-data" infrastructure/data.yaml
           deploy_stack "medislot-${ENVIRONMENT_NAME}-security" infrastructure/security.yaml
 
+      - name: Ensure SSM configuration parameters exist
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # CloudFormation does not notice parameters that were deleted by hand,
+          # so "no changes to deploy" leaves them missing. Recreate any missing
+          # parameter here. Existing parameters are never overwritten.
+          PREFIX="/medislot/${ENVIRONMENT_NAME}"
+
+          stack_output() {
+            aws cloudformation describe-stacks \
+              --stack-name "medislot-${ENVIRONMENT_NAME}-data" \
+              --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue | [0]" \
+              --output text \
+              --region "$AWS_REGION"
+          }
+
+          ensure_param() {
+            local name="$1" value="$2" type="${3:-String}"
+            if aws ssm get-parameter --name "$name" --region "$AWS_REGION" >/dev/null 2>&1; then
+              echo "exists:  $name"
+            else
+              aws ssm put-parameter --name "$name" --value "$value" --type "$type" \
+                --region "$AWS_REGION" >/dev/null
+              echo "created: $name"
+            fi
+          }
+
+          DB_HOST="$(stack_output DatabaseEndpointAddress)"
+          DB_PORT="$(stack_output DatabaseEndpointPort)"
+          for v in "$DB_HOST" "$DB_PORT"; do
+            [[ -n "$v" && "$v" != "None" ]] || { echo "::error::Database endpoint outputs missing"; exit 1; }
+          done
+
+          ensure_param "$PREFIX/database/host" "$DB_HOST"
+          ensure_param "$PREFIX/database/port" "$DB_PORT"
+          ensure_param "$PREFIX/database/name" "medislot"
+          ensure_param "$PREFIX/database/username" "medislotadmin"
+
+          ensure_param "$PREFIX/auth/access-token-ttl-seconds" "900"
+          ensure_param "$PREFIX/auth/refresh-token-ttl-seconds" "604800"
+          ensure_param "$PREFIX/auth/bcrypt-work-factor" "12"
+          # NOTE: recreating this invalidates all issued tokens.
+          ensure_param "$PREFIX/auth/jwt-signing-secret" "$(openssl rand -base64 48 | tr -d '\n=' | tr '+/' '-_')" SecureString
+
       - name: Resolve deployment artifact bucket
         id: assets
         shell: bash
@@ -441,6 +487,14 @@ jobs:
           BACKUP_DIR=/opt/medislot/dashboard.previous
           TARGET_DIR=/opt/medislot/dashboard
 
+          # A freshly created instance reports SSM "Online" while its UserData
+          # (dnf update, package install, venv, systemd unit) is still running.
+          # Wait for cloud-init to finish before looking for those files.
+          echo '[0/6] Waiting for instance start-up (cloud-init) to finish'
+          if command -v cloud-init >/dev/null 2>&1; then
+            timeout 1500 cloud-init status --wait || echo "cloud-init status: exit $? (checked below)"
+          fi
+
           echo '[1/6] Checking required commands and paths'
           command -v aws
           command -v unzip
@@ -551,10 +605,23 @@ jobs:
 
           echo "Waiting for dashboard update command..."
 
-          if aws ssm wait command-executed \
-            --command-id "$COMMAND_ID" \
-            --instance-id "$INSTANCE_ID" \
-            --region "$AWS_REGION"; then
+          # 'aws ssm wait command-executed' gives up after ~100s, which is too
+          # short when the instance is still finishing its start-up script.
+          STATUS="Pending"
+          for _ in $(seq 1 240); do
+            STATUS="$(aws ssm get-command-invocation \
+              --command-id "$COMMAND_ID" \
+              --instance-id "$INSTANCE_ID" \
+              --query Status \
+              --output text \
+              --region "$AWS_REGION" 2>/dev/null || echo Pending)"
+            case "$STATUS" in
+              Success|Failed|Cancelled|TimedOut|Cancelling) break ;;
+            esac
+            sleep 10
+          done
+
+          if [[ "$STATUS" == "Success" ]]; then
             echo "SSM dashboard update completed."
           else
             echo "::error::SSM dashboard update failed. Retrieving EC2 output..."

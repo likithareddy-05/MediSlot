@@ -119,9 +119,18 @@ class DeployedBookingTests(unittest.TestCase):
             call(cls.doctor, "DELETE", f"doctors/me/availability/{cls.availability_id}")
         call(cls.doctor, "DELETE", "doctors/me/consultation-types/4")
 
-    def book(self, patient, key=None):
-        return requests.post(f"{BASE}/appointments", json={"slot_id": self.slot["slot_id"]}, timeout=60,
-                             headers={**patient["headers"], "Idempotency-Key": key or f"it-{uuid.uuid4().hex}"})
+    def book(self, patient, key=None, retries=6):
+        """POST /appointments. Like a real client, retry 429/5xx answers with the SAME Idempotency-Key:
+        that is exactly what the key is for, so a retry can never book twice."""
+        key = key or f"it-{uuid.uuid4().hex}"
+        for attempt in range(retries + 1):
+            r = requests.post(f"{BASE}/appointments", json={"slot_id": self.slot["slot_id"]}, timeout=60,
+                              headers={**patient["headers"], "Idempotency-Key": key})
+            if r.status_code != 429 and r.status_code < 500:
+                return r
+            print(f"book retry {attempt + 1}: HTTP {r.status_code} {r.text[:200]}")
+            time.sleep(min(0.5 * 2 ** attempt, 4) + random.random() * 0.3)
+        return r
 
     def test_1_concurrency_exactly_capacity_bookings_succeed(self):
         results, barrier = [None] * PATIENTS, threading.Barrier(PATIENTS)
@@ -134,6 +143,9 @@ class DeployedBookingTests(unittest.TestCase):
         [t.start() for t in threads]
         [t.join(90) for t in threads]
         statuses = [r.status_code for r in results]
+        for r in results:
+            if r.status_code not in (201, 409):
+                print(f"unexpected answer: HTTP {r.status_code} {r.text[:300]}")
         self.assertEqual(statuses.count(201), CAPACITY, statuses)
         self.assertTrue(all(s in (201, 409) for s in statuses), statuses)
         codes = {r.json().get("code") for r in results if r.status_code == 409}

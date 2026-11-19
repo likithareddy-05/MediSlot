@@ -55,7 +55,7 @@ import boto3
 
 import appointment_store as store
 import slot_store
-from common import db_connect, get_config_value, json_body, log_event, logger, response
+from common import db_connect, get_config_value, is_transient_db_error, json_body, log_event, logger, response
 from events import emit_metric, publish_event
 from refunds import (DEFAULT_POLICY, PolicyError, calculate_refund, full_refund, money, parse_policy,
                      record_refund, refund_fields, result_from_item)
@@ -741,8 +741,15 @@ def _handle_api(event, context):
         log_event("booking_validation_failed", logging.WARNING, request_id=getattr(context, "aws_request_id", None),
                   method=method, path=path, error_type=type(exc).__name__, message=str(exc)[:200])
         return response(400, {"message": str(exc), "code": "VALIDATION"})
-    except Exception:
+    except Exception as exc:
         logger.exception("Booking request failed; request_id=%s", getattr(context, "aws_request_id", None))
+        if is_transient_db_error(exc):
+            # Overload, not a bug: nothing was booked (seat and hold were released), the client may retry
+            # with the same Idempotency-Key.
+            result = response(503, {"message": "The service is busy. Please retry in a moment.",
+                                    "code": "TEMPORARILY_UNAVAILABLE"})
+            result["headers"]["Retry-After"] = "1"
+            return result
         return response(500, {"message": "Booking request failed", "code": "INTERNAL_ERROR"})
 
 

@@ -5,6 +5,7 @@ variables are read when a function runs, not at import time, so the module can b
 imported in tests without any AWS configuration.
 """
 import json
+import random
 import logging
 import os
 import time
@@ -105,15 +106,48 @@ def _db_settings():
     return _db_config
 
 
+_db_password = {"value": None, "expires": 0.0}
+TRANSIENT_DB_ERRORS = {1040, 1205, 1213, 2003, 2006, 2013}  # too many connections, lock timeout, deadlock, lost/refused
+
+
+def is_transient_db_error(exc):
+    """True for temporary database trouble (overload, deadlock, dropped connection) that a retry may fix."""
+    code = exc.args[0] if getattr(exc, "args", None) and isinstance(exc.args[0], int) else None
+    return isinstance(exc, pymysql.err.OperationalError) and code in TRANSIENT_DB_ERRORS
+
+
+def _database_password():
+    """The DB password from Secrets Manager, cached for 5 minutes per container (one call, not one per connection)."""
+    now = time.monotonic()
+    if _db_password["value"] is None or now >= _db_password["expires"]:
+        secret = _secrets.get_secret_value(SecretId=os.environ["DB_SECRET_ARN"]).get("SecretString")
+        if not secret:
+            raise RuntimeError("Database secret is empty")
+        _db_password["value"] = json.loads(secret)["password"]
+        _db_password["expires"] = now + 300
+    return _db_password["value"]
+
+
 def db_connect():
-    """Open a MySQL connection (transactions are explicit: autocommit is off)."""
+    """Open a MySQL connection (transactions are explicit: autocommit is off).
+
+    A burst of simultaneous requests can briefly exhaust the database's connection limit, so
+    temporary connect errors are retried a few times with a short random delay.
+    """
     cfg = _db_settings()
-    secret = _secrets.get_secret_value(SecretId=os.environ["DB_SECRET_ARN"]).get("SecretString")
-    if not secret:
-        raise RuntimeError("Database secret is empty")
-    password = json.loads(secret)["password"]
-    return pymysql.connect(
-        host=cfg["host"], port=cfg["port"], user=cfg["username"], password=password,
-        database=cfg["name"], connect_timeout=5, read_timeout=15, write_timeout=15,
-        cursorclass=pymysql.cursors.DictCursor, autocommit=False, charset="utf8mb4",
-    )
+    last_error = None
+    for attempt in range(1, 5):
+        try:
+            return pymysql.connect(
+                host=cfg["host"], port=cfg["port"], user=cfg["username"], password=_database_password(),
+                database=cfg["name"], connect_timeout=5, read_timeout=15, write_timeout=15,
+                cursorclass=pymysql.cursors.DictCursor, autocommit=False, charset="utf8mb4",
+            )
+        except pymysql.err.OperationalError as exc:
+            last_error = exc
+            logger.warning(json.dumps({"event": "db_connect_retry", "attempt": attempt,
+                                                    "error": str(exc)[:200]}))
+            if attempt == 4:
+                break
+            time.sleep(random.uniform(0.05, 0.25) * attempt)
+    raise last_error

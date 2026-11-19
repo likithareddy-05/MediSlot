@@ -287,6 +287,83 @@ class IdempotencyTest(Harness):
 
 
 # ---------------------------------------------------------------- validation rules
+class DatabaseOverloadTests(Harness):
+    """A temporary database problem is a 503 the client can retry with the same key, never a bare 500."""
+
+    def overloaded(self, code):
+        import pymysql
+        def connect():
+            raise pymysql.err.OperationalError(code, "Too many connections")
+        return connect
+
+    def test_too_many_connections_answers_503_and_leaves_nothing_behind(self):
+        with mock.patch.object(bd, "db_connect", self.overloaded(1040)):
+            status, body, result = self.book(1, key="overload-key-1")
+        self.assertEqual((status, body["code"]), (503, "TEMPORARILY_UNAVAILABLE"))
+        self.assertEqual(result["headers"]["Retry-After"], "1")
+        self.assertEqual((self.appointments(), self.holds()), ([], []))
+
+    def test_retrying_with_the_same_key_after_the_overload_books_exactly_once(self):
+        with mock.patch.object(bd, "db_connect", self.overloaded(1213)):
+            self.assertEqual(self.book(1, key="overload-key-2")[0], 503)
+        status, body, _ = self.book(1, key="overload-key-2")
+        self.assertEqual(status, 201)
+        status, body2, replay = self.book(1, key="overload-key-2")   # a replay returns the stored answer
+        self.assertEqual((status, body2["appointment"]["appointment_id"]), (201, body["appointment"]["appointment_id"]))
+        self.assertEqual(replay["headers"].get("Idempotent-Replayed"), "true")
+        self.assertEqual(len(self.appointments()), 1)
+        self.assertEqual(self.slot()["booked_count"], 1)
+
+    def test_other_database_errors_are_still_500(self):
+        import pymysql
+        def broken():
+            raise pymysql.err.OperationalError(1045, "Access denied")
+        with mock.patch.object(bd, "db_connect", broken):
+            self.assertEqual(self.book(1, key="overload-key-3")[0], 500)
+
+
+class ConnectRetryTests(unittest.TestCase):
+    def setUp(self):
+        import common
+        self.common = common
+        common._db_password.update(value=None, expires=0.0)
+        self.addCleanup(common._db_password.update, value=None, expires=0.0)
+
+    def test_password_is_fetched_once_per_container(self):
+        secrets = mock.Mock()
+        secrets.get_secret_value.return_value = {"SecretString": json.dumps({"password": "pw"})}
+        with mock.patch.object(self.common, "_secrets", secrets):
+            self.assertEqual(self.common._database_password(), "pw")
+            self.assertEqual(self.common._database_password(), "pw")
+        self.assertEqual(secrets.get_secret_value.call_count, 1)
+
+    def test_temporary_connect_errors_are_retried(self):
+        import pymysql
+        attempts = []
+        def connect(**kwargs):
+            attempts.append(1)
+            if len(attempts) < 3:
+                raise pymysql.err.OperationalError(1040, "Too many connections")
+            return "connection"
+        with mock.patch.object(self.common, "_db_settings", return_value={"host": "h", "port": 3306, "name": "n", "username": "u"}), \
+             mock.patch.object(self.common, "_database_password", return_value="pw"), \
+             mock.patch.object(self.common.pymysql, "connect", connect), \
+             mock.patch.object(self.common.time, "sleep", lambda s: None):
+            self.assertEqual(self.common.db_connect(), "connection")
+        self.assertEqual(len(attempts), 3)
+
+    def test_gives_up_after_four_attempts(self):
+        import pymysql
+        def connect(**kwargs):
+            raise pymysql.err.OperationalError(1040, "Too many connections")
+        with mock.patch.object(self.common, "_db_settings", return_value={"host": "h", "port": 3306, "name": "n", "username": "u"}), \
+             mock.patch.object(self.common, "_database_password", return_value="pw"), \
+             mock.patch.object(self.common.pymysql, "connect", connect), \
+             mock.patch.object(self.common.time, "sleep", lambda s: None):
+            with self.assertRaises(pymysql.err.OperationalError):
+                self.common.db_connect()
+
+
 class BookingValidationTests(Harness):
     def test_success_response_event_and_stored_appointment(self):
         status, body, _ = self.book(5)

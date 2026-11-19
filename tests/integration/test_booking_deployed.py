@@ -45,7 +45,7 @@ def call(headers, method, path, **kwargs):
 
 
 def patient_payload(email, n):
-    return {"role": "PATIENT", "email": email, "password": PASSWORD, "first_name": f"Itest{n}", "last_name": "Booker",
+    return {"role": "PATIENT", "email": email, "password": PASSWORD, "first_name": "Itest" + chr(ord("A") + n % 26) , "last_name": "Booker",
             "phone": "9876500000", "date_of_birth": "1990-01-15", "gender": "OTHER", "address": "1 Test Street",
             "city": "Hyderabad", "emergency_contact_name": "Test Contact", "emergency_contact_phone": "9876500001"}
 

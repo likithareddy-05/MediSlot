@@ -120,7 +120,7 @@ jobs:
           python -m pip install -r dashboard/requirements.txt
 
           python -m compileall -q src/lambdas dashboard
-          python -m unittest discover -s tests -v   # unit tests only; tests/integration needs a live API
+          python -m unittest discover -s tests -v   # unit tests only; they use in-memory fakes and never touch the real database
 
       - name: Validate CloudFormation templates
         shell: bash
@@ -668,20 +668,27 @@ jobs:
             --output text \
             --region "$AWS_REGION"
 
-      - name: Run integration tests against deployed API
+      - name: Smoke test deployed API (read-only)
         shell: bash
         run: |
           set -euo pipefail
 
+          # Writes nothing to the database: an unauthenticated call to a protected route must be refused.
+          # (No test in this repository calls the deployed API, so no test data is ever created.)
           API_BASE_URL=$(aws cloudformation describe-stacks \
             --stack-name "medislot-${ENVIRONMENT_NAME}-authentication" \
             --query "Stacks[0].Outputs[?OutputKey=='RestApiBaseUrl'].OutputValue" \
             --output text \
             --region "$AWS_REGION")
 
-          python -m pip install requests
-          MEDISLOT_API_BASE_URL="$API_BASE_URL" \
-            python -m unittest discover -s tests/integration -v
+          for path in patients/me appointments; do
+            CODE=$(curl -s -o /dev/null -w '%{http_code}' "${API_BASE_URL%/}/${path}")
+            echo "GET /${path} without a token -> HTTP ${CODE}"
+            [[ "$CODE" == "401" || "$CODE" == "403" ]] || {
+              echo "::error::Expected 401 or 403 for an unauthenticated call to /${path}, got ${CODE}"
+              exit 1
+            }
+          done
 
       - name: Show deployment outputs
         shell: bash

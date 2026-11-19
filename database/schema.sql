@@ -533,3 +533,164 @@ CREATE TABLE IF NOT EXISTS refund_ledger (
     CONSTRAINT chk_refund_percent CHECK (refund_percent BETWEEN 0 AND 100),
     CONSTRAINT chk_refund_amounts CHECK (refund_amount >= 0 AND deduction_amount >= 0 AND refund_amount <= fee_amount)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+
+-- ============================================================
+-- SAMPLE DATA FOR REVIEW / DEMO (dev only)
+-- 15 doctors (ids 101-115), 6 patients (ids 201-206), the consultation types
+-- each doctor offers, weekly availability and a few days off.
+-- Every account below uses the password: MediSlot@2026
+-- Doctor logins:  doctor1@gmail.com ... doctor15@gmail.com (ids 101-115)
+-- Patient logins: patient1@gmail.com ... patient6@gmail.com (ids 201-206)
+-- All statements are INSERT IGNORE with fixed ids, so re-running this file never
+-- duplicates rows.
+-- No slots and no appointments are stored here. Slots are created in the RDS `slots`
+-- table by the slot materializer from availability_patterns (the deploy pipeline runs it
+-- once, then it runs daily) for the next 30 days. Appointments are created by booking
+-- and live in DynamoDB.
+-- Remove this whole section for a production database.
+-- ============================================================
+
+-- Accounts (users)
+INSERT IGNORE INTO users (user_id, email, password_hash, role, account_status) VALUES
+    (101, 'doctor1@gmail.com', '$2b$12$BOXwUAX9sZCOaBye14D5SuWiz9gIzGa2xM/aRe0cAfeCoP2KfwzBK', 'DOCTOR', 'ACTIVE'),
+    (102, 'doctor2@gmail.com', '$2b$12$BOXwUAX9sZCOaBye14D5SuWiz9gIzGa2xM/aRe0cAfeCoP2KfwzBK', 'DOCTOR', 'ACTIVE'),
+    (103, 'doctor3@gmail.com', '$2b$12$BOXwUAX9sZCOaBye14D5SuWiz9gIzGa2xM/aRe0cAfeCoP2KfwzBK', 'DOCTOR', 'ACTIVE'),
+    (104, 'doctor4@gmail.com', '$2b$12$BOXwUAX9sZCOaBye14D5SuWiz9gIzGa2xM/aRe0cAfeCoP2KfwzBK', 'DOCTOR', 'ACTIVE'),
+    (105, 'doctor5@gmail.com', '$2b$12$BOXwUAX9sZCOaBye14D5SuWiz9gIzGa2xM/aRe0cAfeCoP2KfwzBK', 'DOCTOR', 'ACTIVE'),
+    (106, 'doctor6@gmail.com', '$2b$12$BOXwUAX9sZCOaBye14D5SuWiz9gIzGa2xM/aRe0cAfeCoP2KfwzBK', 'DOCTOR', 'ACTIVE'),
+    (107, 'doctor7@gmail.com', '$2b$12$BOXwUAX9sZCOaBye14D5SuWiz9gIzGa2xM/aRe0cAfeCoP2KfwzBK', 'DOCTOR', 'ACTIVE'),
+    (108, 'doctor8@gmail.com', '$2b$12$BOXwUAX9sZCOaBye14D5SuWiz9gIzGa2xM/aRe0cAfeCoP2KfwzBK', 'DOCTOR', 'ACTIVE'),
+    (109, 'doctor9@gmail.com', '$2b$12$BOXwUAX9sZCOaBye14D5SuWiz9gIzGa2xM/aRe0cAfeCoP2KfwzBK', 'DOCTOR', 'ACTIVE'),
+    (110, 'doctor10@gmail.com', '$2b$12$BOXwUAX9sZCOaBye14D5SuWiz9gIzGa2xM/aRe0cAfeCoP2KfwzBK', 'DOCTOR', 'ACTIVE'),
+    (111, 'doctor11@gmail.com', '$2b$12$BOXwUAX9sZCOaBye14D5SuWiz9gIzGa2xM/aRe0cAfeCoP2KfwzBK', 'DOCTOR', 'ACTIVE'),
+    (112, 'doctor12@gmail.com', '$2b$12$BOXwUAX9sZCOaBye14D5SuWiz9gIzGa2xM/aRe0cAfeCoP2KfwzBK', 'DOCTOR', 'ACTIVE'),
+    (113, 'doctor13@gmail.com', '$2b$12$BOXwUAX9sZCOaBye14D5SuWiz9gIzGa2xM/aRe0cAfeCoP2KfwzBK', 'DOCTOR', 'ACTIVE'),
+    (114, 'doctor14@gmail.com', '$2b$12$BOXwUAX9sZCOaBye14D5SuWiz9gIzGa2xM/aRe0cAfeCoP2KfwzBK', 'DOCTOR', 'ACTIVE'),
+    (115, 'doctor15@gmail.com', '$2b$12$BOXwUAX9sZCOaBye14D5SuWiz9gIzGa2xM/aRe0cAfeCoP2KfwzBK', 'DOCTOR', 'ACTIVE'),
+    (201, 'patient1@gmail.com', '$2b$12$BOXwUAX9sZCOaBye14D5SuWiz9gIzGa2xM/aRe0cAfeCoP2KfwzBK', 'PATIENT', 'ACTIVE'),
+    (202, 'patient2@gmail.com', '$2b$12$BOXwUAX9sZCOaBye14D5SuWiz9gIzGa2xM/aRe0cAfeCoP2KfwzBK', 'PATIENT', 'ACTIVE'),
+    (203, 'patient3@gmail.com', '$2b$12$BOXwUAX9sZCOaBye14D5SuWiz9gIzGa2xM/aRe0cAfeCoP2KfwzBK', 'PATIENT', 'ACTIVE'),
+    (204, 'patient4@gmail.com', '$2b$12$BOXwUAX9sZCOaBye14D5SuWiz9gIzGa2xM/aRe0cAfeCoP2KfwzBK', 'PATIENT', 'ACTIVE'),
+    (205, 'patient5@gmail.com', '$2b$12$BOXwUAX9sZCOaBye14D5SuWiz9gIzGa2xM/aRe0cAfeCoP2KfwzBK', 'PATIENT', 'ACTIVE'),
+    (206, 'patient6@gmail.com', '$2b$12$BOXwUAX9sZCOaBye14D5SuWiz9gIzGa2xM/aRe0cAfeCoP2KfwzBK', 'PATIENT', 'ACTIVE');
+
+-- Doctor profiles
+INSERT IGNORE INTO doctors (user_id, first_name, last_name, phone, date_of_birth, gender, address, specialization_id, hospital_id, license_number, years_of_experience, clinic_address) VALUES
+    (101, 'Ananya', 'Reddy', '9876500101', '1982-03-14', 'FEMALE', 'Plot 21, Road 12, Banjara Hills, Hyderabad', 1, 1, 'TS-10101', 14, 'Cardiology OPD, Apollo Hospitals, Jubilee Hills, Hyderabad'),
+    (102, 'Rohit', 'Sharma', '9876500102', '1988-07-02', 'MALE', 'Flat 302, Madhura Nagar, Hyderabad', 2, 4, 'TS-10102', 8, 'Dental Clinic, CARE Hospitals, Banjara Hills, Hyderabad'),
+    (103, 'Meera', 'Iyer', '9876500103', '1985-11-21', 'FEMALE', 'Flat 8B, Gachibowli, Hyderabad', 3, 5, 'TS-10103', 11, 'Skin Clinic, Continental Hospitals, Gachibowli, Hyderabad'),
+    (104, 'Karthik', 'Rao', '9876500104', '1980-01-30', 'MALE', 'House 14, Manikonda, Hyderabad', 4, 6, 'TS-10104', 16, 'Endocrine Wing, AIG Hospitals, Gachibowli, Hyderabad'),
+    (105, 'Sneha', 'Kulkarni', '9876500105', '1987-05-09', 'FEMALE', 'Flat 5, Begumpet, Hyderabad', 5, 2, 'TS-10105', 9, 'ENT Clinic, Yashoda Hospitals, Secunderabad, Hyderabad'),
+    (106, 'Vikram', 'Singh', '9876500106', '1978-09-17', 'MALE', 'Villa 9, Tarnaka, Hyderabad', 6, 3, 'TS-10106', 18, 'Gastro Centre, KIMS Hospitals, Secunderabad, Hyderabad'),
+    (107, 'Farah', 'Khan', '9876500107', '1990-12-03', 'FEMALE', 'Flat 12, Madhapur, Hyderabad', 7, 7, 'TS-10107', 6, 'General Medicine OPD, Medicover Hospitals, HITEC City, Hyderabad'),
+    (108, 'Arjun', 'Nair', '9876500108', '1984-04-26', 'MALE', 'Flat 77, Film Nagar, Hyderabad', 14, 1, 'TS-10108', 12, 'Ortho Clinic, Apollo Hospitals, Jubilee Hills, Hyderabad'),
+    (109, 'Divya', 'Menon', '9876500109', '1986-08-15', 'FEMALE', 'Flat 4A, Road 3, Banjara Hills, Hyderabad', 15, 9, 'TS-10109', 10, 'Paediatric OPD, Rainbow Children''s Hospital, Banjara Hills, Hyderabad'),
+    (110, 'Suresh', 'Babu', '9876500110', '1975-02-11', 'MALE', 'House 6, Kapra, Hyderabad', 11, 8, 'TS-10110', 20, 'Neuro Clinic, Sunshine Hospitals, Secunderabad, Hyderabad'),
+    (111, 'Lakshmi', 'Prasad', '9876500111', '1981-06-28', 'FEMALE', 'Flat 19, Kukatpally, Hyderabad', 9, 3, 'TS-10111', 15, 'Women''s Clinic, KIMS Hospitals, Secunderabad, Hyderabad'),
+    (112, 'Imran', 'Qureshi', '9876500112', '1989-10-05', 'MALE', 'Flat 3C, Greams Road, Chennai', 17, 11, 'TS-10112', 7, 'Chest Clinic, Apollo Hospitals, Greams Road, Chennai'),
+    (113, 'Pooja', 'Verma', '9876500113', '1991-01-19', 'FEMALE', 'Flat 21, Nanakramguda, Hyderabad', 13, 5, 'TS-10113', 5, 'Eye Clinic, Continental Hospitals, Gachibowli, Hyderabad'),
+    (114, 'Rajesh', 'Gupta', '9876500114', '1979-03-08', 'MALE', 'B-45, Saket, New Delhi', 18, 14, 'TS-10114', 17, 'Urology OPD, Max Super Speciality Hospital, Saket, New Delhi'),
+    (115, 'Nandini', 'Krishnan', '9876500115', '1983-07-24', 'FEMALE', 'Flat 10, Indiranagar, Bengaluru', 16, 12, 'TS-10115', 13, 'Mind Care Clinic, Manipal Hospital, Old Airport Road, Bengaluru');
+
+-- Patient profiles
+INSERT IGNORE INTO patients (user_id, first_name, last_name, phone, date_of_birth, gender, address, city, emergency_contact_name, emergency_contact_phone) VALUES
+    (201, 'Aarav', 'Mehta', '9123400201', '1995-04-12', 'MALE', 'Flat 14, Ameerpet, Hyderabad', 'Hyderabad', 'Kavita Mehta', '9123400301'),
+    (202, 'Ishita', 'Das', '9123400202', '1992-09-30', 'FEMALE', 'House 2, Kondapur, Hyderabad', 'Hyderabad', 'Subir Das', '9123400302'),
+    (203, 'Rahul', 'Joshi', '9123400203', '1988-01-17', 'MALE', 'Flat 6D, Miyapur, Hyderabad', 'Hyderabad', 'Sunita Joshi', '9123400303'),
+    (204, 'Sana', 'Fatima', '9123400204', '2000-06-05', 'FEMALE', 'Flat 31, Tolichowki, Hyderabad', 'Hyderabad', 'Yusuf Ali', '9123400304'),
+    (205, 'Tarun', 'Chowdary', '9123400205', '1976-11-23', 'MALE', 'Villa 11, Jubilee Hills, Hyderabad', 'Hyderabad', 'Madhavi Chowdary', '9123400305'),
+    (206, 'Keerthi', 'Suresh', '9123400206', '1998-02-14', 'FEMALE', 'Flat 9, Velachery, Chennai', 'Chennai', 'Suresh Kumar', '9123400306');
+
+-- Consultation types each doctor offers (fee in INR, seats per slot)
+INSERT IGNORE INTO doctor_consultation_types (doctor_id, consultation_type_id, fee, slot_capacity, is_active) VALUES
+    (101, 2, 1200.00, 1, 1),
+    (101, 3, 2000.00, 1, 1),
+    (102, 1, 500.00, 1, 1),
+    (102, 2, 800.00, 1, 1),
+    (102, 4, 300.00, 8, 1),
+    (103, 1, 600.00, 1, 1),
+    (103, 2, 900.00, 1, 1),
+    (104, 2, 1000.00, 1, 1),
+    (104, 3, 1800.00, 1, 1),
+    (105, 1, 400.00, 1, 1),
+    (105, 2, 700.00, 1, 1),
+    (106, 2, 1100.00, 1, 1),
+    (106, 3, 2200.00, 1, 1),
+    (107, 1, 300.00, 1, 1),
+    (107, 2, 500.00, 1, 1),
+    (107, 4, 150.00, 10, 1),
+    (108, 2, 900.00, 1, 1),
+    (108, 3, 1500.00, 1, 1),
+    (109, 1, 350.00, 1, 1),
+    (109, 2, 600.00, 1, 1),
+    (109, 4, 200.00, 6, 1),
+    (110, 2, 1500.00, 1, 1),
+    (110, 3, 2500.00, 1, 1),
+    (111, 2, 1000.00, 1, 1),
+    (111, 3, 1700.00, 1, 1),
+    (112, 1, 450.00, 1, 1),
+    (112, 2, 750.00, 1, 1),
+    (113, 1, 400.00, 1, 1),
+    (113, 2, 650.00, 1, 1),
+    (114, 2, 1300.00, 1, 1),
+    (114, 3, 2100.00, 1, 1),
+    (115, 2, 1400.00, 1, 1),
+    (115, 3, 2400.00, 1, 1);
+
+-- Weekly availability (weekday: Monday=0 ... Sunday=6, times in Asia/Kolkata)
+INSERT IGNORE INTO availability_patterns (availability_pattern_id, doctor_id, consultation_type_id, weekday, start_time, end_time, timezone_name, effective_from, effective_to, is_active) VALUES
+    (1, 101, 2, 0, '09:00:00', '12:00:00', 'Asia/Kolkata', '2026-01-01', NULL, 1),
+    (2, 101, 2, 2, '09:00:00', '12:00:00', 'Asia/Kolkata', '2026-01-01', NULL, 1),
+    (3, 101, 3, 4, '14:00:00', '17:00:00', 'Asia/Kolkata', '2026-01-01', NULL, 1),
+    (4, 102, 1, 0, '09:00:00', '10:00:00', 'Asia/Kolkata', '2026-01-01', NULL, 1),
+    (5, 102, 2, 2, '09:00:00', '10:00:00', 'Asia/Kolkata', '2026-01-01', NULL, 1),
+    (6, 102, 4, 5, '10:00:00', '12:00:00', 'Asia/Kolkata', '2026-01-01', NULL, 1),
+    (7, 103, 2, 1, '10:00:00', '13:00:00', 'Asia/Kolkata', '2026-01-01', NULL, 1),
+    (8, 103, 2, 3, '10:00:00', '13:00:00', 'Asia/Kolkata', '2026-01-01', NULL, 1),
+    (9, 103, 1, 5, '10:00:00', '11:00:00', 'Asia/Kolkata', '2026-01-01', NULL, 1),
+    (10, 104, 2, 0, '15:00:00', '18:00:00', 'Asia/Kolkata', '2026-01-01', NULL, 1),
+    (11, 104, 3, 3, '15:00:00', '17:00:00', 'Asia/Kolkata', '2026-01-01', NULL, 1),
+    (12, 105, 1, 1, '09:00:00', '11:00:00', 'Asia/Kolkata', '2026-01-01', NULL, 1),
+    (13, 105, 2, 4, '09:00:00', '12:00:00', 'Asia/Kolkata', '2026-01-01', NULL, 1),
+    (14, 105, 1, 5, '09:00:00', '11:00:00', 'Asia/Kolkata', '2026-01-01', NULL, 1),
+    (15, 106, 3, 0, '10:00:00', '12:00:00', 'Asia/Kolkata', '2026-01-01', NULL, 1),
+    (16, 106, 3, 2, '10:00:00', '12:00:00', 'Asia/Kolkata', '2026-01-01', NULL, 1),
+    (17, 106, 2, 4, '16:00:00', '18:00:00', 'Asia/Kolkata', '2026-01-01', NULL, 1),
+    (18, 107, 1, 0, '09:00:00', '11:00:00', 'Asia/Kolkata', '2026-01-01', NULL, 1),
+    (19, 107, 1, 1, '09:00:00', '11:00:00', 'Asia/Kolkata', '2026-01-01', NULL, 1),
+    (20, 107, 1, 2, '09:00:00', '11:00:00', 'Asia/Kolkata', '2026-01-01', NULL, 1),
+    (21, 107, 1, 3, '09:00:00', '11:00:00', 'Asia/Kolkata', '2026-01-01', NULL, 1),
+    (22, 107, 1, 4, '09:00:00', '11:00:00', 'Asia/Kolkata', '2026-01-01', NULL, 1),
+    (23, 107, 4, 6, '10:00:00', '12:00:00', 'Asia/Kolkata', '2026-01-01', NULL, 1),
+    (24, 108, 2, 1, '11:00:00', '14:00:00', 'Asia/Kolkata', '2026-01-01', NULL, 1),
+    (25, 108, 2, 3, '11:00:00', '14:00:00', 'Asia/Kolkata', '2026-01-01', NULL, 1),
+    (26, 109, 2, 0, '10:00:00', '12:00:00', 'Asia/Kolkata', '2026-01-01', NULL, 1),
+    (27, 109, 2, 2, '10:00:00', '12:00:00', 'Asia/Kolkata', '2026-01-01', NULL, 1),
+    (28, 109, 1, 5, '09:00:00', '11:00:00', 'Asia/Kolkata', '2026-01-01', NULL, 1),
+    (29, 109, 4, 6, '11:00:00', '13:00:00', 'Asia/Kolkata', '2026-01-01', NULL, 1),
+    (30, 110, 2, 1, '14:00:00', '17:00:00', 'Asia/Kolkata', '2026-01-01', NULL, 1),
+    (31, 110, 3, 4, '14:00:00', '16:00:00', 'Asia/Kolkata', '2026-01-01', NULL, 1),
+    (32, 111, 2, 0, '11:00:00', '13:00:00', 'Asia/Kolkata', '2026-01-01', NULL, 1),
+    (33, 111, 2, 3, '11:00:00', '13:00:00', 'Asia/Kolkata', '2026-01-01', NULL, 1),
+    (34, 111, 3, 5, '11:00:00', '13:00:00', 'Asia/Kolkata', '2026-01-01', NULL, 1),
+    (35, 112, 1, 2, '09:00:00', '11:00:00', 'Asia/Kolkata', '2026-01-01', NULL, 1),
+    (36, 112, 2, 4, '09:00:00', '11:00:00', 'Asia/Kolkata', '2026-01-01', NULL, 1),
+    (37, 113, 2, 1, '09:00:00', '12:00:00', 'Asia/Kolkata', '2026-01-01', NULL, 1),
+    (38, 113, 2, 3, '09:00:00', '12:00:00', 'Asia/Kolkata', '2026-01-01', NULL, 1),
+    (39, 113, 1, 5, '09:00:00', '10:00:00', 'Asia/Kolkata', '2026-01-01', NULL, 1),
+    (40, 114, 2, 0, '16:00:00', '18:00:00', 'Asia/Kolkata', '2026-01-01', NULL, 1),
+    (41, 114, 2, 2, '16:00:00', '18:00:00', 'Asia/Kolkata', '2026-01-01', NULL, 1),
+    (42, 115, 3, 1, '10:00:00', '13:00:00', 'Asia/Kolkata', '2026-01-01', NULL, 1),
+    (43, 115, 2, 3, '10:00:00', '12:00:00', 'Asia/Kolkata', '2026-01-01', NULL, 1),
+    (44, 115, 3, 6, '10:00:00', '12:00:00', 'Asia/Kolkata', '2026-01-01', NULL, 1);
+
+-- Days off
+INSERT IGNORE INTO doctor_blackouts (blackout_id, doctor_id, blackout_date, reason) VALUES
+    (1, 101, '2026-11-25', 'Medical conference'),
+    (2, 109, '2026-11-30', 'Personal leave'),
+    (3, 107, '2026-12-25', 'Christmas Day');
+
+-- ============================================================
+-- END OF SAMPLE DATA
+-- ============================================================

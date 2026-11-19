@@ -4,11 +4,15 @@ All schedule wall-clock values are interpreted in the IANA timezone stored on
 an availability pattern. UTC instants are persisted to DynamoDB. During a
 fall-back overlap the first occurrence (fold=0) is selected; nonexistent
 spring-forward wall times are skipped.
+
+Milestone 5 layout: slots are in RDS (shared/slot_store.py, shared/slot_generation.py) and
+appointments are in DynamoDB (shared/appointment_store.py).
 """
 import json
 import logging
 import os
 import re
+import time as time_module
 from time import monotonic as _monotonic
 from urllib.parse import unquote
 from datetime import date, datetime, time, timedelta, timezone
@@ -17,8 +21,11 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import boto3
 import pymysql
 from botocore.config import Config
-from boto3.dynamodb.conditions import Key
-from slot_time import valid_local_time, put_if_absent
+import appointment_store as store
+import slot_store
+from slot_generation import materialize_doctor_slots
+from refunds import full_refund, no_show_refund, record_refund, refund_fields
+from events import emit_metric, publish_event
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -41,11 +48,7 @@ DB_PORT_PARAMETER = os.environ["DB_PORT_PARAMETER"]
 DB_NAME_PARAMETER = os.environ["DB_NAME_PARAMETER"]
 DB_USERNAME_PARAMETER = os.environ["DB_USERNAME_PARAMETER"]
 DB_SECRET_ARN = os.environ["DB_SECRET_ARN"]
-# CloudFormation (authentication.yaml) defines SLOT_TABLE_NAME. Older builds read
-# SLOT_STATE_TABLE, which crashed the Lambda at import time. Accept either name.
-SLOT_TABLE_NAME = os.environ.get("SLOT_TABLE_NAME") or os.environ.get("SLOT_STATE_TABLE")
-if not SLOT_TABLE_NAME:
-    raise RuntimeError("Set SLOT_TABLE_NAME (or SLOT_STATE_TABLE) on the doctor-domain Lambda")
+APPOINTMENTS_TABLE_NAME = os.environ["APPOINTMENTS_TABLE_NAME"]
 ASSETS_BUCKET = os.environ["ASSETS_BUCKET"]
 _db_config = None
 
@@ -270,12 +273,41 @@ def _lookup_id(cursor, table, id_column, value, label, current=None):
     return number
 
 
-APPOINTMENT_STATUSES = {"BOOKED","CANCELLED","COMPLETED","NO_SHOW"}
-APPOINTMENT_SELECT = """SELECT a.appointment_id,a.slot_id,a.status,a.outcome,
-    a.scheduled_start_utc,a.scheduled_end_utc,
-    p.user_id AS patient_id,p.first_name,p.last_name,p.phone,c.consultation_name
-    FROM appointments a JOIN patients p ON p.user_id=a.patient_id
-    JOIN consultation_types c ON c.consultation_type_id=a.consultation_type_id"""
+APPOINTMENT_STATUSES = set(store.STATUSES)
+FAR_FUTURE_ISO = "9999-12-31T23:59:59Z"
+
+
+def _appointments_table():
+    return ddb.Table(APPOINTMENTS_TABLE_NAME)
+
+
+def _sleep(seconds):
+    time_module.sleep(seconds)
+
+
+def _patient_names(cursor, patient_ids):
+    """Patient names and phones from RDS (the appointment itself only stores ids)."""
+    ids = sorted({int(i) for i in patient_ids})
+    if not ids:
+        return {}
+    marks = ",".join(["%s"] * len(ids))
+    cursor.execute(f"SELECT user_id, first_name, last_name, phone FROM patients WHERE user_id IN ({marks})", ids)
+    return {int(r["user_id"]): r for r in cursor.fetchall()}
+
+
+def _doctor_appointment_rows(cursor, items):
+    """DynamoDB appointment items as the rows the doctor dashboard shows (patient name from RDS)."""
+    names = _patient_names(cursor, [i["patient_id"] for i in items])
+    rows = []
+    for item in items:
+        patient = names.get(int(item["patient_id"]), {})
+        rows.append({
+            "appointment_id": item["appointment_id"], "slot_id": item["slot_id"], "status": item["status"],
+            "outcome": item.get("outcome"), "scheduled_start_utc": item["start_time_utc"],
+            "scheduled_end_utc": item["end_time_utc"], "patient_id": int(item["patient_id"]),
+            "first_name": patient.get("first_name"), "last_name": patient.get("last_name"),
+            "phone": patient.get("phone"), "consultation_name": item.get("consultation_name")})
+    return rows
 
 
 def _as_utc_naive(value, end_of_day):
@@ -297,54 +329,91 @@ def _as_utc_naive(value, end_of_day):
     return parsed
 
 
-def _appointments_for_slots(cursor, doctor_id, slot_ids):
-    if not slot_ids:
-        return []
-    marks = ",".join(["%s"] * len(slot_ids))
-    cursor.execute(APPOINTMENT_SELECT + f" WHERE a.doctor_id=%s AND a.slot_id IN ({marks})"
-                   " ORDER BY a.scheduled_start_utc", [doctor_id, *slot_ids])
-    return cursor.fetchall()
+def _cancel_confirmed_by_doctor(table, cursor, conn, doctor_id, item):
+    """Move one CONFIRMED appointment to CANCELLED_BY_DOCTOR with a 100% refund. True when it changed."""
+    refund = full_refund(item["fee_amount"])
+    now_text = store.now_iso()
+    updated = store.transition(table, item["appointment_id"], store.CONFIRMED, store.CANCELLED_BY_DOCTOR, {
+        "cancelled_at": now_text, "seat_released_at": now_text,
+        "cancellation_reason": "Slot cancelled by the doctor", **refund_fields(refund)})
+    if updated is None:
+        return False
+    try:
+        store.release_hold(table, item["slot_id"], int(item["patient_id"]))
+    except Exception as exc:
+        # A leftover hold is cleaned up by the next booking attempt; the cancellation stands.
+        _log_event("hold_release_failed", logging.ERROR, slot_id=item["slot_id"], error_type=type(exc).__name__)
+    publish_event("AppointmentCancelled", {
+        "appointment_id": item["appointment_id"], "patient_id": int(item["patient_id"]),
+        "doctor_id": int(doctor_id), "slot_id": item["slot_id"],
+        "consultation_type_id": int(item["consultation_type_id"]),
+        "start_time_utc": item["start_time_utc"], "end_time_utc": item["end_time_utc"],
+        "cancelled_by": "DOCTOR",
+        "refund": {"tier": refund.tier, "percent": 100, "amount": float(refund.refund_amount)}})
+    return True
+
+
+CANCEL_SETTLE_ATTEMPTS = 5
+CANCEL_SETTLE_PAUSE_SECONDS = 0.4
 
 
 def _cancel_slot(conn, cursor, doctor_id, slot_id):
-    """Cancel one slot: close it in DynamoDB, then mark its booked appointments CANCELLED.
+    """Cancel one slot: close it in RDS, then cancel and fully refund every confirmed appointment.
 
-    Order matters. The slot is closed first so no new patient can book it while
-    the appointments are being cancelled. Both steps are idempotent, so if the
-    MySQL step fails the doctor can simply press Cancel again.
-    There is no refund table: no refund record is created.
+    Order matters. The slot is closed first (status CANCELLED, version + 1), so no new patient
+    can claim a seat and any booking that read the old row loses its conditional update.
+    Each CONFIRMED appointment (DynamoDB) then becomes CANCELLED_BY_DOCTOR with a 100% refund
+    and a ledger row (RDS, one row per appointment, so nobody is refunded twice).
+
+    DynamoDB index reads are eventually consistent, so a booking that was saved a moment ago
+    may not show up in the first listing. The slot's booked_count is the exact number of
+    appointments to expect: the listing is repeated a few times until all of them are
+    accounted for. If some are still missing the answer says how many are pending and the
+    doctor can press Cancel again. Every step is idempotent. No SlotSeatFreed event is sent:
+    the slot is closed, so there is no seat for a waitlist to be promoted into.
     """
-    table = ddb.Table(SLOT_TABLE_NAME)
-    item = table.get_item(Key={"slot_id":slot_id}).get("Item")
-    if not item or str(item.get("doctor_id")) != str(doctor_id):
+    slot = slot_store.get_slot(cursor, slot_id)
+    conn.commit()
+    if not slot or int(slot["doctor_id"]) != int(doctor_id):
         _log_event("slot_cancel_not_found", logging.WARNING, doctor_id=doctor_id, slot_id=slot_id)
         return response(404,{"message":"Slot not found"})
-    end_text = str(item.get("end_time_utc") or item.get("end_at_utc") or "")
-    if end_text and datetime.fromisoformat(end_text.replace("Z", "+00:00")) <= datetime.now(timezone.utc):
+    if datetime.fromisoformat(slot["end_time_utc"].replace("Z", "+00:00")) <= datetime.now(timezone.utc):
         raise ValueError("This slot has already ended and can no longer be cancelled.")
-    try:
-        table.update_item(Key={"slot_id":slot_id},
-            UpdateExpression="SET #s=:cancelled, updated_at=:now",
-            ConditionExpression="#s <> :cancelled",
-            ExpressionAttributeNames={"#s":"status"},
-            ExpressionAttributeValues={":cancelled":"CANCELLED",":now":datetime.now(timezone.utc).isoformat()})
-    except Exception as exc:
-        # Already cancelled is fine; the cancel call is idempotent.
-        code = getattr(exc,"response",{}).get("Error",{}).get("Code")
-        if code != "ConditionalCheckFailedException":
-            _log_event("slot_cancel_failed", logging.ERROR, doctor_id=doctor_id, slot_id=slot_id, error_code=code)
-            raise
-    cursor.execute("""SELECT appointment_id FROM appointments
-        WHERE slot_id=%s AND doctor_id=%s AND status='BOOKED'""",(slot_id,doctor_id))
-    affected = cursor.fetchall()
-    for appt in affected:
-        cursor.execute("UPDATE appointments SET status='CANCELLED' WHERE appointment_id=%s AND status='BOOKED'",
-                       (appt["appointment_id"],))
+
+    slot_store.close_slot(cursor, slot_id)
     conn.commit()
-    _log_event("slot_cancelled", doctor_id=doctor_id, slot_id=slot_id,
-               affected_appointments=len(affected))
-    return response(200,{"message":"Slot cancelled","slot_id":slot_id,
-        "affected_appointments":len(affected)})
+    expected = slot_store.get_slot(cursor, slot_id)["booked_count"]
+    conn.commit()
+
+    table = _appointments_table()
+    newly_cancelled = 0
+    accounted = 0
+    for attempt in range(CANCEL_SETTLE_ATTEMPTS):
+        items = store.list_for_slot(table, slot_id)
+        for item in items:
+            if item["status"] == store.CONFIRMED and _cancel_confirmed_by_doctor(table, cursor, conn, doctor_id, item):
+                newly_cancelled += 1
+                item = {**item, "status": store.CANCELLED_BY_DOCTOR}
+                emit_metric("CancellationsByTier", 1, Tier="DOCTOR_CANCELLED")
+            if item["status"] == store.CANCELLED_BY_DOCTOR:
+                # Make sure the ledger row exists (also repairs a cancel that stopped half way).
+                fresh = store.get_appointment(table, item["appointment_id"])
+                record_refund(cursor, fresh, "DOCTOR_CANCELLATION", full_refund(fresh["fee_amount"]))
+        conn.commit()
+        accounted = sum(1 for i in items if i["status"] in (store.CANCELLED_BY_DOCTOR, store.COMPLETED,
+                                                           store.NO_SHOW)
+                        or (i["status"] == store.CANCELLED_BY_PATIENT and not i.get("seat_released_at")))
+        if accounted >= expected:
+            break
+        _sleep(CANCEL_SETTLE_PAUSE_SECONDS)
+    pending = max(expected - accounted, 0)
+    _log_event("slot_cancelled", logging.WARNING if pending else logging.INFO, doctor_id=doctor_id,
+               slot_id=slot_id, affected_appointments=newly_cancelled, expected_appointments=expected,
+               pending_appointments=pending)
+    return response(200,{"message":"Slot cancelled" if not pending else
+        "Slot cancelled. Some bookings are still being refunded; press Cancel again in a moment.",
+        "slot_id":slot_id, "affected_appointments":newly_cancelled, "refunded_in_full":newly_cancelled,
+        "pending_appointments":pending})
 
 
 def _consultation_type_in_use(cursor, doctor_id, type_id):
@@ -359,10 +428,10 @@ def _consultation_type_in_use(cursor, doctor_id, type_id):
     patterns = int((cursor.fetchone() or {}).get("n") or 0)
     if patterns:
         return "You cannot deactivate this consultation type until its slots are deleted."
-    cursor.execute("""SELECT COUNT(*) AS n FROM appointments
-        WHERE doctor_id=%s AND consultation_type_id=%s AND status='BOOKED'
-        AND scheduled_end_utc > UTC_TIMESTAMP(6)""", (doctor_id, type_id))
-    booked = int((cursor.fetchone() or {}).get("n") or 0)
+    now_text = store.now_iso()
+    upcoming = store.list_for_doctor(_appointments_table(), doctor_id, now_text[:10] + "T00:00:00Z", FAR_FUTURE_ISO)
+    booked = sum(1 for i in upcoming if i.get("status") == store.CONFIRMED
+                 and str(i.get("consultation_type_id")) == str(type_id) and i["end_time_utc"] > now_text)
     if booked:
         return ("You cannot deactivate this consultation type while it has upcoming booked appointments. "
                 "Cancel those slots from My Schedule first.")
@@ -385,31 +454,18 @@ def _active_patterns(cursor, doctor_id):
     return cursor.fetchall()
 
 
-def _schedule_for_day(cursor, conn, doctor_id, day, patterns=None):
-    """Schedule payload with an explicit status so the UI can explain an empty day.
-
-    status: OK | BLACKOUT | NO_AVAILABILITY | NOT_MATERIALISED | NO_SLOTS
-    Slot dates are the doctor's local calendar dates (the zone stored on the pattern).
-    `patterns` may be passed in so a multi-day view reads them only once.
-    """
-    if patterns is None:
-        patterns = _active_patterns(cursor, doctor_id)
-    tz_name = patterns[0]["timezone_name"] if patterns else "Asia/Kolkata"
-    local_today = datetime.now(ZoneInfo(tz_name)).date()
+def _build_day(day, doctor_id, tz_name, local_today, patterns, blackout, day_slots, appointments):
+    """One day of the schedule payload with an explicit status so the UI can explain an empty day."""
     if day < local_today:
         # Slots exist only from today (doctor's local date) onwards: never list earlier days.
         return {"doctor_id": doctor_id, "date": day.isoformat(), "timezone": tz_name, "status": "PAST",
                 "is_blackout": False, "blackout_reason": None, "message": SCHEDULE_MESSAGES["PAST"],
                 "slots": [], "appointments": []}
-    cursor.execute("SELECT blackout_id,reason FROM doctor_blackouts WHERE doctor_id=%s AND blackout_date=%s LIMIT 1",
-                   (doctor_id, day))
-    blackout = cursor.fetchone()
-    all_slots = _query_day(ddb.Table(SLOT_TABLE_NAME), doctor_id, day)
     # Withdrawn/blacked-out slots are never shown as bookable.
-    slots = [s for s in all_slots if s.get("status") not in ("REMOVED", "BLACKED_OUT")]
+    slots = [s for s in day_slots if s.get("status") not in ("REMOVED", "BLACKED_OUT")]
     if blackout:
         # Keep only slots that already hold patients so they are not lost from view.
-        slots = [s for s in all_slots if int(s.get("booked_count", 0)) > 0]
+        slots = [s for s in day_slots if int(s.get("booked_count", 0)) > 0]
         status = "BLACKOUT"
     elif slots:
         status = "OK"
@@ -419,31 +475,59 @@ def _schedule_for_day(cursor, conn, doctor_id, day, patterns=None):
         applicable = any(int(p["weekday"]) == day.weekday() and day >= p["effective_from"]
                          and (p["effective_to"] is None or day <= p["effective_to"]) for p in patterns)
         status = "NOT_MATERIALISED" if applicable and day >= local_today else "NO_SLOTS"
-    appointments = _appointments_for_slots(cursor, doctor_id, [s["slot_id"] for s in slots])
-    conn.commit()
+    slot_ids = {s["slot_id"] for s in slots}
     return {"doctor_id": doctor_id, "date": day.isoformat(), "timezone": tz_name, "status": status,
             "is_blackout": bool(blackout), "blackout_reason": (blackout or {}).get("reason"),
-            "message": SCHEDULE_MESSAGES[status], "slots": slots, "appointments": appointments}
+            "message": SCHEDULE_MESSAGES[status], "slots": slots,
+            "appointments": [a for a in appointments if a["slot_id"] in slot_ids]}
 
 
 MAX_SCHEDULE_RANGE_DAYS = 14
 
 
 def _schedule_for_range(cursor, conn, doctor_id, first_day, last_day):
-    """Schedule for consecutive days (the week view): one entry per day, same shape as a single day."""
+    """Schedule for consecutive days (the week view): one entry per day, same shape as a single day.
+
+    Slots come from slot_store.get_slots, the same function the patient's slot browser uses.
+    """
     if last_day < first_day:
         raise ValueError("to must not be earlier than from")
     count = (last_day - first_day).days + 1
     if count > MAX_SCHEDULE_RANGE_DAYS:
         raise ValueError(f"The schedule range can cover at most {MAX_SCHEDULE_RANGE_DAYS} days")
     patterns = _active_patterns(cursor, doctor_id)
-    days = [_schedule_for_day(cursor, conn, doctor_id, first_day + timedelta(days=i), patterns)
+    tz_name = patterns[0]["timezone_name"] if patterns else "Asia/Kolkata"
+    local_today = datetime.now(ZoneInfo(tz_name)).date()
+    shown_first = max(first_day, local_today)  # days before today are never looked up
+    slots_by_day, blackouts, appointments = {}, {}, []
+    if shown_first <= last_day:
+        for slot in slot_store.get_slots(cursor, doctor_id, shown_first, last_day, slot_store.VIEWER_DOCTOR):
+            slots_by_day.setdefault(slot["slot_date"], []).append(slot)
+        cursor.execute("SELECT blackout_date,reason FROM doctor_blackouts WHERE doctor_id=%s "
+                       "AND blackout_date BETWEEN %s AND %s", (doctor_id, shown_first, last_day))
+        blackouts = {r["blackout_date"]: r for r in cursor.fetchall()}
+        booked_ids = {s["slot_id"] for day_slots in slots_by_day.values() for s in day_slots}
+        if booked_ids:
+            window_start = (datetime.combine(shown_first, time.min) - timedelta(days=1))
+            window_end = (datetime.combine(last_day, time.min) + timedelta(days=2))
+            items = store.list_for_doctor(_appointments_table(), doctor_id,
+                                          slot_store.iso_utc(window_start), slot_store.iso_utc(window_end))
+            appointments = _doctor_appointment_rows(cursor, [i for i in items if i["slot_id"] in booked_ids])
+    conn.commit()
+    days = [_build_day(first_day + timedelta(days=i), doctor_id, tz_name, local_today, patterns,
+                       blackouts.get(first_day + timedelta(days=i)),
+                       slots_by_day.get((first_day + timedelta(days=i)).isoformat(), []), appointments)
             for i in range(count)]
     return {"doctor_id": doctor_id, "from": first_day.isoformat(), "to": last_day.isoformat(),
-            "timezone": days[0]["timezone"], "days": days,
+            "timezone": tz_name, "days": days,
             "summary": {"slots": sum(len(d["slots"]) for d in days),
                         "appointments": sum(len(d["appointments"]) for d in days),
                         "blackout_days": sum(1 for d in days if d["is_blackout"])}}
+
+
+def _schedule_for_day(cursor, conn, doctor_id, day, patterns=None):
+    """A single day: the one-day case of the same range function."""
+    return _schedule_for_range(cursor, conn, doctor_id, day, day)["days"][0]
 
 
 def _handle_api(event, context):
@@ -802,27 +886,17 @@ def _handle_api(event, context):
                 cur.execute("INSERT INTO doctor_blackouts (doctor_id,blackout_date,reason) VALUES (%s,%s,%s)",(doctor_id,blackout_date,reason))
                 blackout_id = cur.lastrowid
                 conn.commit()
-                # Slots may already have been materialised for this date. Mark
-                # them unavailable immediately so a newly-added blackout takes effect.
-                slot_table = ddb.Table(SLOT_TABLE_NAME)
-                existing = slot_table.query(IndexName="DoctorDateIndex",
-                    KeyConditionExpression=Key("doctor_id").eq(str(doctor_id)) & Key("slot_date").eq(blackout_date.isoformat()))
-                for slot in existing.get("Items", []):
-                    if slot.get("status") == "CANCELLED":
-                        continue  # a cancelled slot stays cancelled; removing the blackout must not reopen it
-                    slot_table.update_item(Key={"slot_id":slot["slot_id"]},
-                        UpdateExpression="SET #status = :status",
-                        ExpressionAttributeNames={"#status":"status"},
-                        ExpressionAttributeValues={":status":"BLACKED_OUT"})
-                marked_items = existing.get("Items", [])
-                booked_slots = sum(1 for s in marked_items if int(s.get("booked_count", 0)) > 0)
+                # Slots may already have been materialised for this date. Withdraw them
+                # immediately so a newly-added blackout takes effect (cancelled slots stay cancelled).
+                marked, booked_slots = slot_store.blackout_day(cur, doctor_id, blackout_date)
+                conn.commit()
                 # Booked appointments are NOT cancelled by a blackout: warn so it is visible.
                 _log_event("blackout_created", logging.WARNING if booked_slots else logging.INFO,
                            doctor_id=doctor_id, blackout_id=blackout_id,
-                           blackout_date=blackout_date.isoformat(), slots_marked=len(marked_items),
+                           blackout_date=blackout_date.isoformat(), slots_marked=marked,
                            slots_with_bookings=booked_slots)
                 return response(201,{"message":"Blackout date created","blackout_id":blackout_id,
-                    "existing_slots_marked":len(existing.get("Items", []))})
+                    "existing_slots_marked":marked})
             match = re.fullmatch(r"/blackouts/(\d+)",path)
             if match and method == "DELETE":
                 cur.execute("DELETE FROM doctor_blackouts WHERE blackout_id=%s AND doctor_id=%s",(int(match.group(1)),doctor_id))
@@ -844,18 +918,13 @@ def _handle_api(event, context):
                 # from/to are UTC bounds. A date-only "to" value includes the whole day.
                 start = _as_utc_naive(_required(query,"from"), end_of_day=False)
                 end = _as_utc_naive(_required(query,"to"), end_of_day=True)
-                sql = APPOINTMENT_SELECT + """ WHERE a.doctor_id=%s AND a.scheduled_start_utc >= %s
-                    AND a.scheduled_start_utc < %s"""
-                args = [doctor_id, start, end]
-                status = query.get("status")
-                if status:
-                    status = status.upper()
-                    if status not in APPOINTMENT_STATUSES:
-                        raise ValueError("status must be one of " + ", ".join(sorted(APPOINTMENT_STATUSES)))
-                    sql += " AND a.status=%s"
-                    args.append(status)
-                cur.execute(sql + " ORDER BY a.scheduled_start_utc", args)
-                rows = cur.fetchall()
+                status = (query.get("status") or "").upper()
+                if status and status not in APPOINTMENT_STATUSES:
+                    raise ValueError("status must be one of " + ", ".join(sorted(APPOINTMENT_STATUSES)))
+                start_text, end_text = slot_store.iso_utc(start), slot_store.iso_utc(end)
+                items = [i for i in store.list_for_doctor(_appointments_table(), doctor_id, start_text, end_text)
+                         if i["start_time_utc"] < end_text and (not status or i["status"] == status)]
+                rows = _doctor_appointment_rows(cur, items)
                 conn.commit()
                 return response(200,{"appointments":rows})
 
@@ -864,16 +933,29 @@ def _handle_api(event, context):
                 outcome = str(body.get("outcome","")).upper()
                 if outcome not in {"COMPLETED","NO_SHOW"}:
                     raise ValueError("outcome must be COMPLETED or NO_SHOW")
-                cur.execute("""UPDATE appointments SET status=%s, outcome=%s
-                    WHERE appointment_id=%s AND doctor_id=%s AND status='BOOKED'""",
-                    (outcome,outcome,int(match.group(1)),doctor_id))
-                if not cur.rowcount:
+                appointment_id = match.group(1)
+                table = _appointments_table()
+                item = store.get_appointment(table, appointment_id)
+                if not item or str(item.get("doctor_id")) != str(doctor_id):
                     _log_event("appointment_outcome_rejected", logging.WARNING, doctor_id=doctor_id,
-                               appointment_id=int(match.group(1)), outcome=outcome)
-                    return response(404,{"message":"Booked appointment not found"})
-                conn.commit()
+                               appointment_id=appointment_id, outcome=outcome)
+                    return response(404,{"message":"Confirmed appointment not found"})
+                refund = no_show_refund(item["fee_amount"]) if outcome == "NO_SHOW" else None
+                fields = {"outcome": outcome, **(refund_fields(refund) if refund else {})}
+                updated = store.transition(table, appointment_id, store.CONFIRMED, outcome, fields)
+                if updated is None and item["status"] == outcome == "NO_SHOW":
+                    updated = item  # repeated call: finish a ledger write that failed before
+                if updated is None:
+                    _log_event("appointment_outcome_rejected", logging.WARNING, doctor_id=doctor_id,
+                               appointment_id=appointment_id, outcome=outcome)
+                    return response(404,{"message":"Confirmed appointment not found"})
+                if refund:
+                    # A no-show is never refunded: record the 0% ledger entry for the audit trail.
+                    record_refund(cur, updated, "NO_SHOW", refund)
+                    conn.commit()
+                    emit_metric("CancellationsByTier", 1, Tier="NO_SHOW")
                 _log_event("appointment_outcome_recorded", doctor_id=doctor_id,
-                           appointment_id=int(match.group(1)), outcome=outcome)
+                           appointment_id=appointment_id, outcome=outcome)
                 return response(200,{"message":f"Appointment marked {outcome}"})
 
             match = re.fullmatch(r"/slots/(.+)",path)
@@ -909,173 +991,15 @@ def _handle_api(event, context):
         if conn: conn.close()
 
 
-def _query_day(table, doctor_id, day):
-    """All slot records for one doctor/date (handles pagination)."""
-    items, kwargs = [], dict(IndexName="DoctorDateIndex",
-        KeyConditionExpression=Key("doctor_id").eq(str(doctor_id)) & Key("slot_date").eq(day.isoformat()))
-    while True:
-        page = table.query(**kwargs)
-        items.extend(page.get("Items", []))
-        if not page.get("LastEvaluatedKey"):
-            return items
-        kwargs["ExclusiveStartKey"] = page["LastEvaluatedKey"]
-
-
-def _set_status(table, slot_id, status, expected):
-    try:
-        table.update_item(Key={"slot_id": slot_id},
-            UpdateExpression="SET #s = :s",
-            ConditionExpression="#s = :expected AND booked_count = :zero",
-            ExpressionAttributeNames={"#s": "status"},
-            ExpressionAttributeValues={":s": status, ":expected": expected, ":zero": 0})
-        return True
-    except Exception as exc:
-        code = getattr(exc, "response", {}).get("Error", {}).get("Code")
-        if code == "ConditionalCheckFailedException":
-            # Expected when the slot was booked or changed in the meantime.
-            _log_event("slot_status_change_skipped", logging.INFO, slot_id=slot_id,
-                       new_status=status, expected_status=expected)
-            return False
-        _log_event("slot_status_change_failed", logging.ERROR, slot_id=slot_id,
-                   new_status=status, error_code=code, error_type=type(exc).__name__)
-        raise
-
-
-def _delete_slot(table, slot_id, expected_statuses):
-    """Hard-delete an unbooked slot; refuses if it was booked in the meantime."""
-    try:
-        table.delete_item(Key={"slot_id": slot_id},
-            ConditionExpression="booked_count = :zero AND #s IN (" + ",".join(f":e{i}" for i in range(len(expected_statuses))) + ")",
-            ExpressionAttributeNames={"#s": "status"},
-            ExpressionAttributeValues={":zero": 0, **{f":e{i}": v for i, v in enumerate(expected_statuses)}})
-        return True
-    except Exception as exc:
-        code = getattr(exc, "response", {}).get("Error", {}).get("Code")
-        if code == "ConditionalCheckFailedException":
-            # Expected when the slot was booked or changed in the meantime.
-            _log_event("slot_delete_skipped", logging.INFO, slot_id=slot_id)
-            return False
-        _log_event("slot_delete_failed", logging.ERROR, slot_id=slot_id,
-                   error_code=code, error_type=type(exc).__name__)
-        raise
-
-
 def materialize_doctor(doctor_id, start_day=None, days=30):
-    """Create/refresh this doctor's slots for the rolling window starting at start_day.
+    """Create/refresh this doctor's slots (RDS) for the rolling window starting at start_day.
 
-    - Idempotent: slot ids are deterministic (doctor#consultation#UTC start).
-    - Existing slots are never overwritten; booking counters are untouched.
-    - Unbooked future slots that no longer match the active patterns (edited or
-      removed patterns) are deleted; slots with bookings are kept.
+    The work is done by shared/slot_generation.py, the same code the scheduled
+    slot-materializer Lambda runs.
     """
     conn = db_connect()
-    table = ddb.Table(SLOT_TABLE_NAME)
-    created = skipped = removed = restored = 0
     try:
-        with conn.cursor() as cur:
-            cur.execute("""SELECT a.availability_pattern_id,a.consultation_type_id,a.weekday,
-                a.start_time,a.end_time,a.timezone_name,a.effective_from,a.effective_to,
-                c.consultation_name,c.duration_minutes,d.fee,d.slot_capacity
-                FROM availability_patterns a
-                JOIN doctor_consultation_types d
-                ON d.doctor_id=a.doctor_id AND d.consultation_type_id=a.consultation_type_id
-                JOIN consultation_types c ON c.consultation_type_id=d.consultation_type_id
-                WHERE a.doctor_id=%s AND a.is_active=1 AND d.is_active=1""",(doctor_id,))
-            patterns = cur.fetchall()
-            local_today = (datetime.now(ZoneInfo(patterns[0]["timezone_name"])).date()
-                           if patterns else date.today())
-            # Never create slots for dates before today (doctor's local date).
-            if start_day is None or start_day < local_today:
-                start_day = local_today
-            cur.execute("SELECT blackout_date FROM doctor_blackouts WHERE doctor_id=%s AND blackout_date >= %s AND blackout_date < %s",(doctor_id,start_day,start_day+timedelta(days=days)))
-            blackouts = {r["blackout_date"] for r in cur.fetchall()}
-            conn.commit()
-        now_utc = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        for offset in range(days):
-            day = start_day + timedelta(days=offset)
-            existing = {s["slot_id"]: s for s in _query_day(table, doctor_id, day)}
-            desired = set()
-            if day not in blackouts:
-                for p in patterns:
-                    if day.weekday() != int(p["weekday"]): continue
-                    if day < p["effective_from"] or (p["effective_to"] and day > p["effective_to"]): continue
-                    zone = ZoneInfo(p["timezone_name"])
-                    start_t = _as_time(p["start_time"])
-                    end_t = _as_time(p["end_time"])
-                    duration = int(p["duration_minutes"])
-                    local_end = datetime.combine(day,end_t)
-                    cursor = datetime.combine(day,start_t)
-                    while cursor + timedelta(minutes=duration) <= local_end:
-                        aware_start = valid_local_time(cursor,zone)
-                        aware_end = valid_local_time(cursor+timedelta(minutes=duration),zone)
-                        if aware_start is None or aware_end is None:
-                            skipped += 1
-                            cursor += timedelta(minutes=duration)
-                            continue
-                        start_utc = aware_start.astimezone(timezone.utc)
-                        # Elapsed time, not wall-clock subtraction (DST safe).
-                        end_utc = start_utc + timedelta(minutes=duration)
-                        slot_id = f"{doctor_id}#{p['consultation_type_id']}#{start_utc.strftime('%Y%m%dT%H%M%SZ')}"
-                        desired.add(slot_id)
-                        current = existing.get(slot_id)
-                        if current is not None:
-                            if current.get("status") in ("REMOVED", "BLACKED_OUT") and int(current.get("booked_count", 0)) == 0:
-                                if _set_status(table, slot_id, "AVAILABLE", current["status"]):
-                                    restored += 1
-                            # Same slot still wanted after an edit: point it at the current pattern.
-                            if (current.get("status") == "AVAILABLE"
-                                    and int(current.get("availability_pattern_id", -1)) != int(p["availability_pattern_id"])):
-                                table.update_item(Key={"slot_id": slot_id},
-                                    UpdateExpression="SET availability_pattern_id = :pid",
-                                    ExpressionAttributeValues={":pid": int(p["availability_pattern_id"])})
-                            cursor += timedelta(minutes=duration)
-                            continue
-                        start_text = start_utc.isoformat().replace("+00:00", "Z")
-                        end_text = end_utc.isoformat().replace("+00:00", "Z")
-                        item = {
-                            "slot_id": slot_id,
-                            "doctor_id": str(doctor_id),
-                            "slot_date": day.isoformat(),
-                            "consultation_type_id": int(p["consultation_type_id"]),
-                            "consultation_name": p["consultation_name"],
-                            "start_time_utc": start_text,
-                            "end_time_utc": end_text,
-                            "timezone": p["timezone_name"],
-                            "local_date": day.isoformat(),
-                            "local_start": cursor.isoformat(),
-                            "duration_minutes": duration,
-                            "fee": str(p["fee"]),
-                            "capacity": int(p["slot_capacity"]),
-                            "booked_count": 0,
-                            "status": "AVAILABLE",
-                            "availability_pattern_id": int(p["availability_pattern_id"]),
-                            "start_at_utc": start_text,
-                            "end_at_utc": end_text,
-                            "timezone_name": p["timezone_name"],
-                        }
-                        if put_if_absent(table, item):
-                            created += 1
-                        cursor += timedelta(minutes=duration)
-            # Withdraw unbooked future slots that no active pattern produces any more
-            # (edited/removed patterns, or legacy duplicate ids). Blackouts are handled
-            # by the blackout endpoint (status BLACKED_OUT).
-            if day not in blackouts:
-                for sid, slot in existing.items():
-                    if sid in desired or slot.get("status") not in ("AVAILABLE", "REMOVED"): continue
-                    if int(slot.get("booked_count", 0)) != 0: continue
-                    if str(slot.get("start_time_utc") or slot.get("start_at_utc") or "") <= now_utc: continue
-                    # Old pattern's unbooked future slots are deleted outright; slots that
-                    # hold patients (booked_count > 0) are never touched.
-                    if _delete_slot(table, sid, ("AVAILABLE", "REMOVED")):
-                        removed += 1
-        # skipped > 0 means local wall times were dropped (DST gap): surface it as a warning.
-        _log_event("materialize_doctor_completed", logging.WARNING if skipped else logging.INFO,
-                   doctor_id=doctor_id, start_date=start_day.isoformat(), days=days,
-                   patterns=len(patterns), blackout_days=len(blackouts), created=created,
-                   restored=restored, removed=removed, dst_wall_times_skipped=skipped)
-        return {"doctor_id":doctor_id,"start_date":start_day.isoformat(),"days":days,
-                "created":created,"restored":restored,"removed":removed,
-                "dst_wall_times_skipped":skipped,"idempotent":True}
+        return materialize_doctor_slots(conn, doctor_id, start_day, days)
     finally:
         conn.close()
 

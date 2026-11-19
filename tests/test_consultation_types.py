@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 for key, value in {
     "AWS_DEFAULT_REGION": "ap-south-1", "AWS_ACCESS_KEY_ID": "test", "AWS_SECRET_ACCESS_KEY": "test",
     "DB_HOST_PARAMETER": "h", "DB_PORT_PARAMETER": "p", "DB_NAME_PARAMETER": "n",
-    "DB_USERNAME_PARAMETER": "u", "DB_SECRET_ARN": "arn", "SLOT_TABLE_NAME": "slots", "ASSETS_BUCKET": "bucket",
+    "DB_USERNAME_PARAMETER": "u", "DB_SECRET_ARN": "arn", "APPOINTMENTS_TABLE_NAME": "appointments", "ASSETS_BUCKET": "bucket",
 }.items():
     os.environ.setdefault(key, value)
 
@@ -50,7 +50,7 @@ class SchemaTests(unittest.TestCase):
         self.assertIn("PRIMARY KEY (doctor_id, consultation_type_id)", sql)
 
     def test_schedules_and_bookings_must_use_a_type_the_doctor_offers(self):
-        for table in ("availability_patterns", "appointments"):
+        for table in ("availability_patterns", "slots"):
             sql = table_sql(table)
             self.assertRegex(sql, r"FOREIGN KEY \(doctor_id, consultation_type_id\)\s+REFERENCES doctor_consultation_types")
 
@@ -68,7 +68,7 @@ class SchemaTests(unittest.TestCase):
 
     def test_tables_are_created_in_dependency_order(self):
         order = [SCHEMA.index("CREATE TABLE IF NOT EXISTS " + t + " (") for t in
-                 ("consultation_types", "doctor_consultation_types", "availability_patterns", "appointments")]
+                 ("consultation_types", "doctor_consultation_types", "availability_patterns", "slots")]
         self.assertEqual(order, sorted(order))
 
 

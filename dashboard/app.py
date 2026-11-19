@@ -63,8 +63,10 @@ def _csrf_valid():
     return bool(supplied and expected and secrets.compare_digest(supplied, expected))
 
 
-def _api_call(path, method="GET", *, token=None, body=None, params=None):
+def _api_call(path, method="GET", *, token=None, body=None, params=None, extra_headers=None):
     headers = {"Accept": "application/json"}
+    if extra_headers:
+        headers.update(extra_headers)
     if token:
         headers["Authorization"] = f"Bearer {token}"
     if body is not None:
@@ -333,7 +335,15 @@ _PATIENT_ROUTES = (
     (re.compile(r"/doctors"), lambda m: "doctors"),
     (re.compile(r"/doctors/(\d+)"), lambda m: f"doctors/{m.group(1)}"),
     (re.compile(r"/doctors/(\d+)/slots"), lambda m: f"doctors/{m.group(1)}/slots"),
+    # Milestone 5: booking, cancellation and refunds
+    (re.compile(r"/appointments"), lambda m: "appointments"),
+    (re.compile(r"/appointments/(\d+)"), lambda m: f"appointments/{m.group(1)}"),
+    (re.compile(r"/appointments/(\d+)/cancel"), lambda m: f"appointments/{m.group(1)}/cancel"),
+    (re.compile(r"/refunds"), lambda m: "patients/me/refunds"),
 )
+
+# Upstream routes (besides the profile) that accept a write, with the one method allowed.
+_PATIENT_WRITES = {"appointments": "POST"}
 
 
 def _local_patient_path(api_path):
@@ -358,18 +368,23 @@ def bff_patient_api(api_path):
     upstream_path = _local_patient_path(api_path)
     if not upstream_path:
         return jsonify({"message": "Patient portal API route is not supported."}), 404
-    # Reads of /doctors* are GET only; only the profile route accepts writes.
-    if upstream_path != "patients/me" and request.method != "GET":
+    # Reads are GET only; writes are allowed on the profile, on booking and on cancel.
+    write_method = "POST" if upstream_path.endswith("/cancel") else _PATIENT_WRITES.get(upstream_path)
+    if upstream_path != "patients/me" and request.method != "GET" and request.method != write_method:
         return jsonify({"message": "Method not allowed."}), 405
     body = request.get_json(silent=True) if request.method not in {"GET", "DELETE"} else None
+    # The client-generated Idempotency-Key must reach the booking Lambda unchanged.
+    extra_headers = {}
+    if request.headers.get("Idempotency-Key"):
+        extra_headers["Idempotency-Key"] = request.headers["Idempotency-Key"]
 
     try:
         upstream = _api_call(upstream_path, request.method, token=session.get("access_token"),
-                             body=body, params=request.args)
+                             body=body, params=request.args, extra_headers=extra_headers)
         if upstream.status_code == 401 and _refresh_access_token():
             upstream = _api_call(upstream_path, request.method,
                                  token=session.get("access_token"), body=body,
-                                 params=request.args)
+                                 params=request.args, extra_headers=extra_headers)
     except requests.RequestException:
         app.logger.exception("Patient API request failed")
         return jsonify({"message": "Unable to reach the MediSlot service. Please try again."}), 502

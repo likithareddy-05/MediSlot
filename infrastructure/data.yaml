@@ -121,8 +121,71 @@ Resources:
 
 
   # ------------------------------------------------------------
-  # DYNAMODB: SLOT COORDINATION
-  # Conditional writes will protect slot capacity from overbooking.
+  # DYNAMODB: APPOINTMENTS (Milestone 5)
+  # Appointments live in DynamoDB; slots live in RDS (the `slots` table).
+  # Partition key appointment_id (32 hex characters). Three indexes:
+  #   PatientIndex (patient_id, start_time_utc)  a patient's appointments
+  #   DoctorIndex  (doctor_id,  start_time_utc)  a doctor's appointments
+  #   SlotIndex    (slot_id)                     every appointment of one slot
+  # Items whose key starts with HOLD# enforce one active appointment per patient per slot;
+  # they have none of the index attributes, so they never appear in the indexes.
+  # ------------------------------------------------------------
+
+  AppointmentsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "medislot-${EnvironmentName}-appointments"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: appointment_id
+          AttributeType: S
+        - AttributeName: patient_id
+          AttributeType: S
+        - AttributeName: doctor_id
+          AttributeType: S
+        - AttributeName: slot_id
+          AttributeType: S
+        - AttributeName: start_time_utc
+          AttributeType: S
+      KeySchema:
+        - AttributeName: appointment_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: PatientIndex
+          KeySchema:
+            - AttributeName: patient_id
+              KeyType: HASH
+            - AttributeName: start_time_utc
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: DoctorIndex
+          KeySchema:
+            - AttributeName: doctor_id
+              KeyType: HASH
+            - AttributeName: start_time_utc
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: SlotIndex
+          KeySchema:
+            - AttributeName: slot_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # ------------------------------------------------------------
+  # DYNAMODB: OLD SLOT TABLE (DEPRECATED, UNUSED since Milestone 5)
+  # Slots moved to RDS. The table and its export are kept only so the deploy does not fail on
+  # a cross-stack ImportValue that is still in use. Once every stack has been redeployed,
+  # this table and the SlotStateTableName output can be deleted.
   # ------------------------------------------------------------
 
   SlotStateTable:
@@ -153,6 +216,48 @@ Resources:
         SSEEnabled: true
       PointInTimeRecoverySpecification:
         PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # ------------------------------------------------------------
+  # DYNAMODB: BOOKING IDEMPOTENCY (Milestone 5)
+  # One item per Idempotency-Key (patient_id#key). The first request stores
+  # IN_PROGRESS, then the final response; a replay returns that response and never
+  # books again. expires_at is Unix epoch seconds for DynamoDB TTL (24 hours).
+  # ------------------------------------------------------------
+
+  IdempotencyTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "medislot-${EnvironmentName}-idempotency"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: idempotency_key
+          AttributeType: S
+      KeySchema:
+        - AttributeName: idempotency_key
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
+      SSESpecification:
+        SSEEnabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # ------------------------------------------------------------
+  # EVENTBRIDGE: BUSINESS EVENTS (Milestone 5)
+  # AppointmentBooked, AppointmentCancelled and SlotSeatFreed are published here
+  # (source medislot.booking). Later milestones attach rules and targets, e.g. the
+  # waitlist promotion consumer for SlotSeatFreed.
+  # ------------------------------------------------------------
+
+  MediSlotEventBus:
+    Type: AWS::Events::EventBus
+    Properties:
+      Name: !Sub "medislot-${EnvironmentName}-events"
       Tags:
         - Key: Environment
           Value: !Ref EnvironmentName
@@ -302,6 +407,54 @@ Resources:
         Project: MediSlot
         Environment: !Ref EnvironmentName
 
+  # ------------------------------------------------------------
+  # BOOKING AND REFUND CONFIGURATION (Milestone 5)
+  # Change these values in Parameter Store to change behaviour; no redeploy is
+  # needed (Lambdas re-read them about once a minute). Tiers are listed from the
+  # longest to the shortest notice. A tier matches when the time left is at least
+  # min_hours, or strictly more than min_hours when "inclusive" is false. The last
+  # tier must start at 0 hours so every cancellation matches a tier.
+  # ------------------------------------------------------------
+
+  RefundPolicyParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub /medislot/${EnvironmentName}/booking/refund-policy
+      Type: String
+      Tier: Standard
+      Value: >-
+        {"currency":"INR","tiers":[
+        {"name":"GT_48H","min_hours":48,"inclusive":false,"percent":100},
+        {"name":"24H_TO_48H","min_hours":24,"inclusive":true,"percent":75},
+        {"name":"6H_TO_24H","min_hours":6,"inclusive":true,"percent":50},
+        {"name":"LT_6H","min_hours":0,"inclusive":true,"percent":0}]}
+      Description: Refund tiers (notice windows and percentages) for patient cancellations
+      Tags:
+        Project: MediSlot
+        Environment: !Ref EnvironmentName
+
+  MaxUpcomingPerDoctorParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub /medislot/${EnvironmentName}/booking/max-upcoming-per-doctor
+      Type: String
+      Value: "3"
+      Description: Most upcoming appointments one patient may hold with the same doctor
+      Tags:
+        Project: MediSlot
+        Environment: !Ref EnvironmentName
+
+  MaxConflictRetriesParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub /medislot/${EnvironmentName}/booking/max-conflict-retries
+      Type: String
+      Value: "6"
+      Description: How many times a booking retries a slot write that lost an optimistic-concurrency race
+      Tags:
+        Project: MediSlot
+        Environment: !Ref EnvironmentName
+
 Outputs:
   DatabaseEndpointAddress:
     Description: Private RDS endpoint hostname.
@@ -331,6 +484,12 @@ Outputs:
     Export:
       Name: !Sub "medislot-${EnvironmentName}-RefreshTokensTableName"
 
+  AppointmentsTableName:
+    Value: !Ref AppointmentsTable
+    Export:
+      Name: !Sub "medislot-${EnvironmentName}-AppointmentsTableName"
+
+  # Deprecated: no Lambda uses the old DynamoDB slot table any more (see SlotStateTable above).
   SlotStateTableName:
     Value: !Ref SlotStateTable
     Export:
@@ -346,3 +505,17 @@ Outputs:
     Export:
       Name: !Sub "medislot-${EnvironmentName}-AssetsBucketName"
 
+  IdempotencyTableName:
+    Value: !Ref IdempotencyTable
+    Export:
+      Name: !Sub "medislot-${EnvironmentName}-IdempotencyTableName"
+
+  EventBusName:
+    Value: !Ref MediSlotEventBus
+    Export:
+      Name: !Sub "medislot-${EnvironmentName}-EventBusName"
+
+  EventBusArn:
+    Value: !GetAtt MediSlotEventBus.Arn
+    Export:
+      Name: !Sub "medislot-${EnvironmentName}-EventBusArn"

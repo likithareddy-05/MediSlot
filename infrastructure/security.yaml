@@ -99,7 +99,7 @@ Resources:
                     - TableName:
                         Fn::ImportValue:
                           !Sub medislot-${EnvironmentName}-RefreshTokensTableName
-              - Sid: ManageDoctorSlotState
+              - Sid: ManageAppointments
                 Effect: Allow
                 Action:
                   - dynamodb:PutItem
@@ -112,12 +112,38 @@ Resources:
                     - arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${TableName}
                     - TableName:
                         Fn::ImportValue:
-                          !Sub medislot-${EnvironmentName}-SlotStateTableName
+                          !Sub medislot-${EnvironmentName}-AppointmentsTableName
                   - !Sub
-                    - arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${TableName}/index/DoctorDateIndex
+                    - arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${TableName}/index/*
                     - TableName:
                         Fn::ImportValue:
-                          !Sub medislot-${EnvironmentName}-SlotStateTableName
+                          !Sub medislot-${EnvironmentName}-AppointmentsTableName
+              - Sid: ManageBookingIdempotency
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                Resource:
+                  - !Sub
+                    - arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${TableName}
+                    - TableName:
+                        Fn::ImportValue:
+                          !Sub medislot-${EnvironmentName}-IdempotencyTableName
+              - Sid: PublishBookingEvents
+                Effect: Allow
+                Action:
+                  - events:PutEvents
+                Resource:
+                  - Fn::ImportValue:
+                      !Sub medislot-${EnvironmentName}-EventBusArn
+              - Sid: ReadBookingConfiguration
+                Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                Resource:
+                  - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/medislot/${EnvironmentName}/booking/*
               - Sid: ManageDoctorProfilePhotos
                 Effect: Allow
                 Action:
@@ -222,6 +248,12 @@ Resources:
                   - lambda:InvokeFunction
                 Resource:
                   - !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:medislot-${EnvironmentName}-doctor-domain
+              - Sid: InvokeBookingDomainLambda
+                Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:medislot-${EnvironmentName}-booking-domain
               - Sid: InvokePatientDomainLambda
                 Effect: Allow
                 Action:

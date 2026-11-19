@@ -29,7 +29,7 @@ button,input,select,textarea{font:inherit;color:inherit}button{cursor:pointer}
 .topbar h1{margin:0;font:800 clamp(28px,4vw,42px)/1.05 var(--head);letter-spacing:-1px}
 .topbar small{display:block;margin-top:6px;color:var(--muted);font-size:15px}
 .topbar::after{content:"";position:absolute;left:32px;right:32px;bottom:0;height:14px;background:repeating-linear-gradient(90deg,var(--ink) 0 1.5px,transparent 1.5px 12px),repeating-linear-gradient(90deg,var(--ink) 0 2px,transparent 2px 60px);background-size:100% 7px,100% 14px;background-repeat:repeat-x;background-position:0 100%,0 100%;opacity:.55}
-.content{max-width:1280px;margin:0 auto;padding:28px 32px 64px}
+.content{max-width:1560px;margin:0 auto;padding:28px 20px 64px}
 /* forms */
 .fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px}.full{grid-column:1/-1}
 .field label{display:block;font-size:13px;font-weight:700;margin-bottom:6px}
@@ -66,14 +66,14 @@ button,input,select,textarea{font:inherit;color:inherit}button{cursor:pointer}
 .slot .slot-actions{margin-top:10px}.btn.small[disabled]{cursor:not-allowed}
 small.note{display:block;margin-top:4px;color:var(--muted)}
 /* schedule: week view */
-.week-grid{display:grid;grid-template-columns:repeat(7,minmax(170px,1fr));gap:10px;margin-top:16px;overflow-x:auto;padding-bottom:6px}
-.day-col{background:#fff;border:1.5px solid var(--line);border-radius:12px;padding:10px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.week-grid{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:8px;margin-top:16px;padding-bottom:6px}
+.day-col{background:#fff;border:1.5px solid var(--line);border-radius:12px;padding:8px;display:flex;flex-direction:column;gap:6px;min-width:0}
 .day-col.today{border-color:var(--teal);box-shadow:0 0 0 3px rgba(15,118,110,.15)}.day-col.blackout{background:#fbf3f2}
 .day-head{display:flex;justify-content:space-between;align-items:baseline;gap:6px;border-bottom:1px solid var(--line);padding-bottom:6px;font:700 14px var(--head)}
 .day-head small{color:var(--muted);font:600 12px var(--body)}
 .day-empty{color:var(--muted);font-size:13px;padding:6px 2px}
-.wslot{border:1.5px solid var(--line);border-left:5px solid var(--teal);border-radius:4px 10px 10px 4px;padding:8px 10px;background:var(--paper);font-size:13px}
-.wslot strong{display:block;font:700 14px var(--head)}.wslot .meta{color:var(--muted)}
+.wslot{border:1.5px solid var(--line);border-left:5px solid var(--teal);border-radius:4px 10px 10px 4px;padding:6px 7px;background:var(--paper);font-size:12px;overflow-wrap:anywhere;min-width:0}
+.wslot strong{display:block;font:700 13px var(--head)}.wslot .meta{color:var(--muted)}
 .wslot.full{border-left-color:var(--signal)}.wslot.cancelled{border-left-color:var(--red);background:#fbf3f2}.wslot.cancelled strong{text-decoration:line-through;color:var(--muted)}
 .wslot details{margin-top:4px}.wslot summary{cursor:pointer;color:var(--teal-d);font-weight:600}.wslot .slot-actions{margin-top:6px}
 /* profile */
@@ -86,6 +86,7 @@ small.note{display:block;margin-top:4px;color:var(--muted)}
 .login-card h1{font:800 32px/1.1 var(--head);letter-spacing:-.8px;margin:0 0 8px}.login-card p{color:var(--muted)}
 .login-card form .field{margin-bottom:14px}.login-card .fields .field{margin:0}
 .login-error{color:var(--red);font-weight:600;margin-top:12px;white-space:pre-line}
+@media(max-width:900px){.week-grid{grid-template-columns:1fr}}
 @media(max-width:700px){.sidebar{padding:0 14px;gap:14px}.topbar,.content{padding-left:16px;padding-right:16px}.topbar::after{left:16px;right:16px}.card{padding:18px}}
 @media(prefers-reduced-motion:reduce){*{transition:none!important}}
 /* patient portal */
@@ -130,7 +131,7 @@ small.note{display:block;margin-top:4px;color:var(--muted)}
 
 <div class="shell hidden" id="appShell">
 <aside class="sidebar"><div class="brand"><span class="brand-mark">M</span> MediSlot</div><div><nav class="nav" aria-label="Patient portal">
-<button class="active" data-panel="search">Find Doctors</button><button data-panel="slots">Slot Browser</button><button data-panel="profile">My Profile</button>
+<button class="active" data-panel="search">Find Doctors</button><button data-panel="slots">Slot Browser</button><button data-panel="appointments">My Appointments</button><button data-panel="refunds">Refunds</button><button data-panel="profile">My Profile</button>
 </nav></div></aside>
 <main class="main"><header class="topbar"><div><h1 id="pageTitle">Find a doctor</h1><small id="welcome">Search by name, hospital, specialisation or city</small></div>
 <div class="filebox"><button class="btn danger" id="logoutButton">Logout</button></div></header>
@@ -158,15 +159,28 @@ small.note{display:block;margin-top:4px;color:var(--muted)}
 <div class="section-head"><div><h2 id="slotsTitle">Slot browser</h2><p id="slotsSubtitle">Pick a doctor from the search results to see their available slots.</p></div></div>
 <div id="slotsEmpty" class="empty">No doctor selected yet. <button class="btn small" type="button" data-go="search">Find a doctor</button></div>
 <div id="slotsBody" class="hidden">
-<div class="hint">Booking opens in the next release. For now you can see exactly which slots are free and how many seats are left.</div>
+<div class="hint">Pick a slot and press Book. Each booking takes one seat. Cancelling later refunds part of the fee depending on how much notice you give.</div>
 <div class="card"><div class="filters">
 <div class="field"><label for="slotType">Consultation type</label><select id="slotType"><option value="">All types</option></select></div>
-<div class="field"><label for="slotFrom">Starting from</label><input id="slotFrom" type="date"></div>
+<div class="field"><label for="slotFrom">Starting from</label><input id="slotFrom" type="date" aria-describedby="slotFromHint"><small class="note" id="slotFromHint">Earlier dates are not available.</small></div>
 <div class="field"><label>&nbsp;</label><div class="filebox"><button class="btn secondary" id="prevDays" type="button" aria-label="Previous 7 days">◀ Previous 7 days</button><button class="btn secondary" id="nextDays" type="button" aria-label="Next 7 days">Next 7 days ▶</button></div></div>
 </div>
 <div id="slotsSummary" class="status" style="margin-top:16px"></div>
 <div id="slotGrid" class="week-grid"></div></div>
 </div>
+</section>
+
+<section class="panel" id="panel-appointments">
+<div class="section-head"><div><h2>My appointments</h2><p>Your upcoming and past bookings. Cancel one to see the refund you will receive.</p></div></div>
+<div class="card"><div class="filters"><div class="field"><label for="apptFilter">Show</label><select id="apptFilter"><option value="upcoming">Upcoming</option><option value="">All</option><option value="COMPLETED">Completed</option><option value="CANCELLED_BY_PATIENT">Cancelled by me</option><option value="CANCELLED_BY_DOCTOR">Cancelled by doctor</option><option value="NO_SHOW">No-show</option></select></div></div>
+<div id="apptSummary" class="status" style="margin-top:12px"></div>
+<div class="table-wrap"><table><thead><tr><th>When</th><th>Doctor</th><th>Consultation</th><th>Fee</th><th>Status</th><th>Refund</th><th></th></tr></thead><tbody id="apptBody"></tbody></table></div></div>
+</section>
+
+<section class="panel" id="panel-refunds">
+<div class="section-head"><div><h2>Refunds</h2><p id="refundNote">Refunds are recorded in a ledger only.</p></div></div>
+<div class="card"><div id="refundSummary" class="status"></div>
+<div class="table-wrap"><table><thead><tr><th>Recorded</th><th>Doctor</th><th>Reason</th><th>Fee</th><th>Refund</th><th>Deducted</th></tr></thead><tbody id="refundBody"></tbody></table></div></div>
 </section>
 
 <section class="panel" id="panel-profile">
@@ -199,28 +213,30 @@ const PROFILE_FIELDS=['first_name','last_name','phone','date_of_birth','gender',
 function toast(msg){const t=$('#toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),3800)}
 function setStatus(msg,kind=''){const el=$('#connectionStatus');el.textContent=msg;el.className='status '+kind}
 const todayISO=()=>new Intl.DateTimeFormat('en-CA').format(new Date());
+function applyDateFloor(){const t=todayISO(),el=$('#slotFrom');el.min=t;if(el.value&&el.value<t)el.value=t;$('#prevDays').disabled=(el.value||t)<=t}
 function addDays(iso,n){const d=new Date(iso+'T00:00:00Z');d.setUTCDate(d.getUTCDate()+n);return d.toISOString().slice(0,10)}
 function fmtDay(iso,opts){return new Date(iso+'T00:00:00Z').toLocaleDateString([],{timeZone:'UTC',...opts})}
 const money=v=>'₹'+Number(v).toLocaleString('en-IN',{maximumFractionDigits:2});
 const doctorName=d=>`Dr. ${d.first_name} ${d.last_name}`;
 const initials=d=>((d.first_name||'?')[0]+(d.last_name||'')[0]).toUpperCase();
 
-async function api(path,method='GET',body){
-  const opts={method,credentials:'same-origin',headers:{Accept:'application/json','X-CSRF-Token':state.csrf}};
+async function api(path,method='GET',body,extraHeaders){
+  const opts={method,credentials:'same-origin',headers:{Accept:'application/json','X-CSRF-Token':state.csrf,...(extraHeaders||{})}};
   if(body!==undefined){opts.headers['Content-Type']='application/json';opts.body=JSON.stringify(body)}
   const res=await fetch('/bff/patient/api'+path,opts);let data={};try{data=await res.json()}catch{}
   if(!res.ok){
     if(res.status===401)showLogin('Your session expired. Please sign in again.');
     if(res.status===403&&/Patient access/.test(data.message||''))location.href='/';
-    const err=new Error(data.message||`Request failed (${res.status})`);err.errors=data.errors;err.status=res.status;throw err}
+    const err=new Error(data.message||`Request failed (${res.status})`);err.errors=data.errors;err.status=res.status;err.code=data.code;throw err}
   return data}
 
 /* ---------- navigation ---------- */
 function showPanel(name){
+  if(name==='appointments')loadAppointments();if(name==='refunds')loadRefunds();
   $$('.panel').forEach(p=>p.classList.toggle('active',p.id==='panel-'+name));
   const nav=name==='doctor'?'search':name;
   $$('.nav button').forEach(b=>b.classList.toggle('active',b.dataset.panel===nav));
-  $('#pageTitle').textContent={search:'Find a doctor',doctor:'Doctor profile',slots:'Slot browser',profile:'My profile'}[name]||'MediSlot';
+  $('#pageTitle').textContent={search:'Find a doctor',doctor:'Doctor profile',slots:'Slot browser',appointments:'My appointments',refunds:'Refunds',profile:'My profile'}[name]||'MediSlot';
 }
 $$('.nav button').forEach(b=>b.addEventListener('click',()=>showPanel(b.dataset.panel)));
 $$('[data-go]').forEach(b=>b.addEventListener('click',()=>showPanel(b.dataset.go)));
@@ -292,14 +308,14 @@ async function openSlots(id){
     $('#slotsTitle').textContent=`Slots · ${doctorName(d)}`;
     $('#slotsSubtitle').textContent=`${d.specialization} · ${d.hospital_name}, ${d.city}`;
     $('#slotType').innerHTML='<option value="">All types</option>'+(d.consultation_types||[]).map(t=>`<option value="${t.consultation_type_id}">${esc(t.consultation_name)} (${esc(t.duration_minutes)} min) · ${money(t.fee)}</option>`).join('');
-    $('#slotFrom').value=todayISO();
+    $('#slotFrom').value=todayISO();applyDateFloor();
     $('#slotsEmpty').classList.add('hidden');$('#slotsBody').classList.remove('hidden');
     showPanel('slots');await loadSlots();
   }catch(e){toast(e.message)}
 }
 async function loadSlots(){
   if(!state.doctorId)return;
-  let from=$('#slotFrom').value||todayISO();if(from<todayISO())from=todayISO();$('#slotFrom').value=from;
+  let from=$('#slotFrom').value||todayISO();if(from<todayISO())from=todayISO();$('#slotFrom').value=from;applyDateFloor();
   const to=addDays(from,6),type=$('#slotType').value;
   const params=new URLSearchParams({from,to});if(type)params.set('consultationTypeId',type);
   $('#prevDays').disabled=from<=todayISO();
@@ -321,7 +337,74 @@ function slotChip(s){
   const full=s.free_seats<=0;
   return `<div class="wslot ${full?'full':''}"><strong>${esc(fmt(s.start_time_utc))} – ${esc(fmt(s.end_time_utc))}</strong>
     <div class="meta">${esc(s.consultation_name)} · ${money(s.fee)}</div>
-    <div class="meta"><span class="pill ${full?'off':''}">${full?'Full':esc(s.free_seats)+' of '+esc(s.capacity)+' free'}</span></div></div>`;
+    <div class="meta"><span class="pill ${full?'off':''}">${full?'Full':esc(s.free_seats)+' of '+esc(s.capacity)+' free'}</span></div>
+    ${full?'':`<div class="slot-actions"><button class="btn small" type="button" data-book="${esc(s.slot_id)}">Book</button></div>`}</div>`;
+}
+/* ---------- booking ---------- */
+/* One Idempotency-Key per slot attempt. It is reused if the patient presses Book again after a
+   timeout, so a retry can never create a second appointment; it is discarded once the request is settled. */
+const bookingKeys={};
+const newKey=()=>(crypto.randomUUID?crypto.randomUUID():'k-'+Date.now()+'-'+Math.random().toString(16).slice(2));
+const BOOK_MESSAGES={SLOT_FULL:'Sorry, that slot has just filled up.',BOOKING_CONTENTION:'That slot is very busy right now. Please try again in a moment.',
+  ALREADY_BOOKED:'You already have an appointment in this slot.',DOCTOR_LIMIT_REACHED:'You already have 3 upcoming appointments with this doctor.',
+  SLOT_IN_PAST:'That slot has already started.',SLOT_CANCELLED:'The doctor cancelled that slot.',SLOT_UNAVAILABLE:'That slot is no longer available.',
+  PROFILE_REQUIRED:'Please complete your profile before booking.'};
+async function bookSlot(slotId,btn){
+  const key=bookingKeys[slotId]||(bookingKeys[slotId]=newKey());
+  btn.disabled=true;
+  try{
+    const a=(await api('/appointments','POST',{slot_id:slotId},{'Idempotency-Key':key})).appointment;
+    delete bookingKeys[slotId];
+    toast(`Booked with ${a.doctor_name} for ${new Date(a.start_time_utc).toLocaleString()}`);
+    await loadSlots();
+  }catch(e){
+    if(e.status&&e.status<500&&e.code!=='REQUEST_IN_PROGRESS')delete bookingKeys[slotId];
+    if(e.code==='PROFILE_REQUIRED')showPanel('profile');
+    toast(BOOK_MESSAGES[e.code]||e.message);
+    if(e.status===409)await loadSlots();
+  }finally{btn.disabled=false}
+}
+document.addEventListener('click',e=>{const b=e.target.closest('[data-book]');if(b)bookSlot(b.dataset.book,b)});
+
+/* ---------- appointments ---------- */
+const STATUS_LABEL={CONFIRMED:'Confirmed',COMPLETED:'Completed',NO_SHOW:'No-show',CANCELLED_BY_PATIENT:'Cancelled by you',CANCELLED_BY_DOCTOR:'Cancelled by doctor'};
+async function loadAppointments(){
+  const f=$('#apptFilter').value,params=new URLSearchParams({page_size:50});
+  if(f==='upcoming')params.set('upcoming','true');else if(f)params.set('status',f);
+  try{
+    const d=await api('/appointments?'+params.toString());
+    $('#apptSummary').textContent=d.pagination.total?`${d.pagination.total} appointment(s)`:'No appointments to show.';
+    $('#apptBody').innerHTML=d.appointments.map(a=>`<tr><td>${esc(new Date(a.start_time_utc).toLocaleString([],{dateStyle:'medium',timeStyle:'short'}))}</td>
+      <td>Dr. ${esc(a.doctor_name)}</td><td>${esc(a.consultation_name)}</td><td>${money(a.fee)}</td>
+      <td><span class="pill ${a.status==='CONFIRMED'||a.status==='COMPLETED'?'':'off'}">${esc(STATUS_LABEL[a.status]||a.status)}</span></td>
+      <td>${a.refund?money(a.refund.amount)+' ('+esc(a.refund.percent)+'%)':'—'}</td>
+      <td>${a.status==='CONFIRMED'&&new Date(a.start_time_utc)>new Date()?`<button class="btn danger small" type="button" data-cancel="${a.appointment_id}">Cancel</button>`:''}</td></tr>`).join('');
+  }catch(e){$('#apptSummary').textContent=e.message;$('#apptSummary').className='status err'}
+}
+async function cancelAppointment(id,btn){
+  btn.disabled=true;
+  try{
+    const a=(await api('/appointments/'+id)).appointment;const p=a.cancellation_preview;
+    const msg=p?`Cancel this appointment?\n\nYou will be refunded ${money(p.refund_amount)} (${p.refund_percent}% of ${money(a.fee)}).`:'Cancel this appointment?';
+    if(!confirm(msg)){btn.disabled=false;return}
+    const r=await api(`/appointments/${id}/cancel`,'POST',{});
+    const rf=r.appointment&&r.appointment.refund;toast(rf?`Cancelled. Refund recorded: ${money(rf.amount)} (${rf.percent}%)`:'Appointment cancelled.');
+    await loadAppointments();
+  }catch(e){toast(e.message);btn.disabled=false}
+}
+document.addEventListener('click',e=>{const b=e.target.closest('[data-cancel]');if(b)cancelAppointment(b.dataset.cancel,b)});
+$('#apptFilter').onchange=loadAppointments;
+
+/* ---------- refunds ---------- */
+const TRIGGER_LABEL={PATIENT_CANCELLATION:'You cancelled',DOCTOR_CANCELLATION:'Doctor cancelled',NO_SHOW:'No-show'};
+async function loadRefunds(){
+  try{
+    const d=await api('/refunds?page_size=50');
+    $('#refundNote').textContent=d.note||'';
+    $('#refundSummary').textContent=`Total refunded: ${money(d.total_refunded)}`;
+    $('#refundBody').innerHTML=d.refunds.length?d.refunds.map(r=>`<tr><td>${esc(new Date(r.recorded_at).toLocaleString([],{dateStyle:'medium',timeStyle:'short'}))}</td>
+      <td>Dr. ${esc(r.doctor_name)}</td><td>${esc(TRIGGER_LABEL[r.trigger]||r.trigger)} · ${esc(r.percent)}%</td><td>${money(r.fee)}</td><td>${money(r.refund_amount)}</td><td>${money(r.deduction)}</td></tr>`).join(''):'<tr><td colspan="6" class="muted">No refunds yet.</td></tr>';
+  }catch(e){$('#refundSummary').textContent=e.message;$('#refundSummary').className='status err'}
 }
 $('#slotType').onchange=loadSlots;$('#slotFrom').onchange=loadSlots;
 $('#prevDays').onclick=()=>{$('#slotFrom').value=addDays($('#slotFrom').value||todayISO(),-7);loadSlots()};

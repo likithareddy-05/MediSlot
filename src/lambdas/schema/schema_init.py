@@ -32,6 +32,32 @@ ADDITIVE_INDEXES = [
 ]
 
 
+def retire_rds_appointments(connection, database):
+    """Milestone 5: appointments now live in DynamoDB, not in MySQL.
+
+    A database created by Milestone 3 or 4 still has an `appointments` table. If it is
+    empty (nothing could be booked before this milestone) it is dropped. If it somehow
+    holds rows it is left alone and a warning is logged, so no data is ever lost; those
+    rows must be copied into the DynamoDB table by hand before the table is removed.
+    """
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT 1 FROM information_schema.tables WHERE table_schema = %s AND table_name = 'appointments'",
+            (database,),
+        )
+        if not cursor.fetchone():
+            return []
+        cursor.execute("SELECT COUNT(*) FROM appointments")
+        rows = cursor.fetchone()[0]
+        if rows:
+            logger.warning("Legacy MySQL appointments table holds %s rows; leaving it in place. "
+                           "Copy them to the DynamoDB appointments table, then drop it.", rows)
+            return []
+        cursor.execute("DROP TABLE appointments")
+        logger.info("Dropped the empty legacy MySQL appointments table (appointments now live in DynamoDB)")
+        return ["appointments table retired"]
+
+
 def apply_additive_migrations(connection, database):
     """Add the Milestone 4 columns and indexes to an older database. Returns what was applied."""
     applied = []
@@ -180,6 +206,7 @@ def lambda_handler(event, context):
                 cursor.execute(statement)
 
         migrated = apply_additive_migrations(connection, database)
+        migrated += retire_rds_appointments(connection, database)
         if migrated:
             logger.info("Applied additive migrations: %s", migrated)
 
@@ -189,14 +216,14 @@ def lambda_handler(event, context):
                 SELECT TABLE_NAME
                 FROM information_schema.tables
                 WHERE TABLE_SCHEMA = %s
-                  AND TABLE_NAME IN ('users', 'patients', 'hospitals', 'specializations', 'doctors', 'consultation_types', 'doctor_consultation_types', 'availability_patterns', 'doctor_blackouts', 'appointments')
+                  AND TABLE_NAME IN ('users', 'patients', 'hospitals', 'specializations', 'doctors', 'consultation_types', 'doctor_consultation_types', 'availability_patterns', 'doctor_blackouts', 'slots', 'refund_ledger')
                 ORDER BY TABLE_NAME
                 """,
                 (database,),
             )
             tables = [row[0] for row in cursor.fetchall()]
 
-        expected = {"users", "patients", "hospitals", "specializations", "doctors", "consultation_types", "doctor_consultation_types", "availability_patterns", "doctor_blackouts", "appointments"}
+        expected = {"users", "patients", "hospitals", "specializations", "doctors", "consultation_types", "doctor_consultation_types", "availability_patterns", "doctor_blackouts", "slots", "refund_ledger"}
         missing = sorted(expected - set(tables))
 
         if missing:

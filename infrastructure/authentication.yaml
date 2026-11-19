@@ -37,6 +37,9 @@ Parameters:
   PatientDomainLambdaS3Key:
     Type: String
     Description: S3 key for the patient-domain Lambda package (patient profile, doctor search, slot availability)
+  BookingDomainLambdaS3Key:
+    Type: String
+    Description: S3 key for the booking-domain Lambda package (booking, cancellation, refunds)
 
   LogRetentionInDays:
     Type: Number
@@ -145,7 +148,7 @@ Resources:
           JWT_SIGNING_SECRET_PARAMETER:
             Fn::Sub: /medislot/${EnvironmentName}/auth/jwt-signing-secret
           JWT_ISSUER: medislot
-          ROLE_ROUTE_RULES: '{"GET /doctor/*":"DOCTOR","POST /doctor/*":"DOCTOR","PUT /doctor/*":"DOCTOR","PATCH /doctor/*":"DOCTOR","DELETE /doctor/*":"DOCTOR","GET /doctors/me":"DOCTOR","GET /doctors/me/*":"DOCTOR","POST /doctors/*":"DOCTOR","PUT /doctors/*":"DOCTOR","PATCH /doctors/*":"DOCTOR","DELETE /doctors/*":"DOCTOR","GET /doctors":["DOCTOR","PATIENT"],"GET /doctors/*":["DOCTOR","PATIENT"],"GET /patient/*":"PATIENT","POST /patient/*":"PATIENT","PUT /patient/*":"PATIENT","PATCH /patient/*":"PATIENT","DELETE /patient/*":"PATIENT","GET /patients/*":"PATIENT","POST /patients/*":"PATIENT","PUT /patients/*":"PATIENT","PATCH /patients/*":"PATIENT","DELETE /patients/*":"PATIENT","POST /auth/logout":["DOCTOR","PATIENT"]}'
+          ROLE_ROUTE_RULES: '{"GET /doctor/*":"DOCTOR","POST /doctor/*":"DOCTOR","PUT /doctor/*":"DOCTOR","PATCH /doctor/*":"DOCTOR","DELETE /doctor/*":"DOCTOR","GET /doctors/me":"DOCTOR","GET /doctors/me/*":"DOCTOR","POST /doctors/*":"DOCTOR","PUT /doctors/*":"DOCTOR","PATCH /doctors/*":"DOCTOR","DELETE /doctors/*":"DOCTOR","GET /doctors":["DOCTOR","PATIENT"],"GET /doctors/*":["DOCTOR","PATIENT"],"GET /patient/*":"PATIENT","POST /patient/*":"PATIENT","PUT /patient/*":"PATIENT","PATCH /patient/*":"PATIENT","DELETE /patient/*":"PATIENT","GET /appointments":"PATIENT","POST /appointments":"PATIENT","GET /appointments/*":"PATIENT","POST /appointments/*":"PATIENT","GET /patients/*":"PATIENT","POST /patients/*":"PATIENT","PUT /patients/*":"PATIENT","PATCH /patients/*":"PATIENT","DELETE /patients/*":"PATIENT","POST /auth/logout":["DOCTOR","PATIENT"]}'
 
   # ---------------------------------------------------------
   # AUTHENTICATED ACCOUNT DETAILS LAMBDA
@@ -423,13 +426,17 @@ Resources:
           DB_SECRET_ARN:
             Fn::ImportValue:
               Fn::Sub: medislot-${EnvironmentName}-DatabaseSecretArn
-          SLOT_TABLE_NAME:
+          APPOINTMENTS_TABLE_NAME:
             Fn::ImportValue:
-              Fn::Sub: medislot-${EnvironmentName}-SlotStateTableName
+              Fn::Sub: medislot-${EnvironmentName}-AppointmentsTableName
           ASSETS_BUCKET:
             Fn::ImportValue:
               Fn::Sub: medislot-${EnvironmentName}-AssetsBucketName
           MATERIALIZER_FUNCTION_NAME: !Sub medislot-${EnvironmentName}-slot-materializer
+          ENVIRONMENT_NAME: !Ref EnvironmentName
+          EVENT_BUS_NAME:
+            Fn::ImportValue:
+              Fn::Sub: medislot-${EnvironmentName}-EventBusName
 
   DoctorsRootResource:
     Type: AWS::ApiGateway::Resource
@@ -965,9 +972,6 @@ Resources:
           DB_SECRET_ARN:
             Fn::ImportValue:
               Fn::Sub: medislot-${EnvironmentName}-DatabaseSecretArn
-          SLOT_TABLE_NAME:
-            Fn::ImportValue:
-              Fn::Sub: medislot-${EnvironmentName}-SlotStateTableName
 
   SlotMaterializerSchedule:
     Type: AWS::Events::Rule
@@ -1059,9 +1063,9 @@ Resources:
           DB_SECRET_ARN:
             Fn::ImportValue:
               Fn::Sub: medislot-${EnvironmentName}-DatabaseSecretArn
-          SLOT_TABLE_NAME:
+          APPOINTMENTS_TABLE_NAME:
             Fn::ImportValue:
-              Fn::Sub: medislot-${EnvironmentName}-SlotStateTableName
+              Fn::Sub: medislot-${EnvironmentName}-AppointmentsTableName
           ASSETS_BUCKET:
             Fn::ImportValue:
               Fn::Sub: medislot-${EnvironmentName}-AssetsBucketName
@@ -1249,6 +1253,201 @@ Resources:
             - arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FunctionArn}/invocations
             - FunctionArn: !GetAtt PatientDomainFunction.Arn
 
+  # ---------------------------------------------------------
+  # Milestone 5: Booking engine
+  #   POST /appointments                     book a seat (Idempotency-Key header required)
+  #   GET  /appointments, /appointments/{id} the caller's appointments
+  #   POST /appointments/{id}/cancel         cancel and refund by tier
+  #   GET  /patients/me/refunds              refund ledger for the caller
+  # ---------------------------------------------------------
+  BookingDomainFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub medislot-${EnvironmentName}-booking-domain
+      Description: Booking engine with optimistic concurrency, idempotency, cancellation and refunds.
+      Runtime: python3.12
+      Handler: booking_domain.lambda_handler
+      Role:
+        Fn::ImportValue:
+          Fn::Sub: medislot-${EnvironmentName}-AuthLambdaRoleArn
+      Code:
+        S3Bucket: !Ref LambdaArtifactBucket
+        S3Key: !Ref BookingDomainLambdaS3Key
+      Timeout: 30
+      LoggingConfig:
+        LogGroup: !Ref BookingDomainLogGroup
+      MemorySize: 512
+      VpcConfig:
+        SecurityGroupIds:
+          - Fn::ImportValue:
+              Fn::Sub: medislot-${EnvironmentName}-LambdaSecurityGroupId
+        SubnetIds:
+          - Fn::ImportValue:
+              Fn::Sub: medislot-${EnvironmentName}-PrivateSubnetAId
+          - Fn::ImportValue:
+              Fn::Sub: medislot-${EnvironmentName}-PrivateSubnetBId
+      Environment:
+        Variables:
+          DB_HOST_PARAMETER: !Sub /medislot/${EnvironmentName}/database/host
+          DB_PORT_PARAMETER: !Sub /medislot/${EnvironmentName}/database/port
+          DB_NAME_PARAMETER: !Sub /medislot/${EnvironmentName}/database/name
+          DB_USERNAME_PARAMETER: !Sub /medislot/${EnvironmentName}/database/username
+          DB_SECRET_ARN:
+            Fn::ImportValue:
+              Fn::Sub: medislot-${EnvironmentName}-DatabaseSecretArn
+          APPOINTMENTS_TABLE_NAME:
+            Fn::ImportValue:
+              Fn::Sub: medislot-${EnvironmentName}-AppointmentsTableName
+          IDEMPOTENCY_TABLE_NAME:
+            Fn::ImportValue:
+              Fn::Sub: medislot-${EnvironmentName}-IdempotencyTableName
+          EVENT_BUS_NAME:
+            Fn::ImportValue:
+              Fn::Sub: medislot-${EnvironmentName}-EventBusName
+          ENVIRONMENT_NAME: !Ref EnvironmentName
+          REFUND_POLICY_PARAMETER: !Sub /medislot/${EnvironmentName}/booking/refund-policy
+          MAX_UPCOMING_PARAMETER: !Sub /medislot/${EnvironmentName}/booking/max-upcoming-per-doctor
+          MAX_RETRIES_PARAMETER: !Sub /medislot/${EnvironmentName}/booking/max-conflict-retries
+
+  AppointmentsRootResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref MediSlotRestApi
+      ParentId: !GetAtt MediSlotRestApi.RootResourceId
+      PathPart: "appointments"
+
+  AppointmentIdResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref MediSlotRestApi
+      ParentId: !Ref AppointmentsRootResource
+      PathPart: "{appointmentId}"
+
+  AppointmentCancelResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref MediSlotRestApi
+      ParentId: !Ref AppointmentIdResource
+      PathPart: "cancel"
+
+  PatientsMeRefundsResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref MediSlotRestApi
+      ParentId: !Ref PatientsMeResource
+      PathPart: "refunds"
+
+  AppointmentsGetMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref MediSlotRestApi
+      ResourceId: !Ref AppointmentsRootResource
+      HttpMethod: GET
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref JwtAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Credentials:
+          Fn::ImportValue:
+            Fn::Sub: medislot-${EnvironmentName}-ApiGatewayInvokeLambdaRoleArn
+        Uri:
+          Fn::Sub:
+            - arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FunctionArn}/invocations
+            - FunctionArn: !GetAtt BookingDomainFunction.Arn
+
+  AppointmentsPostMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref MediSlotRestApi
+      ResourceId: !Ref AppointmentsRootResource
+      HttpMethod: POST
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref JwtAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Credentials:
+          Fn::ImportValue:
+            Fn::Sub: medislot-${EnvironmentName}-ApiGatewayInvokeLambdaRoleArn
+        Uri:
+          Fn::Sub:
+            - arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FunctionArn}/invocations
+            - FunctionArn: !GetAtt BookingDomainFunction.Arn
+
+  AppointmentIdGetMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref MediSlotRestApi
+      ResourceId: !Ref AppointmentIdResource
+      HttpMethod: GET
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref JwtAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Credentials:
+          Fn::ImportValue:
+            Fn::Sub: medislot-${EnvironmentName}-ApiGatewayInvokeLambdaRoleArn
+        Uri:
+          Fn::Sub:
+            - arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FunctionArn}/invocations
+            - FunctionArn: !GetAtt BookingDomainFunction.Arn
+
+  AppointmentCancelPostMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref MediSlotRestApi
+      ResourceId: !Ref AppointmentCancelResource
+      HttpMethod: POST
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref JwtAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Credentials:
+          Fn::ImportValue:
+            Fn::Sub: medislot-${EnvironmentName}-ApiGatewayInvokeLambdaRoleArn
+        Uri:
+          Fn::Sub:
+            - arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FunctionArn}/invocations
+            - FunctionArn: !GetAtt BookingDomainFunction.Arn
+
+  PatientsMeRefundsGetMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref MediSlotRestApi
+      ResourceId: !Ref PatientsMeRefundsResource
+      HttpMethod: GET
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref JwtAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Credentials:
+          Fn::ImportValue:
+            Fn::Sub: medislot-${EnvironmentName}-ApiGatewayInvokeLambdaRoleArn
+        Uri:
+          Fn::Sub:
+            - arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FunctionArn}/invocations
+            - FunctionArn: !GetAtt BookingDomainFunction.Arn
+
+  BookingDomainInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt BookingDomainFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${MediSlotRestApi}/*/*/appointments*
+
+  BookingDomainRefundsInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt BookingDomainFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${MediSlotRestApi}/*/GET/patients/me/refunds
+
   PatientDomainInvokePermission:
     Type: AWS::Lambda::Permission
     Properties:
@@ -1266,7 +1465,7 @@ Resources:
       SourceArn: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${MediSlotRestApi}/*/GET/doctors*
 
   # A new deployment id is needed so route changes (here: removal of /auth/doctors/*) are published to the stage.
-  ApiDeploymentMilestone4Patient:
+  ApiDeploymentMilestone5Booking:
     Type: AWS::ApiGateway::Deployment
     DependsOn:
       - RegisterMethod
@@ -1303,15 +1502,20 @@ Resources:
       - DoctorsSearchGetMethod
       - DoctorIdGetMethod
       - DoctorIdSlotsGetMethod
+      - AppointmentsGetMethod
+      - AppointmentsPostMethod
+      - AppointmentIdGetMethod
+      - AppointmentCancelPostMethod
+      - PatientsMeRefundsGetMethod
     Properties:
       RestApiId: !Ref MediSlotRestApi
-      Description: !Sub MediSlot ${EnvironmentName} explicit authentication, doctor and patient API routes
+      Description: !Sub MediSlot ${EnvironmentName} explicit authentication, doctor, patient and booking API routes
 
   ApiStage:
     Type: AWS::ApiGateway::Stage
     Properties:
       RestApiId: !Ref MediSlotRestApi
-      DeploymentId: !Ref ApiDeploymentMilestone4Patient
+      DeploymentId: !Ref ApiDeploymentMilestone5Booking
       StageName: !Ref EnvironmentName
       Description: !Sub MediSlot ${EnvironmentName} stage
       AccessLogSetting:
@@ -1365,6 +1569,12 @@ Resources:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: !Sub /medislot/${EnvironmentName}/lambda/patient-domain
+      RetentionInDays: !Ref LogRetentionInDays
+
+  BookingDomainLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /medislot/${EnvironmentName}/lambda/booking-domain
       RetentionInDays: !Ref LogRetentionInDays
 
   SlotMaterializerLogGroup:
@@ -1487,6 +1697,28 @@ Resources:
       Dimensions:
         - Name: FunctionName
           Value: !Ref PatientDomainFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        Fn::If:
+          - HasAlarmEmail
+          - [!Ref AlarmTopic]
+          - !Ref AWS::NoValue
+
+  BookingDomainErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub medislot-${EnvironmentName}-booking-domain-errors
+      AlarmDescription: "booking-domain Lambda returned an error. Check /medislot/<env>/lambda/booking-domain."
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref BookingDomainFunction
       Statistic: Sum
       Period: 300
       EvaluationPeriods: 1

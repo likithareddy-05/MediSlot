@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 for key, value in {
     "AWS_DEFAULT_REGION": "ap-south-1", "AWS_ACCESS_KEY_ID": "test", "AWS_SECRET_ACCESS_KEY": "test",
     "DB_HOST_PARAMETER": "h", "DB_PORT_PARAMETER": "p", "DB_NAME_PARAMETER": "n",
-    "DB_USERNAME_PARAMETER": "u", "DB_SECRET_ARN": "arn", "SLOT_TABLE_NAME": "slots", "ASSETS_BUCKET": "bucket",
+    "DB_USERNAME_PARAMETER": "u", "DB_SECRET_ARN": "arn", "APPOINTMENTS_TABLE_NAME": "appointments", "ASSETS_BUCKET": "bucket",
     "JWT_SIGNING_SECRET_PARAMETER": "jwt", "REFRESH_TOKENS_TABLE": "rt", "ACCESS_TOKEN_TTL_PARAMETER": "a",
     "REFRESH_TOKEN_TTL_PARAMETER": "r", "BCRYPT_WORK_FACTOR_PARAMETER": "b",
 }.items():
@@ -40,7 +40,7 @@ def seed_rows(table):
 
 class SchemaTests(unittest.TestCase):
     def test_removed_tables_are_gone(self):
-        self.assertNotIn("refund_ledger", SCHEMA)
+        self.assertIn("refund_ledger", SCHEMA)  # reintroduced in Milestone 5
         self.assertNotIn("doctor_profile_assets", SCHEMA)
 
     def test_sample_data_with_unique_ids_and_names(self):

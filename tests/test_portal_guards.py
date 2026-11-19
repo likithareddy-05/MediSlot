@@ -115,6 +115,39 @@ class PortalTests(unittest.TestCase):
         self.assertEqual(result.status_code, 200)
         self.assertEqual(call.call_args.args[:2], ("patients/me", "PUT"))
 
+    def test_booking_routes_map_to_the_booking_api(self):
+        csrf = self.sign_in("PATIENT")
+        reads = {"/bff/patient/api/appointments": "appointments", "/bff/patient/api/appointments/12": "appointments/12",
+                 "/bff/patient/api/refunds": "patients/me/refunds"}
+        for url, upstream in reads.items():
+            with mock.patch.object(web, "_api_call", return_value=FakeResponse(200, {})) as call:
+                self.assertEqual(self.client.get(url).status_code, 200, url)
+            self.assertEqual(call.call_args.args[0], upstream)
+        # booking forwards the client's Idempotency-Key untouched
+        with mock.patch.object(web, "_api_call", return_value=FakeResponse(201, {})) as call:
+            result = self.client.post("/bff/patient/api/appointments", json={"slot_id": "s"},
+                                      headers={"X-CSRF-Token": csrf, "Idempotency-Key": "abc-12345"})
+        self.assertEqual(result.status_code, 201)
+        self.assertEqual(call.call_args.args[:2], ("appointments", "POST"))
+        self.assertEqual(call.call_args.kwargs["extra_headers"], {"Idempotency-Key": "abc-12345"})
+        with mock.patch.object(web, "_api_call", return_value=FakeResponse(200, {})) as call:
+            self.assertEqual(self.client.post("/bff/patient/api/appointments/12/cancel", json={},
+                                              headers={"X-CSRF-Token": csrf}).status_code, 200)
+        self.assertEqual(call.call_args.args[:2], ("appointments/12/cancel", "POST"))
+
+    def test_booking_writes_are_restricted(self):
+        csrf = self.sign_in("PATIENT")
+        h = {"X-CSRF-Token": csrf}
+        self.assertEqual(self.client.post("/bff/patient/api/appointments", json={}).status_code, 403)  # no CSRF
+        self.assertEqual(self.client.delete("/bff/patient/api/appointments/12", headers=h).status_code, 405)
+        self.assertEqual(self.client.put("/bff/patient/api/appointments", json={}, headers=h).status_code, 405)
+        self.assertEqual(self.client.post("/bff/patient/api/appointments/12", json={}, headers=h).status_code, 405)
+        self.assertEqual(self.client.post("/bff/patient/api/refunds", json={}, headers=h).status_code, 405)
+
+    def test_doctor_cannot_use_booking_routes(self):
+        self.sign_in("DOCTOR")
+        self.assertEqual(self.client.get("/bff/patient/api/appointments").status_code, 403)
+
     def test_logout_calls_api_and_clears_session(self):
         csrf = self.sign_in("PATIENT")
         with mock.patch.object(web, "_api_call", return_value=FakeResponse(200, {})) as call:

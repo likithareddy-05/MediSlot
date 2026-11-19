@@ -26,12 +26,14 @@ import pymysql
 from boto3.dynamodb.conditions import Key
 from botocore.config import Config
 
+import appointment_store
+import slot_store
 from common import db_connect, json_body, log_event, logger, response
 
 ddb = boto3.resource("dynamodb")
 s3 = boto3.client("s3", config=Config(signature_version="s3v4", s3={"addressing_style": "virtual"}))
 
-SLOT_TABLE_NAME = os.environ["SLOT_TABLE_NAME"]
+APPOINTMENTS_TABLE_NAME = os.environ["APPOINTMENTS_TABLE_NAME"]
 ASSETS_BUCKET = os.environ["ASSETS_BUCKET"]
 REFRESH_TOKENS_TABLE = os.environ.get("REFRESH_TOKENS_TABLE", "")
 
@@ -39,7 +41,6 @@ DEFAULT_PAGE_SIZE = 10
 MAX_PAGE_SIZE = 50
 MAX_SLOT_RANGE_DAYS = 31
 DEFAULT_SLOT_RANGE_DAYS = 7
-BOOKABLE_SLOT_STATUSES = {"AVAILABLE", "FULL"}  # others: CANCELLED, REMOVED, BLACKED_OUT
 
 GENDERS = {"FEMALE", "MALE", "OTHER", "PREFER_NOT_TO_SAY"}
 EDITABLE_FIELDS = ("first_name", "last_name", "phone", "date_of_birth", "gender", "address",
@@ -180,12 +181,10 @@ def _delete_account(conn, cursor, patient_id):
     - With history (the doctor's records and refunds refer to it) the personal data is
       scrubbed and the account is deactivated instead, so history stays consistent.
     """
-    cursor.execute("""SELECT COUNT(*) AS n FROM appointments WHERE patient_id = %s
-        AND status IN ('BOOKED','CONFIRMED') AND scheduled_end_utc > UTC_TIMESTAMP(6)""", (patient_id,))
-    if int((cursor.fetchone() or {}).get("n") or 0):
+    has_upcoming, has_history = appointment_store.has_upcoming_or_history(
+        ddb.Table(APPOINTMENTS_TABLE_NAME), patient_id)
+    if has_upcoming:
         return response(409, {"message": "You have upcoming appointments. Cancel them before deleting your account."})
-    cursor.execute("SELECT COUNT(*) AS n FROM appointments WHERE patient_id = %s", (patient_id,))
-    has_history = int((cursor.fetchone() or {}).get("n") or 0) > 0
     if has_history:
         cursor.execute("""UPDATE patients SET first_name='Deleted', last_name='Patient', phone='0000000000',
             date_of_birth='1900-01-01', gender='PREFER_NOT_TO_SAY', address='Removed', city=NULL,
@@ -409,25 +408,6 @@ def _parse_day(value, name):
         raise ValueError(f"{name} must be a date in YYYY-MM-DD format")
 
 
-def _as_utc(text):
-    parsed = datetime.fromisoformat(str(text).replace("Z", "+00:00"))
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
-
-
-def _query_slot_range(table, doctor_id, first_day, last_day):
-    """Every slot record of one doctor for a local-date range (follows pagination)."""
-    items = []
-    kwargs = {"IndexName": "DoctorDateIndex",
-              "KeyConditionExpression": Key("doctor_id").eq(str(doctor_id))
-              & Key("slot_date").between(first_day.isoformat(), last_day.isoformat())}
-    while True:
-        page = table.query(**kwargs)
-        items.extend(page.get("Items", []))
-        if not page.get("LastEvaluatedKey"):
-            return items
-        kwargs["ExclusiveStartKey"] = page["LastEvaluatedKey"]
-
-
 def _doctor_slots(cursor, doctor_id, query):
     """Free seats per slot for a date range. Slot dates are the doctor's local calendar dates."""
     today = datetime.now(timezone.utc).date()
@@ -435,6 +415,10 @@ def _doctor_slots(cursor, doctor_id, query):
     last_day = _parse_day(query["to"], "to") if query.get("to") else first_day + timedelta(days=DEFAULT_SLOT_RANGE_DAYS - 1)
     if last_day < first_day:
         raise ValueError("to must not be earlier than from")
+    if first_day < today - timedelta(days=1):
+        # The calendar blocks earlier dates. A client's local date can be a day away from UTC,
+        # so only dates more than one day before the UTC date are refused here.
+        raise ValueError("Past dates cannot be viewed. Choose today or a later date.")
     if (last_day - first_day).days + 1 > MAX_SLOT_RANGE_DAYS:
         raise ValueError(f"The date range can cover at most {MAX_SLOT_RANGE_DAYS} days")
 
@@ -448,38 +432,25 @@ def _doctor_slots(cursor, doctor_id, query):
                       reason="not_a_whole_number", error_type=type(exc).__name__)
             raise ValueError("consultationTypeId must be a whole number")
 
-    # Current fee per consultation type comes from MySQL (the slot only holds the fee at creation time).
-    fees = {int(t["consultation_type_id"]): t["fee"] for t in _consultation_types(cursor, doctor_id)}
-
-    now = datetime.now(timezone.utc)
+    # The same function the doctor's schedule uses; the PATIENT viewer only returns bookable slots.
     slots = []
-    for item in _query_slot_range(ddb.Table(SLOT_TABLE_NAME), doctor_id, first_day, last_day):
-        if item.get("status") not in BOOKABLE_SLOT_STATUSES:
-            continue
-        type_id = int(item.get("consultation_type_id", 0))
-        if type_filter is not None and type_id != type_filter:
-            continue
-        start_text = item.get("start_time_utc") or item.get("start_at_utc")
-        end_text = item.get("end_time_utc") or item.get("end_at_utc")
-        if not start_text or _as_utc(start_text) <= now:
-            continue  # already started: not bookable
-        capacity, booked = int(item.get("capacity", 0)), int(item.get("booked_count", 0))
-        free = max(capacity - booked, 0)
+    for item in slot_store.get_slots(cursor, doctor_id, first_day, last_day, slot_store.VIEWER_PATIENT,
+                                     consultation_type_id=type_filter):
         slots.append({
             "slot_id": item["slot_id"],
-            "slot_date": item.get("slot_date"),
-            "start_time_utc": start_text,
-            "end_time_utc": end_text,
-            "local_start": item.get("local_start"),
-            "timezone": item.get("timezone") or item.get("timezone_name"),
-            "consultation_type_id": type_id,
-            "consultation_name": item.get("consultation_name"),
-            "duration_minutes": int(item.get("duration_minutes", 0)),
-            "fee": fees.get(type_id, float(item.get("fee", 0) or 0)),
-            "capacity": capacity,
-            "booked_count": booked,
-            "free_seats": free,
-            "status": "AVAILABLE" if free > 0 else "FULL",
+            "slot_date": item["slot_date"],
+            "start_time_utc": item["start_time_utc"],
+            "end_time_utc": item["end_time_utc"],
+            "local_start": item["local_start"],
+            "timezone": item["timezone"],
+            "consultation_type_id": item["consultation_type_id"],
+            "consultation_name": item["consultation_name"],
+            "duration_minutes": item["duration_minutes"],
+            "fee": item["fee"],
+            "capacity": item["capacity"],
+            "booked_count": item["booked_count"],
+            "free_seats": item["free_seats"],
+            "status": "AVAILABLE" if item["free_seats"] > 0 else "FULL",
         })
     slots.sort(key=lambda s: (s["start_time_utc"], s["consultation_type_id"]))
     return {"doctor_id": int(doctor_id), "from": first_day.isoformat(), "to": last_day.isoformat(),

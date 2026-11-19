@@ -7,6 +7,7 @@ imported in tests without any AWS configuration.
 import json
 import logging
 import os
+import time
 
 import boto3
 import pymysql
@@ -17,6 +18,31 @@ logger.setLevel(logging.INFO)
 _ssm = boto3.client("ssm")
 _secrets = boto3.client("secretsmanager")
 _db_config = None
+
+
+_config_cache = {}
+CONFIG_TTL_SECONDS = 60
+
+
+def get_config_value(name, default=None, ttl=CONFIG_TTL_SECONDS):
+    """Read one SSM parameter, cached for about a minute per Lambda container.
+
+    Changing the parameter therefore takes effect without a redeploy. If SSM cannot be
+    reached the last good value is kept; with none yet the caller's default is used.
+    """
+    if not name:
+        return default
+    cached = _config_cache.get(name)
+    now = time.monotonic()
+    if cached and now - cached[0] < ttl:
+        return cached[1]
+    try:
+        value = _ssm.get_parameter(Name=name)["Parameter"]["Value"]
+    except Exception as exc:
+        logger.warning(json.dumps({"event": "config_read_failed", "parameter": name, "error": str(exc)[:200]}))
+        return cached[1] if cached else default
+    _config_cache[name] = (now, value)
+    return value
 
 
 def log_event(event_name, level=logging.INFO, **fields):

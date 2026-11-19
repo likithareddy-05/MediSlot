@@ -69,6 +69,12 @@ jobs:
             src/lambdas/doctor/doctor_domain.py \
             src/lambdas/doctor/slot_materializer.py \
             src/lambdas/patient/patient_domain.py \
+            src/lambdas/patient/booking_domain.py \
+            src/lambdas/shared/events.py \
+            src/lambdas/shared/refunds.py \
+            src/lambdas/shared/slot_store.py \
+            src/lambdas/shared/appointment_store.py \
+            src/lambdas/shared/slot_generation.py \
             src/lambdas/shared/slot_time.py \
             src/lambdas/shared/common.py \
             src/lambdas/requirements.txt \
@@ -79,7 +85,10 @@ jobs:
             dashboard/landing.html \
             dashboard/requirements.txt \
             tests/test_dst_materializer.py \
-            tests/test_slot_idempotency.py; do
+            tests/test_slot_idempotency.py \
+            tests/test_refund_tiers.py \
+            tests/test_booking_engine.py \
+            tests/fakes_booking.py; do
 
             test -f "$file" || {
               echo "::error::Missing required file: $file"
@@ -288,9 +297,10 @@ jobs:
           package_lambda auth auth/auth_handler.py auth/register.py auth/refresh.py auth/logout.py
           package_lambda authorizer auth/authorizer.py
           package_lambda profile auth/profile.py
-          package_lambda doctor-domain doctor/doctor_domain.py shared/slot_time.py
-          package_lambda slot-materializer doctor/slot_materializer.py shared/slot_time.py
-          package_lambda patient-domain patient/patient_domain.py shared/common.py shared/slot_time.py
+          package_lambda doctor-domain doctor/doctor_domain.py shared/slot_time.py shared/events.py shared/refunds.py shared/slot_store.py shared/appointment_store.py shared/slot_generation.py
+          package_lambda slot-materializer doctor/slot_materializer.py shared/slot_time.py shared/slot_store.py shared/slot_generation.py
+          package_lambda patient-domain patient/patient_domain.py shared/common.py shared/slot_time.py shared/slot_store.py shared/appointment_store.py
+          package_lambda booking-domain patient/booking_domain.py shared/common.py shared/events.py shared/refunds.py shared/slot_store.py shared/appointment_store.py
 
           schema_dir=build/schema-init
 
@@ -328,6 +338,7 @@ jobs:
               "DoctorDomainLambdaS3Key=artifacts/${GITHUB_SHA}/doctor-domain.zip" \
               "SlotMaterializerLambdaS3Key=artifacts/${GITHUB_SHA}/slot-materializer.zip" \
               "PatientDomainLambdaS3Key=artifacts/${GITHUB_SHA}/patient-domain.zip" \
+              "BookingDomainLambdaS3Key=artifacts/${GITHUB_SHA}/booking-domain.zip" \
             --capabilities CAPABILITY_NAMED_IAM \
             --region "$AWS_REGION" \
             --no-fail-on-empty-changeset

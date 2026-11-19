@@ -13,12 +13,14 @@ for _sub in ("shared", "patient"):
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 for key, value in {"AWS_DEFAULT_REGION": "ap-south-1", "AWS_ACCESS_KEY_ID": "t", "AWS_SECRET_ACCESS_KEY": "t",
                    "DB_HOST_PARAMETER": "h", "DB_PORT_PARAMETER": "p", "DB_NAME_PARAMETER": "n",
-                   "DB_USERNAME_PARAMETER": "u", "DB_SECRET_ARN": "arn", "SLOT_TABLE_NAME": "slots",
+                   "DB_USERNAME_PARAMETER": "u", "DB_SECRET_ARN": "arn", "APPOINTMENTS_TABLE_NAME": "appointments",
                    "ASSETS_BUCKET": "bucket"}.items():
     os.environ.setdefault(key, value)
 
 import aws_stubs  # noqa: E402,F401
 import patient_domain as pd  # noqa: E402
+import slot_store  # noqa: E402
+from fakes_booking import FakeConn, FakeDynamo, FakeRds, appointments_table, slot_row  # noqa: E402
 
 
 class Conn:
@@ -133,26 +135,37 @@ class ProfileCrudTests(unittest.TestCase):
 
 
 class DeleteTests(unittest.TestCase):
-    def run_delete(self, upcoming, history):
-        conn = Conn(ones=[{"user_id": 7, "account_status": "ACTIVE"}, {"n": upcoming}, {"n": history}])
-        with mock.patch.object(pd, "_revoke_refresh_tokens", return_value=2) as revoke:
+    def appointment(self, aid, status, hours):
+        start = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(hours=hours)
+        return {"appointment_id": str(aid), "patient_id": "7", "doctor_id": "3", "slot_id": f"3#1#{aid}",
+                "status": status, "start_time_utc": start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "end_time_utc": (start + timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%SZ")}
+
+    def run_delete(self, *appointments):
+        table = appointments_table()
+        for item in appointments:
+            table.items[item["appointment_id"]] = item
+        conn = Conn(ones=[{"user_id": 7, "account_status": "ACTIVE"}])
+        with mock.patch.object(pd, "ddb", FakeDynamo(appointments=table)), \
+             mock.patch.object(pd, "_revoke_refresh_tokens", return_value=2) as revoke:
             status, body = call(conn, "DELETE", "/patients/me")
         return status, conn, revoke
 
     def test_blocked_with_upcoming_appointments(self):
-        status, conn, revoke = self.run_delete(1, 1)
+        status, conn, revoke = self.run_delete(self.appointment(1, "CONFIRMED", 48))
         self.assertEqual(status, 409)
         self.assertFalse(conn.committed)
         revoke.assert_not_called()
 
     def test_hard_delete_without_history(self):
-        status, conn, revoke = self.run_delete(0, 0)
+        status, conn, revoke = self.run_delete()
         self.assertEqual(status, 200)
         self.assertTrue(any(s[0].startswith("DELETE FROM patients") for s in conn.sql))
         revoke.assert_called_once_with(7)
 
     def test_anonymise_with_history(self):
-        status, conn, _ = self.run_delete(0, 3)
+        status, conn, _ = self.run_delete(self.appointment(1, "COMPLETED", -48),
+                                          self.appointment(2, "CANCELLED_BY_PATIENT", 24))
         self.assertEqual(status, 200)
         self.assertFalse(any(s[0].startswith("DELETE FROM") for s in conn.sql))
         self.assertTrue(any("account_status = 'INACTIVE'" in s[0] for s in conn.sql))
@@ -226,48 +239,45 @@ class PublicProfileTests(unittest.TestCase):
 
 class SlotAvailabilityTests(unittest.TestCase):
     def slots(self, items, query=None):
-        tomorrow = (datetime.now(timezone.utc) + timedelta(days=1))
-        base = {"slot_id": "s", "slot_date": tomorrow.date().isoformat(), "consultation_type_id": 1,
-                "consultation_name": "Standard", "duration_minutes": 30, "capacity": 4, "booked_count": 1,
-                "status": "AVAILABLE", "timezone": "Asia/Kolkata", "fee": "500",
-                "start_time_utc": tomorrow.isoformat().replace("+00:00", "Z"),
-                "end_time_utc": (tomorrow + timedelta(minutes=30)).isoformat().replace("+00:00", "Z")}
-        rows = [dict(base, **item) for item in items]
-        with mock.patch.object(pd, "_query_slot_range", return_value=rows), \
-             mock.patch.object(pd, "_consultation_types", return_value=[{"consultation_type_id": 1, "fee": 550.0}]), \
-             mock.patch.object(pd, "ddb"):
-            return pd._doctor_slots(Conn(), 5, query or {})
+        rds = FakeRds(slots=items)
+        return pd._doctor_slots(FakeConn(rds), 7, query or {})
+
+    def row(self, slot_id="s", hours=30, **kw):
+        kw.setdefault("capacity", 4)
+        kw.setdefault("booked", 1)
+        kw.setdefault("ctype", 1)
+        return slot_row(slot_id, doctor_id=7, hours_ahead=hours, **kw)
 
     def test_free_seats_and_current_fee(self):
-        result = self.slots([{}])
-        slot = result["slots"][0]
+        slot = self.slots([self.row()])["slots"][0]
         self.assertEqual((slot["capacity"], slot["booked_count"], slot["free_seats"]), (4, 1, 3))
         self.assertEqual(slot["status"], "AVAILABLE")
-        self.assertEqual(slot["fee"], 550.0)
+        self.assertEqual(float(slot["fee"]), 500.0)
 
     def test_full_slot_listed_with_zero_free(self):
-        slot = self.slots([{"booked_count": 4}])["slots"][0]
+        slot = self.slots([self.row(booked=4)])["slots"][0]
         self.assertEqual((slot["free_seats"], slot["status"]), (0, "FULL"))
 
     def test_cancelled_removed_blackout_hidden(self):
-        result = self.slots([{"slot_id": "a", "status": "CANCELLED"}, {"slot_id": "b", "status": "REMOVED"},
-                             {"slot_id": "c", "status": "BLACKED_OUT"}, {"slot_id": "d"}])
+        result = self.slots([self.row("a", status="CANCELLED"), self.row("b", status="REMOVED"),
+                             self.row("c", status="BLACKED_OUT"), self.row("d")])
         self.assertEqual([s["slot_id"] for s in result["slots"]], ["d"])
 
     def test_past_slots_hidden(self):
-        past = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat().replace("+00:00", "Z")
-        self.assertEqual(self.slots([{"start_time_utc": past}])["count"], 0)
+        past = self.row("p", hours=-2)
+        result = self.slots([past], {"from": datetime.now(timezone.utc).date().isoformat()})
+        self.assertEqual(result["count"], 0)
 
     def test_consultation_type_filter(self):
-        result = self.slots([{"slot_id": "a", "consultation_type_id": 1}, {"slot_id": "b", "consultation_type_id": 2}],
-                            {"consultationTypeId": "2"})
+        result = self.slots([self.row("a", ctype=1), self.row("b", ctype=2)], {"consultationTypeId": "2"})
         self.assertEqual([s["slot_id"] for s in result["slots"]], ["b"])
 
     def test_range_validation(self):
+        today = datetime.now(timezone.utc).date()
         with self.assertRaises(ValueError):
-            self.slots([], {"from": "2026-12-10", "to": "2026-12-01"})
+            self.slots([], {"from": (today + timedelta(days=9)).isoformat(), "to": today.isoformat()})
         with self.assertRaises(ValueError):
-            self.slots([], {"from": "2026-12-01", "to": "2027-03-01"})
+            self.slots([], {"from": today.isoformat(), "to": (today + timedelta(days=90)).isoformat()})
         with self.assertRaises(ValueError):
             self.slots([], {"from": "not-a-date"})
 
@@ -275,6 +285,18 @@ class SlotAvailabilityTests(unittest.TestCase):
         result = self.slots([])
         first = datetime.fromisoformat(result["from"]); last = datetime.fromisoformat(result["to"])
         self.assertEqual((last - first).days, 6)
+
+    def test_dates_before_today_are_refused(self):
+        today = datetime.now(timezone.utc).date()
+        with self.assertRaisesRegex(ValueError, "Past dates"):
+            self.slots([], {"from": (today - timedelta(days=2)).isoformat()})
+        for ok in (today, today - timedelta(days=1)):   # yesterday UTC may still be today for the client
+            self.slots([], {"from": ok.isoformat()})
+
+    def test_patient_uses_the_same_slot_function_as_the_doctor(self):
+        with mock.patch.object(slot_store, "get_slots", return_value=[]) as get_slots:
+            self.slots([])
+        self.assertEqual(get_slots.call_args.args[4], slot_store.VIEWER_PATIENT)
 
 
 if __name__ == "__main__":

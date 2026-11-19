@@ -337,6 +337,32 @@ Resources:
           Value: MediSlot
 
   # ============================================================
+  # EVENTBRIDGE INTERFACE ENDPOINT (Milestone 5)
+  # The booking and doctor Lambdas run in the private subnets and publish
+  # AppointmentBooked / AppointmentCancelled / SlotSeatFreed to EventBridge.
+  # ============================================================
+
+  EventBridgeInterfaceEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref MediSlotVPC
+      VpcEndpointType: Interface
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.events"
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnetA
+        - !Ref PrivateSubnetB
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub "medislot-${EnvironmentName}-events-endpoint"
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Project
+          Value: MediSlot
+
+  # ============================================================
   # SSM MESSAGES INTERFACE ENDPOINT
   # Required for Session Manager interactive sessions.
   # ============================================================

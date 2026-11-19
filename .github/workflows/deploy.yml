@@ -477,14 +477,30 @@ jobs:
 
           echo "Dashboard instance: $INSTANCE_ID"
 
-          PING_STATUS="$(aws ssm describe-instance-information \
-            --filters "Key=InstanceIds,Values=${INSTANCE_ID}" \
-            --query "InstanceInformationList[0].PingStatus" \
-            --output text \
-            --region "$AWS_REGION")"
+          # A new, replaced or restarted instance needs a few minutes before the SSM agent
+          # registers ("None" until then). Wait up to 15 minutes instead of failing at once.
+          PING_STATUS="None"
+          for attempt in $(seq 1 45); do
+            PING_STATUS="$(aws ssm describe-instance-information \
+              --filters "Key=InstanceIds,Values=${INSTANCE_ID}" \
+              --query "InstanceInformationList[0].PingStatus" \
+              --output text \
+              --region "$AWS_REGION" 2>/dev/null || echo None)"
+            [[ "$PING_STATUS" == "Online" ]] && break
+            STATE="$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" \
+              --query "Reservations[0].Instances[0].State.Name" --output text \
+              --region "$AWS_REGION" 2>/dev/null || echo unknown)"
+            echo "Waiting for SSM (attempt ${attempt}/45): ping=${PING_STATUS}, ec2 state=${STATE}"
+            if [[ "$STATE" == "stopped" || "$STATE" == "terminated" || "$STATE" == "shutting-down" ]]; then
+              echo "::error::Dashboard instance is ${STATE}; start it or redeploy the dashboard stack."
+              exit 1
+            fi
+            sleep 20
+          done
 
           [[ "$PING_STATUS" == "Online" ]] || {
-            echo "::error::EC2 is not online in Systems Manager. Status: $PING_STATUS"
+            echo "::error::EC2 did not register with Systems Manager within 15 minutes. Status: $PING_STATUS"
+            echo "::error::Check the instance role has AmazonSSMManagedInstanceCore, the instance has internet or SSM endpoints, and /var/log/cloud-init-output.log."
             exit 1
           }
 

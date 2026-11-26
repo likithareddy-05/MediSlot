@@ -88,7 +88,7 @@ small.note{display:block;margin-top:4px;color:var(--muted)}
 @media(max-width:900px){.week-grid{grid-template-columns:1fr}}
 .appt-row{display:flex;justify-content:space-between;align-items:center;gap:6px;flex-wrap:wrap;margin:5px 0;padding-top:5px;border-top:1px dashed var(--line)}
 .appt-row .who{min-width:0;overflow-wrap:anywhere}
-select.slot-status,select.appt-status{font:600 12px var(--body,inherit);padding:4px 6px;border:1.5px solid var(--teal);border-radius:8px;background:#fff;color:var(--ink);max-width:100%}
+select.appt-status{font:600 12px var(--body,inherit);padding:4px 6px;border:1.5px solid var(--teal);border-radius:8px;background:#fff;color:var(--ink);max-width:100%}
 .appt-filters{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;align-items:end;margin-bottom:14px}
 @media(max-width:700px){.sidebar{padding:0 14px;gap:14px}.topbar,.content{padding-left:16px;padding-right:16px}.topbar::after{left:16px;right:16px}.card{padding:18px}}
 @media(prefers-reduced-motion:reduce){*{transition:none!important}}
@@ -271,16 +271,8 @@ function slotCard(slot,appointments,tz){
   else if(booked.every(a=>a.status==='NO_SHOW')){badge='NO-SHOW';good=false}
   else{badge='CANCELLED';good=false}
  }
- const patients=booked.length?`<details open><summary>Patients (${booked.length})</summary>${booked.map(a=>`<div class="appt-row"><span class="who">${esc(a.first_name)} ${esc(a.last_name)}${a.phone?' · '+esc(a.phone):''}</span>${statusControl(a)}</div>`).join('')}</details>`:'';
- /* Slot-level status dropdown: applies to every appointment in the slot (an empty slot can only be Available or Cancelled). */
- const live=booked.filter(a=>a.status!=='CANCELLED_BY_PATIENT'&&a.status!=='CANCELLED_BY_DOCTOR');
- const kinds=[...new Set(live.map(a=>a.status))];
- let cur=cancelled?'CANCELLED':!live.length?'AVAILABLE':kinds.length===1?kinds[0]:'CONFIRMED';
- const notStarted=start>new Date();
- const slotOpts=!live.length?[['AVAILABLE','Available',false],['CANCELLED','Cancelled',over]]:[
-  ['CONFIRMED','Confirmed',false],['COMPLETED','Completed',notStarted],['NO_SHOW','No-show',notStarted],['CANCELLED','Cancelled',over&&live.every(a=>a.status==='CONFIRMED')]];
- const locked=cancelled||(over&&!live.length);
- const cancelBtn=`<div class="slot-actions"><label class="muted" style="font-size:12px">Slot status</label><select class="slot-status" data-slot="${esc(slot.slot_id)}" data-current="${cur}" data-booked="${bookedNow}" ${locked?'disabled':''} aria-label="Slot status">${slotOpts.map(([v,l,off])=>`<option value="${v}"${v===cur?' selected':''}${off?' disabled':''}>${l}</option>`).join('')}${slotOpts.some(o=>o[0]===cur)?'':`<option value="${cur}" selected>${cur}</option>`}</select></div>`;
+ const patients=booked.length?`<details open><summary>Patients (${booked.length})</summary>${booked.map(a=>`<div class="appt-row"><span class="who">${esc(a.first_name)} ${esc(a.last_name)}${a.phone?' · '+esc(a.phone):''}</span><span class="pill ${a.status==='CONFIRMED'||a.status==='COMPLETED'?'':'off'}">${esc(STATUS_LABEL[a.status]||a.status)}</span></div>`).join('')}</details>`:'';
+ const cancelBtn=!cancelled&&!over?`<div class="slot-actions"><button class="btn danger small" data-cancel-slot="${esc(slot.slot_id)}" data-booked="${bookedNow}">Cancel slot</button></div>`:'';
  return `<div class="wslot ${cancelled?'cancelled':full?'full':''}"><strong>${fmt(start)} – ${fmt(end)}</strong><div class="meta">${esc(consultation?.consultation_name||slot.consultation_name||'Consultation')}</div><div class="meta">Booked ${esc(slot.booked_count||0)}/${esc(slot.capacity)} · <span class="pill ${good?'':'off'}">${esc(badge)}</span></div>${patients}${cancelBtn}</div>`;
 }
 async function loadSchedule(){
@@ -309,12 +301,13 @@ async function loadSchedule(){
  }catch(e){toast(e.message)}
 }
 async function cancelSlot(slotId,bookedCount){
- const warn=bookedCount>0?`This slot has ${bookedCount} booked appointment(s). They will be marked CANCELLED. `:'';
+ const warn=bookedCount>0?`This slot has ${bookedCount} booked appointment(s). They will be cancelled and every patient gets a 100% refund.\n\n`:'';
  if(!confirm(warn+'Cancel this slot? Patients will no longer be able to book it.'))return;
  try{
   const d=await api('/slots/'+encodeURIComponent(slotId),'DELETE');
   await loadSchedule();
   toast(d.affected_appointments?`Slot cancelled; ${d.affected_appointments} appointment(s) cancelled`:'Slot cancelled');
+  if(d.affected_appointments)alert('Slot cancelled.\n\n'+d.affected_appointments+' patient(s) have been refunded 100% of the fee.');
  }catch(e){toast(e.message)}
 }
 function currentWeekStart(){return mondayOf(todayInTimezone(state.homeTimezone))}
@@ -357,30 +350,17 @@ document.querySelector('.nav button[data-panel="appointments"]').addEventListene
 document.addEventListener('change',async e=>{
  const sel=e.target.closest&&e.target.closest('select.appt-status');if(!sel)return;
  const id=sel.dataset.appt,value=sel.value,current=sel.dataset.current;if(value===current)return;
- const what={CONFIRMED:'set this appointment back to confirmed',COMPLETED:'mark this appointment as completed',NO_SHOW:'mark this patient as a no-show (no refund is given)',CANCELLED:'cancel this appointment. The patient is refunded in full, the seat becomes free again and this cannot be undone'}[value];
+ const what={CONFIRMED:'set this appointment back to confirmed',COMPLETED:'mark this appointment as completed',NO_SHOW:'mark this patient as a no-show (no refund is given)',CANCELLED:'cancel this appointment.\n\nThe patient will receive a 100% refund, the seat becomes free again and this cannot be undone'}[value];
  if(!confirm('Are you sure you want to '+what+'?')){sel.value=current;return}
  sel.disabled=true;
  try{
   const d=await api('/appointments/'+encodeURIComponent(id)+'/outcome','POST',{outcome:value});
   toast(d.message||'Status updated');
+  if(value==='CANCELLED')alert('Appointment cancelled.\n\nThe patient has been refunded 100% of the fee.');
   await loadSchedule();
   if($('#panel-appointments').classList.contains('active'))await loadAppointments();
   if($('#panel-cancelled').classList.contains('active'))await loadCancelled();
  }catch(err){toast(err.message);sel.disabled=false;sel.value=current}
-});
-document.addEventListener('change',async e=>{
- const sel=e.target.closest&&e.target.closest('select.slot-status');if(!sel)return;
- const slotId=sel.dataset.slot,value=sel.value,current=sel.dataset.current;if(value===current)return;
- if(value==='CANCELLED'){sel.value=current;await cancelSlot(slotId,Number(sel.dataset.booked));return}
- const card=sel.closest('.wslot');const ids=[...card.querySelectorAll('select.appt-status:not([disabled])')].map(x=>x.dataset.appt);
- if(!ids.length){sel.value=current;return}
- const label={CONFIRMED:'Confirmed',COMPLETED:'Completed',NO_SHOW:'No-show'}[value];
- if(!confirm('Set all '+ids.length+' appointment(s) in this slot to '+label+'?'+(value==='NO_SHOW'?' No refund is given.':''))){sel.value=current;return}
- sel.disabled=true;let failed=0;
- for(const id of ids){try{await api('/appointments/'+encodeURIComponent(id)+'/outcome','POST',{outcome:value})}catch(err){failed++;toast(err.message)}}
- toast(failed?failed+' appointment(s) could not be updated':'Slot status updated');
- await loadSchedule();
- if($('#panel-appointments').classList.contains('active'))await loadAppointments();
 });
 /* Cancelled page: who cancelled, when, and what was refunded. */
 const money=v=>v==null?'—':Number(v).toFixed(2);

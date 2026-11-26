@@ -24,7 +24,7 @@ from botocore.config import Config
 import appointment_store as store
 import slot_store
 from slot_generation import materialize_doctor_slots
-from refunds import full_refund, no_show_refund, record_refund, refund_fields
+from refunds import delete_ledger_row, full_refund, no_show_refund, record_refund, refund_fields
 from events import emit_metric, publish_event
 
 logger = logging.getLogger()
@@ -295,6 +295,11 @@ def _patient_names(cursor, patient_ids):
     return {int(r["user_id"]): r for r in cursor.fetchall()}
 
 
+def _money_text(value):
+    """A DynamoDB money string as a number for the dashboard (None stays None)."""
+    return None if value is None else float(value)
+
+
 def _doctor_appointment_rows(cursor, items):
     """DynamoDB appointment items as the rows the doctor dashboard shows (patient name from RDS)."""
     names = _patient_names(cursor, [i["patient_id"] for i in items])
@@ -306,7 +311,13 @@ def _doctor_appointment_rows(cursor, items):
             "outcome": item.get("outcome"), "scheduled_start_utc": item["start_time_utc"],
             "scheduled_end_utc": item["end_time_utc"], "patient_id": int(item["patient_id"]),
             "first_name": patient.get("first_name"), "last_name": patient.get("last_name"),
-            "phone": patient.get("phone"), "consultation_name": item.get("consultation_name")})
+            "phone": patient.get("phone"), "consultation_name": item.get("consultation_name"),
+            "fee": _money_text(item.get("fee_amount")), "cancelled_at": item.get("cancelled_at"),
+            "cancellation_reason": item.get("cancellation_reason"),
+            "refund": None if item.get("refund_tier") is None else {
+                "tier": item["refund_tier"], "percent": float(item["refund_percent"]),
+                "amount": _money_text(item.get("refund_amount")),
+                "deduction": _money_text(item.get("deduction_amount"))}})
     return rows
 
 
@@ -424,23 +435,29 @@ def _cancel_slot_appointments(conn, cursor, doctor_id, slot_id):
     return newly_cancelled, expected, max(expected - accounted, 0)
 
 
-def _cancel_one_appointment(conn, cursor, doctor_id, item):
-    """The doctor cancels ONE confirmed appointment (the slot stays open for other patients).
+NO_SHOW_TRIGGER = "NO_SHOW"
+# Attributes a correction removes again when an appointment goes back to CONFIRMED / COMPLETED.
+_OUTCOME_FIELDS = ("outcome", "refund_tier", "refund_percent", "refund_amount", "deduction_amount",
+                   "hours_before_start")
 
-    CONFIRMED -> CANCELLED_BY_DOCTOR with a 100% refund, then: hold released, ledger row written
-    (RDS), seat given back (RDS), events sent. Every step after the status change can be repeated,
-    so pressing the button again finishes a cancel that stopped half way.
-    Returns the updated appointment item.
+
+def _cancel_one_appointment(conn, cursor, doctor_id, item):
+    """The doctor cancels ONE appointment (the slot stays open for other patients).
+
+    CONFIRMED, COMPLETED or NO_SHOW -> CANCELLED_BY_DOCTOR with a 100% refund, then: hold released,
+    ledger row written (RDS; a no-show's 0% row is replaced), seat given back (RDS), events sent.
+    Every step after the status change can be repeated, so pressing the button again finishes a cancel
+    that stopped half way. Returns the updated appointment item.
     """
     table = _appointments_table()
     appointment_id = item["appointment_id"]
-    if item["status"] == store.CONFIRMED:
-        if item["end_time_utc"] <= store.now_iso():
-            raise ValueError("This appointment has already ended and can no longer be cancelled.")
+    if item["status"] in (store.CONFIRMED, store.COMPLETED, store.NO_SHOW):
+        if item["status"] == store.CONFIRMED and item["end_time_utc"] <= store.now_iso():
+            raise ValueError("This appointment has already ended. Mark it Completed or No-show instead.")
         refund = full_refund(item["fee_amount"])
-        updated = store.transition(table, appointment_id, store.CONFIRMED, store.CANCELLED_BY_DOCTOR, {
+        updated = store.transition(table, appointment_id, item["status"], store.CANCELLED_BY_DOCTOR, {
             "cancelled_at": store.now_iso(), "cancellation_reason": "Cancelled by the doctor",
-            **refund_fields(refund)})
+            **refund_fields(refund)}, remove=("outcome",))
         if updated is None:
             raise ValueError("This appointment changed while you were working. Refresh and try again.")
         item = updated
@@ -454,6 +471,7 @@ def _cancel_one_appointment(conn, cursor, doctor_id, item):
         store.release_hold(table, item["slot_id"], int(item["patient_id"]))
     except Exception as exc:
         _log_event("hold_release_failed", logging.ERROR, slot_id=item["slot_id"], error_type=type(exc).__name__)
+    delete_ledger_row(cursor, appointment_id, NO_SHOW_TRIGGER)  # a no-show's 0% row must not block the refund
     record_refund(cursor, item, "DOCTOR_CANCELLATION", full_refund(item["fee_amount"]))
     conn.commit()
 
@@ -481,6 +499,46 @@ def _cancel_one_appointment(conn, cursor, doctor_id, item):
     _log_event("appointment_cancelled_by_doctor", doctor_id=doctor_id, appointment_id=appointment_id,
                seat_released=slot_after is not None)
     return store.get_appointment(table, appointment_id) or item
+
+
+def _set_doctor_status(conn, cursor, doctor_id, item, target):
+    """The doctor writes the status of one appointment (the dropdown). Returns the updated item.
+
+    CONFIRMED, COMPLETED and NO_SHOW can be changed into each other (a wrong click is correctable),
+    and into CANCELLED. A no-show carries a 0% ledger row, which is removed again when the status
+    leaves NO_SHOW. A cancelled appointment is final: its refund was recorded and its seat was given back.
+    """
+    table = _appointments_table()
+    appointment_id, current = item["appointment_id"], item["status"]
+    if target == store.CANCELLED_BY_DOCTOR:
+        return _cancel_one_appointment(conn, cursor, doctor_id, item)
+    if current in store.CANCELLED_STATUSES:
+        raise ValueError("A cancelled appointment is final: its refund has already been recorded.")
+    if current == target:
+        if target == store.NO_SHOW:  # repeated call: finish a ledger write that failed before
+            record_refund(cursor, item, NO_SHOW_TRIGGER, no_show_refund(item["fee_amount"]))
+            conn.commit()
+        return item
+    if target == store.NO_SHOW:
+        refund = no_show_refund(item["fee_amount"])
+        fields, remove = {"outcome": target, **refund_fields(refund)}, ()
+    elif target == store.COMPLETED:
+        fields, remove = {"outcome": target}, _OUTCOME_FIELDS[1:]
+    else:  # back to CONFIRMED
+        fields, remove = {}, _OUTCOME_FIELDS
+    updated = store.transition(table, appointment_id, current, target, fields, remove)
+    if updated is None:
+        raise ValueError("This appointment changed while you were working. Refresh and try again.")
+    if current == store.NO_SHOW:
+        delete_ledger_row(cursor, appointment_id, NO_SHOW_TRIGGER)
+        conn.commit()
+    if target == store.NO_SHOW:
+        record_refund(cursor, updated, NO_SHOW_TRIGGER, refund)  # a no-show is never refunded: audit row only
+        conn.commit()
+        emit_metric("CancellationsByTier", 1, Tier="NO_SHOW")
+    _log_event("appointment_status_set", doctor_id=doctor_id, appointment_id=appointment_id,
+               previous=current, status=target)
+    return updated
 
 
 def _consultation_type_in_use(cursor, doctor_id, type_id):
@@ -1016,39 +1074,20 @@ def _handle_api(event, context):
                 outcome = str(body.get("outcome") or body.get("status") or "").upper()
                 if outcome == "CANCELLED":
                     outcome = store.CANCELLED_BY_DOCTOR
-                if outcome == store.CONFIRMED:
-                    raise ValueError("An appointment cannot be set back to CONFIRMED.")
-                if outcome not in {"COMPLETED", "NO_SHOW", store.CANCELLED_BY_DOCTOR}:
-                    raise ValueError("outcome must be COMPLETED, NO_SHOW or CANCELLED")
+                if outcome not in {store.CONFIRMED, store.COMPLETED, store.NO_SHOW, store.CANCELLED_BY_DOCTOR}:
+                    raise ValueError("status must be CONFIRMED, COMPLETED, NO_SHOW or CANCELLED")
                 appointment_id = match.group(1)
                 table = _appointments_table()
                 item = store.get_appointment(table, appointment_id)
                 if not item or str(item.get("doctor_id")) != str(doctor_id):
                     _log_event("appointment_outcome_rejected", logging.WARNING, doctor_id=doctor_id,
                                appointment_id=appointment_id, outcome=outcome)
-                    return response(404,{"message":"Confirmed appointment not found"})
-                if outcome == store.CANCELLED_BY_DOCTOR:
-                    # The status dropdown's "Cancelled": the slot stays open, the patient gets 100% back.
-                    updated = _cancel_one_appointment(conn, cur, doctor_id, item)
-                    return response(200,{"message":"Appointment cancelled and refunded in full",
-                                         "appointment_id":appointment_id,"status":updated["status"]})
-                refund = no_show_refund(item["fee_amount"]) if outcome == "NO_SHOW" else None
-                fields = {"outcome": outcome, **(refund_fields(refund) if refund else {})}
-                updated = store.transition(table, appointment_id, store.CONFIRMED, outcome, fields)
-                if updated is None and item["status"] == outcome == "NO_SHOW":
-                    updated = item  # repeated call: finish a ledger write that failed before
-                if updated is None:
-                    _log_event("appointment_outcome_rejected", logging.WARNING, doctor_id=doctor_id,
-                               appointment_id=appointment_id, outcome=outcome)
-                    return response(404,{"message":"Confirmed appointment not found"})
-                if refund:
-                    # A no-show is never refunded: record the 0% ledger entry for the audit trail.
-                    record_refund(cur, updated, "NO_SHOW", refund)
-                    conn.commit()
-                    emit_metric("CancellationsByTier", 1, Tier="NO_SHOW")
-                _log_event("appointment_outcome_recorded", doctor_id=doctor_id,
-                           appointment_id=appointment_id, outcome=outcome)
-                return response(200,{"message":f"Appointment marked {outcome}"})
+                    return response(404,{"message":"Appointment not found"})
+                updated = _set_doctor_status(conn, cur, doctor_id, item, outcome)
+                return response(200,{"message":("Appointment cancelled and refunded in full"
+                                                if outcome == store.CANCELLED_BY_DOCTOR
+                                                else f"Appointment marked {outcome}"),
+                                     "appointment_id":appointment_id,"status":updated["status"]})
 
             match = re.fullmatch(r"/slots/(.+)",path)
             if match and method == "DELETE":

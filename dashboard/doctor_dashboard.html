@@ -117,7 +117,7 @@ select.appt-status{font:600 12px var(--body,inherit);padding:4px 6px;border:1.5p
 </div><div class="actions"><button class="btn" id="registerButton" type="submit">Create account</button><button class="btn secondary" type="button" id="backToLogin">Back to sign in</button></div><div class="login-error" id="registerError" role="alert"></div></form></div></div></section>
 <div class="shell hidden" id="appShell">
 <aside class="sidebar"><div class="brand"><span class="brand-mark">M</span> MediSlot</div><div><div class="side-label">DOCTOR WORKSPACE</div><nav class="nav">
-<button class="active" data-panel="overview">Overview</button><button data-panel="profile">My Profile</button><button data-panel="consultations">Consultations</button><button data-panel="availability">Availability</button><button data-panel="blackouts">Blackout Dates</button><button data-panel="schedule">My Schedule</button><button data-panel="appointments">Appointments</button>
+<button class="active" data-panel="overview">Overview</button><button data-panel="profile">My Profile</button><button data-panel="consultations">Consultations</button><button data-panel="availability">Availability</button><button data-panel="blackouts">Blackout Dates</button><button data-panel="schedule">My Schedule</button><button data-panel="appointments">Appointments</button><button data-panel="cancelled">Cancelled</button>
 </nav></div></aside>
 <main class="main"><header class="topbar"><div><h1 id="pageTitle">Doctor overview</h1><small id="welcome">Manage your profile and appointment availability</small></div><div class="filebox"><button class="btn secondary" id="refreshAll">↻ Refresh data</button><button class="btn danger" id="logoutButton">Logout</button></div></header>
 <div class="content"><div id="connectionStatus" class="status" aria-live="polite"></div>
@@ -128,7 +128,8 @@ select.appt-status{font:600 12px var(--body,inherit);padding:4px 6px;border:1.5p
 <section class="panel" id="panel-availability"><div class="section-head"><div><h2>Weekly availability</h2><p>Choose recurring working hours for each consultation type.</p></div></div><div class="grid"><div class="card"><h3 id="availabilityFormTitle">Add weekly availability</h3><form id="availabilityForm"><input type="hidden" name="availability_pattern_id"><div class="fields"><div class="field"><label>Consultation type</label><select name="consultation_type_id" required id="availabilityConsultation"></select></div><div class="field"><label>Weekday</label><select name="weekday"><option value="1">Monday</option><option value="2">Tuesday</option><option value="3">Wednesday</option><option value="4">Thursday</option><option value="5">Friday</option><option value="6">Saturday</option><option value="7">Sunday</option></select></div><div class="field"><label>Start time</label><input name="start_time" type="time" value="09:00" required></div><div class="field"><label>End time</label><input name="end_time" type="time" value="17:00" required></div><div class="field full"><label>Practice timezone</label><select name="home_timezone" required><option value="Asia/Kolkata">India Standard Time — Asia/Kolkata</option><option value="UTC">UTC</option><option value="Asia/Dubai">Gulf Standard Time — Asia/Dubai</option><option value="Europe/London">UK — Europe/London</option><option value="America/New_York">US Eastern — America/New_York</option></select></div></div><div class="actions"><button class="btn" type="submit">Save availability</button><button class="btn secondary" type="button" id="cancelAvailabilityEdit">Clear</button></div></form></div><div class="card"><h3>Current weekly patterns</h3><div id="availabilityTable" class="empty">Connect to load availability.</div></div></div></section>
 <section class="panel" id="panel-blackouts"><div class="section-head"><div><h2>Blackout dates</h2><p>Block days when you are unavailable. Adding a blackout date deletes that day's slots. If patients had booked any of them, those appointments are cancelled and the patients are refunded in full.</p></div></div><div class="grid"><div class="card"><h3>Add a blackout date</h3><form id="blackoutForm"><div class="fields"><div class="field full"><label>Date</label><input name="blackout_date" type="date" required></div><div class="field full"><label>Reason (optional)</label><input name="reason" maxlength="255" placeholder="Leave / conference / clinic closed"></div></div><div class="actions"><button class="btn" type="submit">Add blackout</button></div></form></div><div class="card"><h3>Blocked dates</h3><div id="blackoutTable" class="empty">Connect to load blackout dates.</div></div></div></section>
 <section class="panel" id="panel-schedule"><div class="section-head"><div><h2>Doctor schedule</h2><p>Your slots for the whole week at a glance. Pick a date to see only that day, including past dates.</p></div><div class="filebox"><button class="btn secondary" id="prevWeek" type="button" aria-label="Previous week">◀ Previous</button><button class="btn secondary hidden" id="showWeek" type="button">Show full week</button><button class="btn secondary" id="thisWeek" type="button">This week</button><button class="btn secondary" id="nextWeek" type="button" aria-label="Next week">Next ▶</button><input id="scheduleDate" type="date" aria-label="Show the slots of this date"><button class="btn" id="loadSchedule" type="button">Go</button></div></div><div class="hint">Slot times are stored as UTC instants and displayed in your home timezone. The rolling 30-day slot window refreshes automatically after availability changes.</div><div class="card"><div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap"><h3 style="margin:0" id="weekTitle">Week view</h3><span class="muted">Future slots refresh automatically when availability changes.</span></div><div id="scheduleSummary" class="status">Loading your week…</div><div id="scheduleSlots" class="week-grid"><div class="empty" style="grid-column:1/-1">No schedule loaded.</div></div></div></section>
-<section class="panel" id="panel-appointments"><div class="section-head"><div><h2>Appointments</h2><p>Every appointment in a date range. Filter by status, and change the status of a confirmed appointment from its dropdown.</p></div></div><div class="card"><div class="appt-filters"><div class="field"><label for="apptFrom">From</label><input id="apptFrom" type="date"></div><div class="field"><label for="apptTo">To</label><input id="apptTo" type="date"></div><div class="field"><label for="apptStatus">Status</label><select id="apptStatus"><option value="">All</option><option value="CONFIRMED">Confirmed</option><option value="COMPLETED">Completed</option><option value="NO_SHOW">No-show</option><option value="CANCELLED">Cancelled</option></select></div><div><button class="btn" id="loadAppointments" type="button">Show</button></div></div><div id="apptSummary" class="status"></div><div id="apptTable"></div></div></section>
+<section class="panel" id="panel-appointments"><div class="section-head"><div><h2>Appointments</h2><p>Every appointment in a date range. Filter by status and set the status of any appointment from its dropdown.</p></div></div><div class="card"><div class="appt-filters"><div class="field"><label for="apptFrom">From</label><input id="apptFrom" type="date"></div><div class="field"><label for="apptTo">To</label><input id="apptTo" type="date"></div><div class="field"><label for="apptStatus">Status</label><select id="apptStatus"><option value="">All</option><option value="CONFIRMED">Confirmed</option><option value="COMPLETED">Completed</option><option value="NO_SHOW">No-show</option><option value="CANCELLED">Cancelled</option></select></div><div><button class="btn" id="loadAppointments" type="button">Show</button></div></div><div id="apptSummary" class="status"></div><div id="apptTable"></div></div></section>
+<section class="panel" id="panel-cancelled"><div class="section-head"><div><h2>Cancelled appointments</h2><p>History of appointments cancelled by patients or by you, with the refund that was issued.</p></div></div><div class="card"><div class="appt-filters"><div class="field"><label for="canFrom">From</label><input id="canFrom" type="date"></div><div class="field"><label for="canTo">To</label><input id="canTo" type="date"></div><div><button class="btn" id="loadCancelled" type="button">Show</button></div></div><div id="canSummary" class="status"></div><div id="canTable"></div></div></section>
 </div></main></div><div class="toast" id="toast"></div>
 <script>
 (()=>{'use strict';
@@ -148,7 +149,7 @@ function toast(msg){const t=$('#toast');t.textContent=msg;t.classList.add('show'
 function setStatus(msg,kind=''){const el=$('#connectionStatus');el.textContent=msg;el.className='status '+kind}
 function formObj(form){return Object.fromEntries(new FormData(form).entries())}
 async function api(path,method='GET',body){const opts={method,credentials:'same-origin',headers:{Accept:'application/json','X-CSRF-Token':state.csrf}};if(body!==undefined){opts.headers['Content-Type']='application/json';opts.body=JSON.stringify(body)}const res=await fetch('/bff/api'+path,opts);let data={};try{data=await res.json()}catch{}if(!res.ok){if(res.status===401){showLogin('Your session expired. Please sign in again.')}throw new Error(data.message||`Request failed (${res.status})`)}return data}
-function showPanel(name){$$('.panel').forEach(p=>p.classList.toggle('active',p.id==='panel-'+name));$$('.nav button').forEach(b=>b.classList.toggle('active',b.dataset.panel===name));const titles={overview:'Doctor overview',profile:'My profile',consultations:'Consultation types',availability:'Weekly availability',blackouts:'Blackout dates',schedule:'My schedule',appointments:'Appointments'};$('#pageTitle').textContent=titles[name]||'Doctor dashboard'}
+function showPanel(name){$$('.panel').forEach(p=>p.classList.toggle('active',p.id==='panel-'+name));$$('.nav button').forEach(b=>b.classList.toggle('active',b.dataset.panel===name));const titles={overview:'Doctor overview',profile:'My profile',consultations:'Consultation types',availability:'Weekly availability',blackouts:'Blackout dates',schedule:'My schedule',appointments:'Appointments',cancelled:'Cancelled appointments'};$('#pageTitle').textContent=titles[name]||'Doctor dashboard'}
 $$('.nav button').forEach(b=>b.addEventListener('click',()=>showPanel(b.dataset.panel)));$$('[data-go]').forEach(b=>b.addEventListener('click',()=>showPanel(b.dataset.go)));
 
 const INDIAN_MOBILE=/^[6-9][0-9]{9}$/;
@@ -239,15 +240,19 @@ function mondayOf(iso){const d=new Date(iso+'T00:00:00Z');d.setUTCDate(d.getUTCD
 function fmtDay(iso,opts){return new Date(iso+'T00:00:00Z').toLocaleDateString([],{timeZone:'UTC',...opts})}
 const DAY_NOTE={BLACKOUT:'Blackout day',NO_AVAILABILITY:'No weekly availability set',NOT_MATERIALISED:'Slots not generated yet',NO_SLOTS:'No slots',PAST:'Past date'};
 const STATUS_LABEL={CONFIRMED:'Confirmed',COMPLETED:'Completed',NO_SHOW:'No-show',CANCELLED_BY_PATIENT:'Cancelled by patient',CANCELLED_BY_DOCTOR:'Cancelled by you'};
-/* Status control of one appointment. A confirmed appointment gets a dropdown; a finished one is final (refunds depend on it). */
+/* Status dropdown of every appointment: Confirmed / Completed / No-show / Cancelled.
+   Options that make no sense yet are disabled (Completed and No-show before the start, Cancel after the end).
+   A cancelled appointment is shown as a locked dropdown: its refund was already issued. */
 function statusControl(a){
- if(a.status!=='CONFIRMED')return `<span class="pill ${a.status==='COMPLETED'?'':'off'}" title="Final status">${esc(STATUS_LABEL[a.status]||a.status)}</span>`;
+ const cancelled=a.status==='CANCELLED_BY_PATIENT'||a.status==='CANCELLED_BY_DOCTOR';
  const start=new Date(a.scheduled_start_utc),end=new Date(a.scheduled_end_utc),now=new Date();
- const opts=[['CONFIRMED','Confirmed']];
- if(start<=now)opts.push(['COMPLETED','Completed'],['NO_SHOW','No-show']);
- if(end>now)opts.push(['CANCELLED','Cancelled']);
- if(opts.length===1)return `<span class="pill">Confirmed</span>`;
- return `<select class="appt-status" data-appt="${esc(a.appointment_id)}" aria-label="Change appointment status">${opts.map(([v,l])=>`<option value="${v}">${l}</option>`).join('')}</select>`;
+ const opts=cancelled?[[a.status,STATUS_LABEL[a.status]]]:[
+  ['CONFIRMED','Confirmed',false],
+  ['COMPLETED','Completed',start>now],
+  ['NO_SHOW','No-show',start>now],
+  ['CANCELLED','Cancelled',a.status==='CONFIRMED'&&end<=now]];
+ const html=opts.map(([v,l,off])=>`<option value="${v}"${v===a.status?' selected':''}${off?' disabled':''}>${l}</option>`).join('');
+ return `<select class="appt-status" data-appt="${esc(a.appointment_id)}" data-current="${esc(a.status)}"${cancelled?' disabled title="Cancelled appointments are final: the refund was already recorded"':''} aria-label="Appointment status">${html}</select>`;
 }
 function slotCard(slot,appointments,tz){
  const start=new Date(slot.start_time_utc||slot.start_at_utc),end=new Date(slot.end_time_utc||slot.end_at_utc);
@@ -343,17 +348,36 @@ $('#loadAppointments').onclick=loadAppointments;$('#apptStatus').onchange=loadAp
 document.querySelector('.nav button[data-panel="appointments"]').addEventListener('click',loadAppointments);
 document.addEventListener('change',async e=>{
  const sel=e.target.closest&&e.target.closest('select.appt-status');if(!sel)return;
- const id=sel.dataset.appt,value=sel.value;if(value==='CONFIRMED')return;
- const what={COMPLETED:'mark this appointment as completed',NO_SHOW:'mark this patient as a no-show (no refund is given)',CANCELLED:'cancel this appointment. The patient is refunded in full and the seat becomes free again'}[value];
- if(!confirm('Are you sure you want to '+what+'?')){sel.value='CONFIRMED';return}
+ const id=sel.dataset.appt,value=sel.value,current=sel.dataset.current;if(value===current)return;
+ const what={CONFIRMED:'set this appointment back to confirmed',COMPLETED:'mark this appointment as completed',NO_SHOW:'mark this patient as a no-show (no refund is given)',CANCELLED:'cancel this appointment. The patient is refunded in full, the seat becomes free again and this cannot be undone'}[value];
+ if(!confirm('Are you sure you want to '+what+'?')){sel.value=current;return}
  sel.disabled=true;
  try{
   const d=await api('/appointments/'+encodeURIComponent(id)+'/outcome','POST',{outcome:value});
   toast(d.message||'Status updated');
   await loadSchedule();
   if($('#panel-appointments').classList.contains('active'))await loadAppointments();
- }catch(err){toast(err.message);sel.disabled=false;sel.value='CONFIRMED'}
+  if($('#panel-cancelled').classList.contains('active'))await loadCancelled();
+ }catch(err){toast(err.message);sel.disabled=false;sel.value=current}
 });
+/* Cancelled page: who cancelled, when, and what was refunded. */
+const money=v=>v==null?'—':Number(v).toFixed(2);
+async function loadCancelled(){
+ const today=todayInTimezone(state.homeTimezone);
+ if(!$('#canFrom').value)$('#canFrom').value=addDays(today,-90);
+ if(!$('#canTo').value)$('#canTo').value=addDays(today,90);
+ const from=$('#canFrom').value,to=$('#canTo').value;
+ if(from>to){toast('The From date must not be after the To date');return}
+ try{
+  const d=await api('/appointments?'+new URLSearchParams({from,to,status:'CANCELLED'}).toString());
+  const rows=(d.appointments||[]).slice().sort((a,b)=>String(b.scheduled_start_utc).localeCompare(String(a.scheduled_start_utc)));
+  $('#canSummary').textContent=rows.length?`${rows.length} cancelled appointment(s)`:'No cancelled appointments in this range.';
+  const fmt=v=>v?new Date(v).toLocaleString([],{dateStyle:'medium',timeStyle:'short',timeZone:state.homeTimezone}):'—';
+  $('#canTable').innerHTML=rows.length?`<div class="table-wrap"><table><thead><tr><th>Appointment</th><th>Patient</th><th>Consultation</th><th>Cancelled by</th><th>Cancelled on</th><th>Fee</th><th>Refund</th></tr></thead><tbody>${rows.map(a=>`<tr><td>${esc(fmt(a.scheduled_start_utc))}</td><td>${esc(a.first_name)} ${esc(a.last_name)}${a.phone?'<br><span class="muted">'+esc(a.phone)+'</span>':''}</td><td>${esc(a.consultation_name||'')}</td><td>${a.status==='CANCELLED_BY_DOCTOR'?'You':'Patient'}</td><td>${esc(fmt(a.cancelled_at))}</td><td>${money(a.fee)}</td><td>${a.refund?money(a.refund.amount)+' ('+Number(a.refund.percent)+'%)':'—'}</td></tr>`).join('')}</tbody></table></div>`:'';
+ }catch(e){toast(e.message)}
+}
+$('#loadCancelled').onclick=loadCancelled;
+document.querySelector('.nav button[data-panel="cancelled"]').addEventListener('click',loadCancelled);
 async function loadAll(){const tasks=[['profile',loadProfile],['consultations',loadConsultations],['availability',loadAvailability],['blackouts',loadBlackouts]];const results=await Promise.allSettled(tasks.map(([,fn])=>fn()));const failed=results.map((r,i)=>r.status==='rejected'?`${tasks[i][0]}: ${r.reason.message}`:null).filter(Boolean);if(!failed.length){try{await loadSchedule()}catch(e){failed.push(`schedule: ${e.message}`)}}state.lastErrors=failed;if(failed.length){setStatus('Some dashboard data could not be loaded: '+failed.join(' · '),'err');throw new Error(failed.join(' | '))}setStatus('Your doctor workspace is up to date.','ok')}
 function showLogin(message=''){ $('#appShell').classList.add('hidden');$('#loginScreen').classList.remove('hidden');$('#loginError').textContent=message; }
 async function initialise(){try{const r=await fetch('/bff/session',{credentials:'same-origin'});const d=await r.json();state.csrf=d.csrf_token||'';if(!d.authenticated){showLogin();return}$('#loginScreen').classList.add('hidden');$('#appShell').classList.remove('hidden');await loadAll()}catch(e){showLogin('Unable to connect to MediSlot. Please refresh the page.')}}

@@ -134,7 +134,7 @@ small.note{display:block;margin-top:4px;color:var(--muted)}
 
 <div class="shell hidden" id="appShell">
 <aside class="sidebar"><div class="brand"><span class="brand-mark">M</span> MediSlot</div><div><nav class="nav" aria-label="Patient portal">
-<button class="active" data-panel="search">Find Doctors</button><button data-panel="slots">Slot Browser</button><button data-panel="appointments">My Appointments</button><button data-panel="refunds">Refunds</button><button data-panel="profile">My Profile</button>
+<button class="active" data-panel="search">Find Doctors</button><button data-panel="slots">Slot Browser</button><button data-panel="appointments">My Appointments</button><button data-panel="cancelled">Cancelled</button><button data-panel="refunds">Refunds</button><button data-panel="profile">My Profile</button>
 </nav></div></aside>
 <main class="main"><header class="topbar"><div><h1 id="pageTitle">Find a doctor</h1><small id="welcome">Search by name, hospital, specialisation or city</small></div>
 <div class="filebox"><button class="btn danger" id="logoutButton">Logout</button></div></header>
@@ -178,6 +178,12 @@ small.note{display:block;margin-top:4px;color:var(--muted)}
 <div class="card"><div class="filters"><div class="field"><label for="apptFilter">Show</label><select id="apptFilter"><option value="upcoming">Upcoming</option><option value="">All</option><option value="COMPLETED">Completed</option><option value="CANCELLED">Cancelled</option><option value="NO_SHOW">No-show</option></select></div></div>
 <div id="apptSummary" class="status" style="margin-top:12px"></div>
 <div class="table-wrap"><table><thead><tr><th>When</th><th>Doctor</th><th>Consultation</th><th>Fee</th><th>Status</th><th>Refund</th><th></th></tr></thead><tbody id="apptBody"></tbody></table></div></div>
+</section>
+
+<section class="panel" id="panel-cancelled">
+<div class="section-head"><div><h2>Cancelled appointments</h2><p>Appointments cancelled by you or by the doctor, with the refund you received.</p></div></div>
+<div class="card"><div id="canSummary" class="status"></div>
+<div class="table-wrap"><table><thead><tr><th>Appointment</th><th>Doctor</th><th>Consultation</th><th>Cancelled by</th><th>Cancelled on</th><th>Fee</th><th>Refund</th><th>Deducted</th></tr></thead><tbody id="canBody"></tbody></table></div></div>
 </section>
 
 <section class="panel" id="panel-refunds">
@@ -235,11 +241,11 @@ async function api(path,method='GET',body,extraHeaders){
 
 /* ---------- navigation ---------- */
 function showPanel(name){
-  if(name==='appointments')loadAppointments();if(name==='refunds')loadRefunds();
+  if(name==='appointments')loadAppointments();if(name==='cancelled')loadCancelled();if(name==='refunds')loadRefunds();
   $$('.panel').forEach(p=>p.classList.toggle('active',p.id==='panel-'+name));
   const nav=name==='doctor'?'search':name;
   $$('.nav button').forEach(b=>b.classList.toggle('active',b.dataset.panel===nav));
-  $('#pageTitle').textContent={search:'Find a doctor',doctor:'Doctor profile',slots:'Slot browser',appointments:'My appointments',refunds:'Refunds',profile:'My profile'}[name]||'MediSlot';
+  $('#pageTitle').textContent={search:'Find a doctor',doctor:'Doctor profile',slots:'Slot browser',appointments:'My appointments',cancelled:'Cancelled appointments',refunds:'Refunds',profile:'My profile'}[name]||'MediSlot';
 }
 $$('.nav button').forEach(b=>b.addEventListener('click',()=>showPanel(b.dataset.panel)));
 $$('[data-go]').forEach(b=>b.addEventListener('click',()=>showPanel(b.dataset.go)));
@@ -383,6 +389,17 @@ async function loadAppointments(){
       <td>${a.refund?money(a.refund.amount)+' ('+esc(a.refund.percent)+'%)':'—'}</td>
       <td>${a.status==='CONFIRMED'&&new Date(a.start_time_utc)>new Date()?`<button class="btn danger small" type="button" data-cancel="${a.appointment_id}">Cancel</button>`:''}</td></tr>`).join('');
   }catch(e){$('#apptSummary').textContent=e.message;$('#apptSummary').className='status err'}
+}
+async function loadCancelled(){
+  try{
+    const d=await api('/appointments?'+new URLSearchParams({status:'CANCELLED',page_size:50}).toString());
+    const fmt=v=>v?new Date(v).toLocaleString([],{dateStyle:'medium',timeStyle:'short'}):'—';
+    $('#canSummary').className='status';
+    $('#canSummary').textContent=d.pagination.total?`${d.pagination.total} cancelled appointment(s)`:'You have no cancelled appointments.';
+    $('#canBody').innerHTML=d.appointments.map(a=>`<tr><td>${esc(fmt(a.start_time_utc))}</td><td>Dr. ${esc(a.doctor_name)}</td><td>${esc(a.consultation_name)}</td>
+      <td>${a.status==='CANCELLED_BY_DOCTOR'?'Doctor':'You'}</td><td>${esc(fmt(a.cancelled_at))}</td><td>${money(a.fee)}</td>
+      <td>${a.refund?money(a.refund.amount)+' ('+esc(a.refund.percent)+'%)':'—'}</td><td>${a.refund&&a.refund.deduction!=null?money(a.refund.deduction):'—'}</td></tr>`).join('');
+  }catch(e){$('#canSummary').textContent=e.message;$('#canSummary').className='status err'}
 }
 async function cancelAppointment(id,btn){
   btn.disabled=true;

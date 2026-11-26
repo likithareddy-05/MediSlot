@@ -310,9 +310,10 @@ class HandlerTests(unittest.TestCase):
         self.appts.items["21"]["doctor_id"] = "99"
         self.assertEqual(self.call(self.doctor_conn(), "POST", "/doctors/me/appointments/21/outcome",
                                    {"outcome": "COMPLETED"})[0], 404)
-        self.add_appointment(22, status="CANCELLED_BY_PATIENT")
+        self.add_appointment(22, status="CANCELLED_BY_PATIENT")      # cancelled rows are final
         self.assertEqual(self.call(self.doctor_conn(), "POST", "/doctors/me/appointments/22/outcome",
-                                   {"outcome": "COMPLETED"})[0], 404)
+                                   {"outcome": "COMPLETED"})[0], 400)
+        self.assertEqual(self.appts.items["22"]["status"], "CANCELLED_BY_PATIENT")
 
     def test_cancel_slot_of_another_doctor_is_404(self):
         self.rds.slots["7#1#X"]["doctor_id"] = 99

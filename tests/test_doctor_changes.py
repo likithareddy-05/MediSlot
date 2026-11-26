@@ -200,11 +200,37 @@ class DoctorStatusChangeTests(Base):
         self.assertEqual(self.outcome(11, "CANCELLED")[0], 400)
         self.assertEqual(self.appts.items["11"]["status"], "CONFIRMED")
 
-    def test_setting_confirmed_is_refused(self):
+    def test_unknown_status_is_refused(self):
         self.add(11)
-        status, body = self.outcome(11, "CONFIRMED")
+        status, body = self.outcome(11, "PENDING")
         self.assertEqual(status, 400)
         self.assertIn("CONFIRMED", body["message"])
+
+    def test_every_status_can_be_corrected_among_confirmed_completed_no_show(self):
+        self.add(11)
+        self.assertEqual(self.outcome(11, "NO_SHOW")[0], 200)
+        self.assertEqual(self.rds.ledger[11]["trigger_type"], "NO_SHOW")
+        self.assertEqual(self.outcome(11, "COMPLETED")[0], 200)          # wrong click, corrected
+        item = self.appts.items["11"]
+        self.assertEqual(item["status"], "COMPLETED")
+        self.assertNotIn("refund_tier", item)
+        self.assertEqual(self.rds.ledger, {})                            # the 0% no-show row is gone
+        self.assertEqual(self.outcome(11, "CONFIRMED")[0], 200)
+        self.assertEqual(self.appts.items["11"]["status"], "CONFIRMED")
+        self.assertNotIn("outcome", self.appts.items["11"])
+
+    def test_a_no_show_can_still_be_cancelled_with_a_full_refund(self):
+        self.add(11)
+        self.outcome(11, "NO_SHOW")
+        self.assertEqual(self.outcome(11, "CANCELLED")[0], 200)
+        self.assertEqual(self.rds.ledger[11]["trigger_type"], "DOCTOR_CANCELLATION")
+        self.assertEqual(self.rds.ledger[11]["refund_amount"], Decimal("500.00"))
+
+    def test_a_cancelled_appointment_cannot_be_reopened(self):
+        self.add(11, status="CANCELLED_BY_DOCTOR")
+        status, body = self.outcome(11, "COMPLETED")
+        self.assertEqual(status, 400)
+        self.assertIn("final", body["message"])
 
     def test_completed_and_no_show_still_work(self):
         self.add(11)
@@ -213,10 +239,10 @@ class DoctorStatusChangeTests(Base):
         self.assertEqual(self.outcome(12, "NO_SHOW")[0], 200)
         self.assertEqual((self.appts.items["11"]["status"], self.appts.items["12"]["status"]), ("COMPLETED", "NO_SHOW"))
 
-    def test_a_finished_appointment_cannot_be_changed_again(self):
+    def test_a_completed_appointment_can_be_changed_to_no_show(self):
         self.add(11, status="COMPLETED")
-        self.assertEqual(self.outcome(11, "NO_SHOW")[0], 404)
-        self.assertEqual(self.appts.items["11"]["status"], "COMPLETED")
+        self.assertEqual(self.outcome(11, "NO_SHOW")[0], 200)
+        self.assertEqual(self.appts.items["11"]["status"], "NO_SHOW")
 
     def test_another_doctors_appointment_is_not_found(self):
         self.add(11)

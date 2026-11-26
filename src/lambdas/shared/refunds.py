@@ -148,6 +148,13 @@ def record_refund(cursor, appointment, trigger_type, result, currency="INR"):
         result.hours_before_start, currency))
 
 
+def delete_ledger_row(cursor, appointment_id, trigger_type):
+    """Remove a ledger row of one trigger type (a corrected no-show). Other trigger types are never touched."""
+    cursor.execute("DELETE FROM refund_ledger WHERE appointment_id = %s AND trigger_type = %s",
+                   (int(appointment_id), trigger_type))
+    return cursor.rowcount
+
+
 def refund_fields(result, currency="INR"):
     """The refund outcome as strings, ready to be stored on the DynamoDB appointment item."""
     return {"refund_tier": result.tier, "refund_percent": str(result.percent),

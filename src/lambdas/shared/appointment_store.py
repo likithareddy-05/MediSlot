@@ -151,11 +151,12 @@ def get_appointment(table, appointment_id):
     return table.get_item(Key={"appointment_id": str(appointment_id)}, ConsistentRead=True).get("Item")
 
 
-def transition(table, appointment_id, expected_status, new_status, fields=None):
+def transition(table, appointment_id, expected_status, new_status, fields=None, remove=()):
     """Move an appointment from one status to another in one conditional write.
 
     Returns the updated item, or None when the appointment was no longer in `expected_status`
-    (somebody else changed it first). `fields` are extra attributes set in the same write.
+    (somebody else changed it first). `fields` are extra attributes set in the same write and
+    `remove` names attributes deleted in it (used when a status change is corrected).
     """
     values = {":expected": expected_status, ":new": new_status, ":now": now_iso()}
     names = {"#st": "status"}
@@ -164,9 +165,14 @@ def transition(table, appointment_id, expected_status, new_status, fields=None):
         names[f"#f{index}"] = name
         values[f":f{index}"] = value
         sets.append(f"#f{index} = :f{index}")
+    expression = "SET " + ", ".join(sets)
+    if remove:
+        for index, name in enumerate(remove):
+            names[f"#r{index}"] = name
+        expression += " REMOVE " + ", ".join(f"#r{index}" for index in range(len(remove)))
     try:
         result = table.update_item(Key={"appointment_id": appointment_id},
-            UpdateExpression="SET " + ", ".join(sets),
+            UpdateExpression=expression,
             ConditionExpression="#st = :expected",
             ExpressionAttributeNames=names, ExpressionAttributeValues=values, ReturnValues="ALL_NEW")
         return result.get("Attributes")

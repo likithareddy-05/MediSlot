@@ -119,6 +119,11 @@ class _Eval:
             attr = self.name(add.group(1))
             self.item[attr] = self.item.get(attr, 0) + self.values[add.group(2)]
             return
+        removal = re.search(r"\sREMOVE\s+(.*)$", text, flags=re.I)
+        if removal:
+            text = text[:removal.start()]
+            for token in removal.group(1).split(","):
+                self.item.pop(self.name(token.strip()), None)
         body = re.sub(r"^\s*SET\s+", "", text, flags=re.I)
         parts, depth, cur = [], 0, ""
         for ch in body:
@@ -387,6 +392,13 @@ class FakeConn:
                         "trigger_type": trigger, "tier": tier, "refund_percent": percent, "fee_amount": fee,
                         "refund_amount": refund, "deduction_amount": deduction, "hours_before_start": hours,
                         "currency": currency, "created_at": datetime.now(timezone.utc).replace(tzinfo=None)}
+                    self.rowcount = 1
+            return
+        if n.startswith("DELETE FROM refund_ledger WHERE appointment_id = %s AND trigger_type = %s"):
+            with st.lock:
+                row = st.ledger.get(a[0])
+                if row and row["trigger_type"] == a[1]:
+                    del st.ledger[a[0]]
                     self.rowcount = 1
             return
         if n.startswith("SELECT COUNT(*) AS n, COALESCE(SUM(refund_amount), 0) AS total FROM refund_ledger"):

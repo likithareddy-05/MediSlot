@@ -182,45 +182,6 @@ Resources:
           Value: !Ref EnvironmentName
 
   # ------------------------------------------------------------
-  # DYNAMODB: OLD SLOT TABLE (DEPRECATED, UNUSED since Milestone 5)
-  # Slots moved to RDS. The table and its export are kept only so the deploy does not fail on
-  # a cross-stack ImportValue that is still in use. Once every stack has been redeployed,
-  # this table and the SlotStateTableName output can be deleted.
-  # ------------------------------------------------------------
-
-  SlotStateTable:
-    Type: AWS::DynamoDB::Table
-    Properties:
-      TableName: !Sub "medislot-${EnvironmentName}-slot-state"
-      BillingMode: PAY_PER_REQUEST
-      AttributeDefinitions:
-        - AttributeName: slot_id
-          AttributeType: S
-        - AttributeName: doctor_id
-          AttributeType: S
-        - AttributeName: slot_date
-          AttributeType: S
-      KeySchema:
-        - AttributeName: slot_id
-          KeyType: HASH
-      GlobalSecondaryIndexes:
-        - IndexName: DoctorDateIndex
-          KeySchema:
-            - AttributeName: doctor_id
-              KeyType: HASH
-            - AttributeName: slot_date
-              KeyType: RANGE
-          Projection:
-            ProjectionType: ALL
-      SSESpecification:
-        SSEEnabled: true
-      PointInTimeRecoverySpecification:
-        PointInTimeRecoveryEnabled: true
-      Tags:
-        - Key: Environment
-          Value: !Ref EnvironmentName
-
-  # ------------------------------------------------------------
   # DYNAMODB: BOOKING IDEMPOTENCY (Milestone 5)
   # One item per Idempotency-Key (patient_id#key). The first request stores
   # IN_PROGRESS, then the final response; a replay returns that response and never
@@ -488,12 +449,6 @@ Outputs:
     Value: !Ref AppointmentsTable
     Export:
       Name: !Sub "medislot-${EnvironmentName}-AppointmentsTableName"
-
-  # Deprecated: no Lambda uses the old DynamoDB slot table any more (see SlotStateTable above).
-  SlotStateTableName:
-    Value: !Ref SlotStateTable
-    Export:
-      Name: !Sub "medislot-${EnvironmentName}-SlotStateTableName"
 
   ReportsBucketName:
     Value: !Ref ReportsBucket

@@ -316,13 +316,13 @@ def _page_args(query):
 def _list_appointments(table, patient_id, query):
     page, size = _page_args(query)
     status = (query.get("status") or "").upper()
-    if status and status not in store.STATUSES:
-        raise ApiError(400, "VALIDATION", "status must be one of " + ", ".join(sorted(store.STATUSES)))
+    if status and status not in store.STATUS_FILTERS:
+        raise ApiError(400, "VALIDATION", "status must be one of " + ", ".join(sorted(store.STATUS_FILTERS)))
     upcoming = str(query.get("upcoming") or "").lower() in ("1", "true", "yes")
     now_text = store.now_iso()
     items = store.list_for_patient(table, patient_id, newest_first=not upcoming)
     if status:
-        items = [i for i in items if i.get("status") == status]
+        items = [i for i in items if store.status_matches(i.get("status"), status)]
     if upcoming:
         items = [i for i in items if i.get("status") == store.CONFIRMED and i["start_time_utc"] > now_text]
     total = len(items)

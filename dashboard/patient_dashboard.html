@@ -101,6 +101,9 @@ small.note{display:block;margin-top:4px;color:var(--muted)}
 .danger-zone{margin-top:28px;border-top:1.5px dashed var(--red);padding-top:18px}
 .login-card a,.muted a{color:var(--teal-d);font-weight:600}
 @media(max-width:700px){.doc-card{grid-template-columns:auto 1fr}.doc-card .actions{grid-column:1/-1}}
+.pw-wrap{position:relative;display:block}.pw-wrap input{padding-right:48px}
+.pw-toggle{position:absolute;right:6px;top:50%;transform:translateY(-50%);width:36px;height:36px;border:0;background:transparent;border-radius:8px;cursor:pointer;display:flex;align-items:center;justify-content:center;color:var(--muted,#5b6b6b)}
+.pw-toggle:hover{background:rgba(15,118,110,.10);color:var(--teal,#0f766e)}.pw-toggle:focus-visible{outline:2px solid var(--teal,#0f766e)}
 </style>
 </head>
 <body>
@@ -172,7 +175,7 @@ small.note{display:block;margin-top:4px;color:var(--muted)}
 
 <section class="panel" id="panel-appointments">
 <div class="section-head"><div><h2>My appointments</h2><p>Your upcoming and past bookings. Cancel one to see the refund you will receive.</p></div></div>
-<div class="card"><div class="filters"><div class="field"><label for="apptFilter">Show</label><select id="apptFilter"><option value="upcoming">Upcoming</option><option value="">All</option><option value="COMPLETED">Completed</option><option value="CANCELLED_BY_PATIENT">Cancelled by me</option><option value="CANCELLED_BY_DOCTOR">Cancelled by doctor</option><option value="NO_SHOW">No-show</option></select></div></div>
+<div class="card"><div class="filters"><div class="field"><label for="apptFilter">Show</label><select id="apptFilter"><option value="upcoming">Upcoming</option><option value="">All</option><option value="COMPLETED">Completed</option><option value="CANCELLED">Cancelled</option><option value="NO_SHOW">No-show</option></select></div></div>
 <div id="apptSummary" class="status" style="margin-top:12px"></div>
 <div class="table-wrap"><table><thead><tr><th>When</th><th>Doctor</th><th>Consultation</th><th>Fee</th><th>Status</th><th>Refund</th><th></th></tr></thead><tbody id="apptBody"></tbody></table></div></div>
 </section>
@@ -483,4 +486,38 @@ $('#registerForm').addEventListener('submit',async e=>{
 $('#logoutButton').addEventListener('click',async()=>{try{await fetch('/bff/logout',{method:'POST',credentials:'same-origin',headers:{'X-CSRF-Token':state.csrf}})}finally{resetState();showLogin('You have been signed out.')}});
 initialise();
 })();
-</script></body></html>
+</script><script>
+/* Show/hide password: adds an eye button to every password field. */
+(function () {
+  var EYE = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg>';
+  var EYE_OFF = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.94 17.94A10.9 10.9 0 0 1 12 19c-7 0-11-7-11-7a19.8 19.8 0 0 1 5.06-5.94"/><path d="M9.9 4.24A10.9 10.9 0 0 1 12 4c7 0 11 7 11 7a19.9 19.9 0 0 1-3.17 4.19"/><path d="M14.12 14.12A3 3 0 1 1 9.88 9.88"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
+  function enhance(input) {
+    if (input.dataset.pwToggle) return;
+    input.dataset.pwToggle = "1";
+    var wrap = document.createElement("span");
+    wrap.className = "pw-wrap";
+    input.parentNode.insertBefore(wrap, input);
+    wrap.appendChild(input);
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "pw-toggle";
+    btn.setAttribute("aria-label", "Show password");
+    btn.setAttribute("aria-pressed", "false");
+    btn.innerHTML = EYE;
+    btn.addEventListener("click", function () {
+      var show = input.type === "password";
+      input.type = show ? "text" : "password";
+      btn.innerHTML = show ? EYE_OFF : EYE;
+      btn.setAttribute("aria-label", show ? "Hide password" : "Show password");
+      btn.setAttribute("aria-pressed", show ? "true" : "false");
+    });
+    wrap.appendChild(btn);
+  }
+  function scan() {
+    document.querySelectorAll('input[type="password"]').forEach(enhance);
+  }
+  scan();
+  new MutationObserver(scan).observe(document.body, { childList: true, subtree: true });
+})();
+</script>
+</body></html>

@@ -354,18 +354,20 @@ class FakeConn:
                     row["status"], row["version"] = "CANCELLED", row["version"] + 1
                     self.rowcount = 1
             return
-        if n.startswith("SELECT COUNT(*) AS n, COALESCE(SUM(booked_count > 0)"):
+        if n.startswith("DELETE FROM slots WHERE doctor_id = %s AND slot_date = %s AND booked_count = 0"):
             with st.lock:
-                rows = [r for r in st.slots.values() if r["doctor_id"] == a[0] and str(r["slot_date"]) == str(a[1])
-                        and r["status"] not in ("CANCELLED", "BLACKED_OUT")]
-            self._one = {"n": len(rows), "booked": sum(1 for r in rows if r["booked_count"] > 0)}
+                doomed = [sid for sid, r in st.slots.items() if r["doctor_id"] == a[0]
+                          and str(r["slot_date"]) == str(a[1]) and r["booked_count"] == 0]
+                for sid in doomed:
+                    del st.slots[sid]
+            self.rowcount = len(doomed)
             return
-        if n.startswith("UPDATE slots SET status = 'BLACKED_OUT'"):
+        if n.startswith("SELECT slot_id, end_time_utc FROM slots WHERE doctor_id = %s AND slot_date = %s"):
             with st.lock:
-                for r in st.slots.values():
-                    if r["doctor_id"] == a[0] and str(r["slot_date"]) == str(a[1]) \
-                            and r["status"] not in ("CANCELLED", "BLACKED_OUT"):
-                        r["status"], r["version"] = "BLACKED_OUT", r["version"] + 1
+                rows = sorted((r for r in st.slots.values() if r["doctor_id"] == a[0]
+                               and str(r["slot_date"]) == str(a[1]) and r["booked_count"] > 0
+                               and r["status"] != "CANCELLED"), key=lambda r: r["start_time_utc"])
+            self._all = [{"slot_id": r["slot_id"], "end_time_utc": r["end_time_utc"]} for r in rows]
             return
         if n.startswith("SELECT dct.fee, doc.first_name"):
             doctor, ctype = a

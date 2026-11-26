@@ -273,7 +273,7 @@ def _lookup_id(cursor, table, id_column, value, label, current=None):
     return number
 
 
-APPOINTMENT_STATUSES = set(store.STATUSES)
+APPOINTMENT_STATUSES = set(store.STATUS_FILTERS)
 FAR_FUTURE_ISO = "9999-12-31T23:59:59Z"
 
 
@@ -380,6 +380,21 @@ def _cancel_slot(conn, cursor, doctor_id, slot_id):
     if datetime.fromisoformat(slot["end_time_utc"].replace("Z", "+00:00")) <= datetime.now(timezone.utc):
         raise ValueError("This slot has already ended and can no longer be cancelled.")
 
+    newly_cancelled, expected, pending = _cancel_slot_appointments(conn, cursor, doctor_id, slot_id)
+    _log_event("slot_cancelled", logging.WARNING if pending else logging.INFO, doctor_id=doctor_id,
+               slot_id=slot_id, affected_appointments=newly_cancelled, expected_appointments=expected,
+               pending_appointments=pending)
+    return response(200,{"message":"Slot cancelled" if not pending else
+        "Slot cancelled. Some bookings are still being refunded; press Cancel again in a moment.",
+        "slot_id":slot_id, "affected_appointments":newly_cancelled, "refunded_in_full":newly_cancelled,
+        "pending_appointments":pending})
+
+
+def _cancel_slot_appointments(conn, cursor, doctor_id, slot_id):
+    """Close a slot and refund everyone in it. Returns (newly_cancelled, expected, pending).
+
+    Shared by "Cancel slot" and by adding a blackout date. See _cancel_slot for the ordering rules.
+    """
     slot_store.close_slot(cursor, slot_id)
     conn.commit()
     expected = slot_store.get_slot(cursor, slot_id)["booked_count"]
@@ -406,14 +421,66 @@ def _cancel_slot(conn, cursor, doctor_id, slot_id):
         if accounted >= expected:
             break
         _sleep(CANCEL_SETTLE_PAUSE_SECONDS)
-    pending = max(expected - accounted, 0)
-    _log_event("slot_cancelled", logging.WARNING if pending else logging.INFO, doctor_id=doctor_id,
-               slot_id=slot_id, affected_appointments=newly_cancelled, expected_appointments=expected,
-               pending_appointments=pending)
-    return response(200,{"message":"Slot cancelled" if not pending else
-        "Slot cancelled. Some bookings are still being refunded; press Cancel again in a moment.",
-        "slot_id":slot_id, "affected_appointments":newly_cancelled, "refunded_in_full":newly_cancelled,
-        "pending_appointments":pending})
+    return newly_cancelled, expected, max(expected - accounted, 0)
+
+
+def _cancel_one_appointment(conn, cursor, doctor_id, item):
+    """The doctor cancels ONE confirmed appointment (the slot stays open for other patients).
+
+    CONFIRMED -> CANCELLED_BY_DOCTOR with a 100% refund, then: hold released, ledger row written
+    (RDS), seat given back (RDS), events sent. Every step after the status change can be repeated,
+    so pressing the button again finishes a cancel that stopped half way.
+    Returns the updated appointment item.
+    """
+    table = _appointments_table()
+    appointment_id = item["appointment_id"]
+    if item["status"] == store.CONFIRMED:
+        if item["end_time_utc"] <= store.now_iso():
+            raise ValueError("This appointment has already ended and can no longer be cancelled.")
+        refund = full_refund(item["fee_amount"])
+        updated = store.transition(table, appointment_id, store.CONFIRMED, store.CANCELLED_BY_DOCTOR, {
+            "cancelled_at": store.now_iso(), "cancellation_reason": "Cancelled by the doctor",
+            **refund_fields(refund)})
+        if updated is None:
+            raise ValueError("This appointment changed while you were working. Refresh and try again.")
+        item = updated
+        publish = True
+    elif item["status"] == store.CANCELLED_BY_DOCTOR:
+        publish = False
+    else:
+        raise ValueError(f"This appointment is {item['status']} and cannot be cancelled.")
+
+    try:
+        store.release_hold(table, item["slot_id"], int(item["patient_id"]))
+    except Exception as exc:
+        _log_event("hold_release_failed", logging.ERROR, slot_id=item["slot_id"], error_type=type(exc).__name__)
+    record_refund(cursor, item, "DOCTOR_CANCELLATION", full_refund(item["fee_amount"]))
+    conn.commit()
+
+    slot_after = None
+    if not item.get("seat_released_at"):
+        if slot_store.release_seat(cursor, item["slot_id"]):
+            slot_after = slot_store.get_slot(cursor, item["slot_id"])
+            store.set_fields(table, appointment_id, {"seat_released_at": store.now_iso()})
+        conn.commit()
+    if publish:
+        emit_metric("CancellationsByTier", 1, Tier="DOCTOR_CANCELLED")
+        publish_event("AppointmentCancelled", {
+            "appointment_id": appointment_id, "patient_id": int(item["patient_id"]),
+            "doctor_id": int(doctor_id), "slot_id": item["slot_id"],
+            "consultation_type_id": int(item["consultation_type_id"]),
+            "start_time_utc": item["start_time_utc"], "end_time_utc": item["end_time_utc"],
+            "cancelled_by": "DOCTOR",
+            "refund": {"tier": "DOCTOR_CANCELLED", "percent": 100, "amount": float(item["fee_amount"])}})
+    if slot_after is not None and slot_after["status"] == "AVAILABLE":
+        publish_event("SlotSeatFreed", {
+            "slot_id": item["slot_id"], "doctor_id": int(doctor_id), "appointment_id": appointment_id,
+            "consultation_type_id": int(item["consultation_type_id"]), "start_time_utc": item["start_time_utc"],
+            "capacity": slot_after["capacity"], "booked_count": slot_after["booked_count"],
+            "free_seats": slot_after["free_seats"]})
+    _log_event("appointment_cancelled_by_doctor", doctor_id=doctor_id, appointment_id=appointment_id,
+               seat_released=slot_after is not None)
+    return store.get_appointment(table, appointment_id) or item
 
 
 def _consultation_type_in_use(cursor, doctor_id, type_id):
@@ -444,7 +511,7 @@ SCHEDULE_MESSAGES = {
     "NO_AVAILABILITY": "No weekly availability is configured. Add your weekly availability to generate slots.",
     "NOT_MATERIALISED": "Slots for this date have not been generated yet. They are created automatically when availability is saved and by the daily refresh.",
     "NO_SLOTS": "No slots available for the selected date.",
-    "PAST": "Past date. Slots are only created and shown from today onwards.",
+    "PAST": "Past date. No appointments were held on this date.",
 }
 
 
@@ -457,10 +524,14 @@ def _active_patterns(cursor, doctor_id):
 def _build_day(day, doctor_id, tz_name, local_today, patterns, blackout, day_slots, appointments):
     """One day of the schedule payload with an explicit status so the UI can explain an empty day."""
     if day < local_today:
-        # Slots exist only from today (doctor's local date) onwards: never list earlier days.
+        # Past days are history: only slots that held patients are listed (with their appointments),
+        # so the doctor can review what was completed, missed or cancelled.
+        past_slots = [s for s in day_slots if int(s.get("booked_count", 0)) > 0]
+        past_ids = {s["slot_id"] for s in past_slots}
         return {"doctor_id": doctor_id, "date": day.isoformat(), "timezone": tz_name, "status": "PAST",
-                "is_blackout": False, "blackout_reason": None, "message": SCHEDULE_MESSAGES["PAST"],
-                "slots": [], "appointments": []}
+                "is_blackout": False, "blackout_reason": None,
+                "message": "" if past_slots else SCHEDULE_MESSAGES["PAST"],
+                "slots": past_slots, "appointments": [a for a in appointments if a["slot_id"] in past_ids]}
     # Withdrawn/blacked-out slots are never shown as bookable.
     slots = [s for s in day_slots if s.get("status") not in ("REMOVED", "BLACKED_OUT")]
     if blackout:
@@ -498,7 +569,7 @@ def _schedule_for_range(cursor, conn, doctor_id, first_day, last_day):
     patterns = _active_patterns(cursor, doctor_id)
     tz_name = patterns[0]["timezone_name"] if patterns else "Asia/Kolkata"
     local_today = datetime.now(ZoneInfo(tz_name)).date()
-    shown_first = max(first_day, local_today)  # days before today are never looked up
+    shown_first = first_day  # past days are looked up too: they show what was completed
     slots_by_day, blackouts, appointments = {}, {}, []
     if shown_first <= last_day:
         for slot in slot_store.get_slots(cursor, doctor_id, shown_first, last_day, slot_store.VIEWER_DOCTOR):
@@ -886,17 +957,29 @@ def _handle_api(event, context):
                 cur.execute("INSERT INTO doctor_blackouts (doctor_id,blackout_date,reason) VALUES (%s,%s,%s)",(doctor_id,blackout_date,reason))
                 blackout_id = cur.lastrowid
                 conn.commit()
-                # Slots may already have been materialised for this date. Withdraw them
-                # immediately so a newly-added blackout takes effect (cancelled slots stay cancelled).
-                marked, booked_slots = slot_store.blackout_day(cur, doctor_id, blackout_date)
+                # The day is now closed. Slots nobody booked are deleted; slots that hold patients are
+                # cancelled and every patient is refunded in full (same rules as "Cancel slot").
+                deleted = slot_store.delete_empty_slots_on_day(cur, doctor_id, blackout_date)
                 conn.commit()
-                # Booked appointments are NOT cancelled by a blackout: warn so it is visible.
-                _log_event("blackout_created", logging.WARNING if booked_slots else logging.INFO,
+                booked = slot_store.booked_slots_on_day(cur, doctor_id, blackout_date)
+                conn.commit()
+                now_text = store.now_iso()
+                slots_cancelled = appointments_cancelled = pending = 0
+                for slot_id, end_utc in booked:
+                    if slot_store.iso_utc(end_utc) <= now_text:
+                        continue  # already over: it stays as history
+                    done, _expected, waiting = _cancel_slot_appointments(conn, cur, doctor_id, slot_id)
+                    slots_cancelled += 1
+                    appointments_cancelled += done
+                    pending += waiting
+                _log_event("blackout_created", logging.WARNING if slots_cancelled else logging.INFO,
                            doctor_id=doctor_id, blackout_id=blackout_id,
-                           blackout_date=blackout_date.isoformat(), slots_marked=marked,
-                           slots_with_bookings=booked_slots)
+                           blackout_date=blackout_date.isoformat(), slots_deleted=deleted,
+                           slots_cancelled=slots_cancelled, appointments_cancelled=appointments_cancelled,
+                           pending_appointments=pending)
                 return response(201,{"message":"Blackout date created","blackout_id":blackout_id,
-                    "existing_slots_marked":marked})
+                    "slots_deleted":deleted,"slots_cancelled":slots_cancelled,
+                    "appointments_cancelled":appointments_cancelled,"pending_appointments":pending})
             match = re.fullmatch(r"/blackouts/(\d+)",path)
             if match and method == "DELETE":
                 cur.execute("DELETE FROM doctor_blackouts WHERE blackout_id=%s AND doctor_id=%s",(int(match.group(1)),doctor_id))
@@ -923,16 +1006,20 @@ def _handle_api(event, context):
                     raise ValueError("status must be one of " + ", ".join(sorted(APPOINTMENT_STATUSES)))
                 start_text, end_text = slot_store.iso_utc(start), slot_store.iso_utc(end)
                 items = [i for i in store.list_for_doctor(_appointments_table(), doctor_id, start_text, end_text)
-                         if i["start_time_utc"] < end_text and (not status or i["status"] == status)]
+                         if i["start_time_utc"] < end_text and store.status_matches(i["status"], status)]
                 rows = _doctor_appointment_rows(cur, items)
                 conn.commit()
                 return response(200,{"appointments":rows})
 
             match = re.fullmatch(r"/appointments/(\d+)/outcome",path)
             if match and method == "POST":
-                outcome = str(body.get("outcome","")).upper()
-                if outcome not in {"COMPLETED","NO_SHOW"}:
-                    raise ValueError("outcome must be COMPLETED or NO_SHOW")
+                outcome = str(body.get("outcome") or body.get("status") or "").upper()
+                if outcome == "CANCELLED":
+                    outcome = store.CANCELLED_BY_DOCTOR
+                if outcome == store.CONFIRMED:
+                    raise ValueError("An appointment cannot be set back to CONFIRMED.")
+                if outcome not in {"COMPLETED", "NO_SHOW", store.CANCELLED_BY_DOCTOR}:
+                    raise ValueError("outcome must be COMPLETED, NO_SHOW or CANCELLED")
                 appointment_id = match.group(1)
                 table = _appointments_table()
                 item = store.get_appointment(table, appointment_id)
@@ -940,6 +1027,11 @@ def _handle_api(event, context):
                     _log_event("appointment_outcome_rejected", logging.WARNING, doctor_id=doctor_id,
                                appointment_id=appointment_id, outcome=outcome)
                     return response(404,{"message":"Confirmed appointment not found"})
+                if outcome == store.CANCELLED_BY_DOCTOR:
+                    # The status dropdown's "Cancelled": the slot stays open, the patient gets 100% back.
+                    updated = _cancel_one_appointment(conn, cur, doctor_id, item)
+                    return response(200,{"message":"Appointment cancelled and refunded in full",
+                                         "appointment_id":appointment_id,"status":updated["status"]})
                 refund = no_show_refund(item["fee_amount"]) if outcome == "NO_SHOW" else None
                 fields = {"outcome": outcome, **(refund_fields(refund) if refund else {})}
                 updated = store.transition(table, appointment_id, store.CONFIRMED, outcome, fields)

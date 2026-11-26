@@ -90,19 +90,46 @@ class WeekScheduleTests(unittest.TestCase):
 
 
 class PastDatesTests(unittest.TestCase):
-    def test_past_day_is_hidden_without_touching_storage(self):
-        rds = FakeRds(slots=[slot_on(TODAY - timedelta(days=1))])
-        conn = DoctorConn(rds)
-        with mock.patch.object(slot_store, "get_slots") as get_slots:
-            day = dd._schedule_for_day(conn, conn, 7, TODAY - timedelta(days=1))
-        self.assertEqual((day["status"], day["slots"], day["appointments"]), ("PAST", [], []))
-        get_slots.assert_not_called()
+    """Past dates show what happened: slots that held patients, with their appointments."""
 
-    def test_a_range_that_starts_in_the_past_is_only_looked_up_from_today(self):
+    def past_day(self, slots):
+        yesterday = TODAY - timedelta(days=1)
+        rds = FakeRds(slots=slots)
+        conn = DoctorConn(rds)
+        appts = appointments_table()
+        with mock.patch.object(dd, "ddb", FakeDynamo(appointments=appts)):
+            return dd._schedule_for_day(conn, conn, 7, yesterday)
+
+    def test_past_day_with_a_booked_slot_shows_that_slot(self):
+        yesterday = TODAY - timedelta(days=1)
+        day = self.past_day([slot_on(yesterday, 9, booked=1, capacity=1)])
+        self.assertEqual(day["status"], "PAST")
+        self.assertEqual([s["booked_count"] for s in day["slots"]], [1])
+        self.assertEqual(day["message"], "")
+
+    def test_past_slots_nobody_booked_are_not_listed(self):
+        yesterday = TODAY - timedelta(days=1)
+        day = self.past_day([slot_on(yesterday, 9, booked=0), slot_on(yesterday, 11, booked=2)])
+        self.assertEqual(len(day["slots"]), 1)
+        self.assertEqual(day["slots"][0]["booked_count"], 2)
+
+    def test_past_day_without_any_booking_explains_itself(self):
+        day = self.past_day([])
+        self.assertEqual((day["status"], day["slots"], day["appointments"]), ("PAST", [], []))
+        self.assertIn("No appointments", day["message"])
+
+    def test_a_range_that_starts_in_the_past_is_looked_up_from_its_first_day(self):
         conn = DoctorConn(FakeRds())
+        first = TODAY - timedelta(days=3)
         with mock.patch.object(slot_store, "get_slots", return_value=[]) as get_slots:
-            dd._schedule_for_range(conn, conn, 7, TODAY - timedelta(days=3), TODAY + timedelta(days=3))
-        self.assertEqual(get_slots.call_args.args[2], TODAY)
+            dd._schedule_for_range(conn, conn, 7, first, TODAY + timedelta(days=3))
+        self.assertEqual(get_slots.call_args.args[2], first)
+
+    def test_a_single_date_returns_exactly_one_day(self):
+        conn = DoctorConn(FakeRds())
+        with mock.patch.object(dd, "ddb", FakeDynamo(appointments=appointments_table())):
+            result = dd._schedule_for_range(conn, conn, 7, TODAY + timedelta(days=2), TODAY + timedelta(days=2))
+        self.assertEqual([d["date"] for d in result["days"]], [(TODAY + timedelta(days=2)).isoformat()])
 
     def test_today_is_still_shown(self):
         rds = FakeRds(slots=[slot_on(TODAY, 20)])

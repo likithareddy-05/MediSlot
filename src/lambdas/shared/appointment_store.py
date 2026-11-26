@@ -35,6 +35,18 @@ CANCELLED_BY_PATIENT = "CANCELLED_BY_PATIENT"
 CANCELLED_BY_DOCTOR = "CANCELLED_BY_DOCTOR"
 STATUSES = (CONFIRMED, COMPLETED, NO_SHOW, CANCELLED_BY_PATIENT, CANCELLED_BY_DOCTOR)
 CANCELLED_STATUSES = (CANCELLED_BY_PATIENT, CANCELLED_BY_DOCTOR)
+# A list filter may also be the single word CANCELLED: both kinds of cancellation together.
+CANCELLED_FILTER = "CANCELLED"
+STATUS_FILTERS = STATUSES + (CANCELLED_FILTER,)
+
+
+def status_matches(item_status, wanted):
+    """True when an appointment status passes a list filter (empty filter = everything)."""
+    if not wanted:
+        return True
+    if wanted == CANCELLED_FILTER:
+        return item_status in CANCELLED_STATUSES
+    return item_status == wanted
 
 HOLD_PREFIX = "HOLD#"
 STALE_HOLD_SECONDS = 120

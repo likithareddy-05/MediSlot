@@ -1,0 +1,112 @@
+--- a/src/lambdas/shared/slot_store.py	2026-11-19 21:28:44.000000000 +0530
++++ b/src/lambdas/shared/slot_store.py	2026-11-26 13:36:37.726662314 +0530
+@@ -106,8 +106,8 @@
+ 
+ def existing_slots(cursor, doctor_id, first_day, last_day):
+     """Raw state of every stored slot in a date range, keyed by slot_id (materialiser)."""
+-    cursor.execute("""SELECT slot_id, slot_date, status, booked_count, start_time_utc, availability_pattern_id
+-        FROM slots WHERE doctor_id = %s AND slot_date BETWEEN %s AND %s""", (doctor_id, first_day, last_day))
++    cursor.execute("""SELECT slot_id, slot_date, status, booked_count, start_time_utc, availability_pattern_id,
++        created_at FROM slots WHERE doctor_id = %s AND slot_date BETWEEN %s AND %s""", (doctor_id, first_day, last_day))
+     return {row["slot_id"]: row for row in cursor.fetchall()}
+ 
+ 
+--- a/src/lambdas/shared/slot_generation.py	2026-11-19 21:29:24.000000000 +0530
++++ b/src/lambdas/shared/slot_generation.py	2026-11-26 13:42:14.060706140 +0530
+@@ -6,8 +6,12 @@
+ Rules
+   * Idempotent: slot ids are deterministic (doctor#consultation#UTC start).
+   * Existing slots are never overwritten; booking counters are untouched.
+-  * Nothing is created for dates before today (the doctor's local date).
+-  * Unbooked future slots that no active pattern produces any more are deleted;
++  * Nothing is created for dates before today (the doctor's local date), and on
++    today nothing is created for a start time that has already passed.
++  * An unbooked slot that was created after its own start time (it could never be
++    booked) is deleted on the next run.
++  * Unbooked slots from today on (even ones whose time already passed) that no
++    active pattern produces any more are deleted;
+     slots that hold patients are kept.
+   * Wall-clock times are interpreted in the pattern's IANA zone. Nonexistent
+     spring-forward times are skipped, ambiguous fall-back times use the first occurrence.
+@@ -33,6 +37,14 @@
+     return time.fromisoformat(str(value))
+ 
+ 
++def _created_after_start(row):
++    """True when a stored slot row was created at or after its own start (both naive UTC)."""
++    created, start = row.get("created_at"), row.get("start_time_utc")
++    if not hasattr(created, "year") or not hasattr(start, "hour"):
++        return False  # missing or unexpected value from the driver: keep the slot
++    return created >= start
++
++
+ PATTERN_SQL = """SELECT a.availability_pattern_id,a.consultation_type_id,a.weekday,
+     a.start_time,a.end_time,a.timezone_name,a.effective_from,a.effective_to,
+     c.consultation_name,c.duration_minutes,d.fee,d.slot_capacity
+@@ -45,7 +57,7 @@
+ 
+ def materialize_doctor_slots(conn, doctor_id, start_day=None, days=30):
+     """Create or refresh one doctor's slots for `days` days from start_day. Returns a summary dict."""
+-    created = skipped = removed = restored = 0
++    created = skipped = removed = restored = past_skipped = 0
+     with conn.cursor() as cur:
+         cur.execute(PATTERN_SQL, (doctor_id,))
+         patterns = cur.fetchall()
+@@ -65,7 +77,7 @@
+     for sid, row in stored.items():
+         day = row["slot_date"] if isinstance(row["slot_date"], date) else date.fromisoformat(str(row["slot_date"]))
+         by_day.setdefault(day, {})[sid] = row
+-    now_naive = datetime.now(timezone.utc).replace(tzinfo=None)
++    now_utc = datetime.now(timezone.utc)
+ 
+     for offset in range(days):
+         day = start_day + timedelta(days=offset)
+@@ -94,6 +106,17 @@
+                         slot_id = f"{doctor_id}#{p['consultation_type_id']}#{start_utc.strftime('%Y%m%dT%H%M%SZ')}"
+                         desired.add(slot_id)
+                         current = existing.get(slot_id)
++                        if start_utc <= now_utc:
++                            # Start time already passed: never create or restore it. A slot that was
++                            # created after it started could never be booked, so remove it.
++                            if (current is not None and current["status"] == "AVAILABLE"
++                                    and int(current["booked_count"]) == 0
++                                    and _created_after_start(current)
++                                    and slot_store.delete_if_unbooked(cur, slot_id, ("AVAILABLE",))):
++                                removed += 1
++                            past_skipped += 1
++                            cursor_time += timedelta(minutes=duration)
++                            continue
+                         if current is not None:
+                             if current["status"] in ("REMOVED", "BLACKED_OUT") and int(current["booked_count"]) == 0:
+                                 if slot_store.set_status_if_unbooked(cur, slot_id, "AVAILABLE", current["status"]):
+@@ -111,16 +134,15 @@
+                                 "duration_minutes": duration, "fee": p["fee"], "capacity": int(p["slot_capacity"])}):
+                             created += 1
+                         cursor_time += timedelta(minutes=duration)
+-                # Withdraw unbooked future slots that no active pattern produces any more.
++                # Withdraw unbooked slots (from today on, including ones earlier today whose time
++                # has passed) that no active pattern produces any more, e.g. after a pattern edit.
++                # Slots holding patients are always kept.
+                 # Blackouts are handled by the blackout endpoint (status BLACKED_OUT).
+                 for sid, row in existing.items():
+                     if sid in desired or row["status"] not in ("AVAILABLE", "REMOVED"):
+                         continue
+                     if int(row["booked_count"]) != 0:
+                         continue
+-                    start = row["start_time_utc"]
+-                    if isinstance(start, datetime) and start <= now_naive:
+-                        continue
+                     if slot_store.delete_if_unbooked(cur, sid, ("AVAILABLE", "REMOVED")):
+                         removed += 1
+         conn.commit()
+@@ -128,7 +150,8 @@
+     logger.log(logging.WARNING if skipped else logging.INFO, json.dumps({
+         "event": "materialize_doctor_completed", "doctor_id": doctor_id, "start_date": start_day.isoformat(),
+         "days": days, "patterns": len(patterns), "blackout_days": len(blackouts), "created": created,
+-        "restored": restored, "removed": removed, "dst_wall_times_skipped": skipped}))
++        "restored": restored, "removed": removed, "dst_wall_times_skipped": skipped,
++        "past_times_skipped": past_skipped}))
+     return {"doctor_id": doctor_id, "start_date": start_day.isoformat(), "days": days,
+             "created": created, "restored": restored, "removed": removed,
+-            "dst_wall_times_skipped": skipped, "idempotent": True}
++            "dst_wall_times_skipped": skipped, "past_times_skipped": past_skipped, "idempotent": True}

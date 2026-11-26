@@ -157,14 +157,23 @@ def close_slot(cursor, slot_id):
     return cursor.rowcount == 1
 
 
-def blackout_day(cursor, doctor_id, day):
-    """Withdraw every open slot on a blackout date. Returns (slots_marked, slots_with_bookings)."""
-    cursor.execute("""SELECT COUNT(*) AS n, COALESCE(SUM(booked_count > 0), 0) AS booked FROM slots
-        WHERE doctor_id = %s AND slot_date = %s AND status NOT IN ('CANCELLED','BLACKED_OUT')""", (doctor_id, day))
-    row = cursor.fetchone() or {}
-    cursor.execute("""UPDATE slots SET status = 'BLACKED_OUT', version = version + 1
-        WHERE doctor_id = %s AND slot_date = %s AND status NOT IN ('CANCELLED','BLACKED_OUT')""", (doctor_id, day))
-    return int(row.get("n") or 0), int(row.get("booked") or 0)
+def delete_empty_slots_on_day(cursor, doctor_id, day):
+    """Delete every slot of a doctor on one local date that nobody has booked. Returns how many.
+
+    Used when a blackout date is added. The DELETE is conditional on booked_count = 0, so a slot
+    a patient claimed a moment ago is never removed (it is cancelled with refunds instead).
+    """
+    cursor.execute("DELETE FROM slots WHERE doctor_id = %s AND slot_date = %s AND booked_count = 0",
+                   (doctor_id, day))
+    return cursor.rowcount
+
+
+def booked_slots_on_day(cursor, doctor_id, day):
+    """Slots on one local date that still hold patients and are not cancelled yet: [(slot_id, end_utc)]."""
+    cursor.execute("""SELECT slot_id, end_time_utc FROM slots
+        WHERE doctor_id = %s AND slot_date = %s AND booked_count > 0 AND status <> 'CANCELLED'
+        ORDER BY start_time_utc""", (doctor_id, day))
+    return [(row["slot_id"], row["end_time_utc"]) for row in cursor.fetchall()]
 
 
 def claim_seat(cursor, slot_id, expected_version):

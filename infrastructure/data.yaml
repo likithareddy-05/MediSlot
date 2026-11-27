@@ -72,7 +72,6 @@ Resources:
       # Milestone 7: 7 days of automated backups = point-in-time restore of the database
       # to any second in the last week (used by the DR drill, see docs/operations.md).
       BackupRetentionPeriod: 7
-      PreferredBackupWindow: "20:00-21:00"
       AutoMinorVersionUpgrade: true
       CopyTagsToSnapshot: true
       DeletionProtection: false

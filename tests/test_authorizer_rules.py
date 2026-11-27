@@ -59,5 +59,31 @@ class RoleRuleTests(unittest.TestCase):
             self.assertFalse(allowed(role, "GET", "admin/anything"))
 
 
+    def test_patient_can_reach_the_milestone_6_routes(self):
+        routes = (("PATCH", "appointments/12"), ("DELETE", "appointments/12"),
+                  ("POST", "slots/7%231%2320261201T033000Z/waitlist"), ("DELETE", "slots/7%231%2320261201T033000Z/waitlist"),
+                  ("GET", "patients/me/waitlists"), ("POST", "waitlist-offers/9/accept"))
+        for method, path in routes:
+            self.assertTrue(allowed("PATIENT", method, path), f"{method} {path}")
+            self.assertFalse(allowed("DOCTOR", method, path), f"{method} {path}")
+
+    def test_doctor_slot_cancel_is_still_doctor_only(self):
+        self.assertTrue(allowed("DOCTOR", "DELETE", "doctors/me/slots/7%231%23X"))
+        self.assertFalse(allowed("PATIENT", "DELETE", "doctors/me/slots/7%231%23X"))
+
+    def test_every_patient_api_route_in_the_template_is_allowed_for_patients(self):
+        """Each route wired to the booking Lambda must pass the authorizer for a PATIENT."""
+        methods = re.findall(r"ResourceId: !Ref (\w+)\n\s+HttpMethod: (\w+)\n(?:.*\n){0,14}?\s+- FunctionArn: !GetAtt BookingDomainFunction\.Arn",
+                             TEMPLATE)
+        self.assertGreaterEqual(len(methods), 10)
+        samples = {"AppointmentsRootResource": "appointments", "AppointmentIdResource": "appointments/12",
+                   "AppointmentCancelResource": "appointments/12/cancel", "PatientsMeRefundsResource": "patients/me/refunds",
+                   "SlotWaitlistResource": "slots/7%231%23X/waitlist", "PatientsMeWaitlistsResource": "patients/me/waitlists",
+                   "WaitlistOfferAcceptResource": "waitlist-offers/9/accept"}
+        for resource, method in methods:
+            self.assertIn(resource, samples, f"add a sample path for {resource}")
+            self.assertTrue(allowed("PATIENT", method, samples[resource]), f"{method} {samples[resource]}")
+
+
 if __name__ == "__main__":
     unittest.main()

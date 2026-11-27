@@ -21,6 +21,7 @@ jobs:
       AWS_REGION: ${{ vars.AWS_REGION }}
       ENVIRONMENT_NAME: ${{ vars.ENVIRONMENT_NAME }}
       ALARM_EMAIL: ${{ vars.ALARM_EMAIL }}
+      DB_BACKUP_RETENTION_DAYS: ${{ vars.DB_BACKUP_RETENTION_DAYS }}
       NOTIFICATION_EMAIL: ${{ vars.NOTIFICATION_EMAIL }}
 
     steps:
@@ -178,18 +179,23 @@ jobs:
             local template="$2"
             shift 2
 
-            aws cloudformation deploy \
+            if ! aws cloudformation deploy \
               --stack-name "$stack" \
               --template-file "$template" \
               --parameter-overrides "EnvironmentName=${ENVIRONMENT_NAME}" "$@" \
               --capabilities CAPABILITY_NAMED_IAM \
               --region "$AWS_REGION" \
-              --no-fail-on-empty-changeset
+              --no-fail-on-empty-changeset; then
+              bash scripts/ops.sh stack-errors "$stack"
+              exit 1
+            fi
           }
 
           deploy_stack "medislot-${ENVIRONMENT_NAME}-network" infrastructure/network.yaml
           # Optional repository variable ALARM_EMAIL subscribes an address to the operations alarm topic.
-          deploy_stack "medislot-${ENVIRONMENT_NAME}-data" infrastructure/data.yaml "AlarmEmail=${ALARM_EMAIL:-}"
+          # Optional repository variable DB_BACKUP_RETENTION_DAYS (default 1, the free-tier maximum).
+          deploy_stack "medislot-${ENVIRONMENT_NAME}-data" infrastructure/data.yaml \
+            "AlarmEmail=${ALARM_EMAIL:-}" "DatabaseBackupRetentionDays=${DB_BACKUP_RETENTION_DAYS:-1}"
           deploy_stack "medislot-${ENVIRONMENT_NAME}-security" infrastructure/security.yaml
 
       - name: Ensure SSM configuration parameters exist
@@ -351,7 +357,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          aws cloudformation deploy \
+          if ! aws cloudformation deploy \
             --stack-name "medislot-${ENVIRONMENT_NAME}-schema-init" \
             --template-file infrastructure/schema-init.yaml \
             --parameter-overrides \
@@ -359,7 +365,10 @@ jobs:
               "LambdaArtifactBucket=${ARTIFACT_BUCKET}" \
               "SchemaInitLambdaS3Key=artifacts/${GITHUB_SHA}/schema-init.zip" \
             --region "$AWS_REGION" \
-            --no-fail-on-empty-changeset
+            --no-fail-on-empty-changeset; then
+            bash scripts/ops.sh stack-errors "medislot-${ENVIRONMENT_NAME}-schema-init"
+            exit 1
+          fi
 
           aws lambda invoke \
             --function-name "medislot-${ENVIRONMENT_NAME}-schema-init" \
@@ -381,7 +390,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          aws cloudformation deploy \
+          if ! aws cloudformation deploy \
             --stack-name "medislot-${ENVIRONMENT_NAME}-authentication" \
             --template-file infrastructure/authentication.yaml \
             --s3-bucket "$ARTIFACT_BUCKET" \
@@ -398,7 +407,10 @@ jobs:
               "BookingDomainLambdaS3Key=artifacts/${GITHUB_SHA}/booking-domain.zip" \
             --capabilities CAPABILITY_NAMED_IAM \
             --region "$AWS_REGION" \
-            --no-fail-on-empty-changeset
+            --no-fail-on-empty-changeset; then
+            bash scripts/ops.sh stack-errors "medislot-${ENVIRONMENT_NAME}-authentication"
+            exit 1
+          fi
 
       - name: Materialize initial rolling slot window
         shell: bash
@@ -425,7 +437,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          aws cloudformation deploy \
+          if ! aws cloudformation deploy \
             --stack-name "medislot-${ENVIRONMENT_NAME}-workflows" \
             --template-file infrastructure/workflows.yaml \
             --parameter-overrides \
@@ -438,19 +450,25 @@ jobs:
               "NotificationEmail=${NOTIFICATION_EMAIL:-}" \
             --capabilities CAPABILITY_NAMED_IAM \
             --region "$AWS_REGION" \
-            --no-fail-on-empty-changeset
+            --no-fail-on-empty-changeset; then
+            bash scripts/ops.sh stack-errors "medislot-${ENVIRONMENT_NAME}-workflows"
+            exit 1
+          fi
 
       - name: Deploy observability (dashboard, alarms, budget)
         shell: bash
         run: |
           set -euo pipefail
 
-          aws cloudformation deploy \
+          if ! aws cloudformation deploy \
             --stack-name "medislot-${ENVIRONMENT_NAME}-observability" \
             --template-file infrastructure/observability.yaml \
             --parameter-overrides "EnvironmentName=${ENVIRONMENT_NAME}" \
             --region "$AWS_REGION" \
-            --no-fail-on-empty-changeset
+            --no-fail-on-empty-changeset; then
+            bash scripts/ops.sh stack-errors "medislot-${ENVIRONMENT_NAME}-observability"
+            exit 1
+          fi
 
           # Cost allocation: the Project / Environment tags must be activated once per account
           # before AWS Budgets and Cost Explorer can filter on them (takes up to 24 hours).
@@ -509,7 +527,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          aws cloudformation deploy \
+          if ! aws cloudformation deploy \
             --stack-name "medislot-${ENVIRONMENT_NAME}-dashboard" \
             --template-file infrastructure/dashboard.yaml \
             --parameter-overrides \
@@ -519,7 +537,10 @@ jobs:
               "ApiBaseUrl=${API_BASE_URL}" \
             --capabilities CAPABILITY_NAMED_IAM \
             --region "$AWS_REGION" \
-            --no-fail-on-empty-changeset
+            --no-fail-on-empty-changeset; then
+            bash scripts/ops.sh stack-errors "medislot-${ENVIRONMENT_NAME}-dashboard"
+            exit 1
+          fi
 
       - name: Update dashboard files on existing EC2 instance
         env:
@@ -783,5 +804,7 @@ jobs:
       - name: Drift detection (every stack should be IN_SYNC)
         shell: bash
         run: |
-          set -euo pipefail
-          bash scripts/ops.sh drift-check
+          set -uo pipefail
+          # Reporting only: a drift-check problem (e.g. a missing cloudformation:DetectStackDrift
+          # permission) must not turn a successful deployment red.
+          bash scripts/ops.sh drift-check || echo "::warning::Drift detection could not complete; run MediSlot Operations -> drift-check."

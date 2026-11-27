@@ -468,6 +468,239 @@ Resources:
         Project: MediSlot
         Environment: !Ref EnvironmentName
 
+  # ---------------------------------------------------------
+  # MILESTONE 6 WORKFLOW ROLES (least privilege, specific actions and resource ARNs).
+  # They live here, not in the workflows stack, so they exist before the Lambdas, the
+  # SQS triggers and the state machine that check them at creation time. Resources are
+  # referenced by their fixed names (medislot-<env>-...).
+  # ---------------------------------------------------------
+
+  WorkflowDatabaseLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub medislot-${EnvironmentName}-workflow-db-lambda-role
+      Description: Reschedule saga, waitlist workers and no-show sweeper (RDS, appointments table, events)
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AWSXRayDaemonWriteAccess
+      Policies:
+        - PolicyName: MediSlotWorkflowDatabaseAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ReadDatabaseSecret
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - Fn::ImportValue: !Sub medislot-${EnvironmentName}-DatabaseSecretArn
+              - Sid: ReadConfiguration
+                Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                Resource:
+                  - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/medislot/${EnvironmentName}/database/*
+                  - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/medislot/${EnvironmentName}/booking/*
+                  - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/medislot/${EnvironmentName}/waitlist/*
+                  - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/medislot/${EnvironmentName}/reschedule/*
+              - Sid: ManageAppointments
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                Resource:
+                  - !Sub
+                    - arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${Table}
+                    - Table:
+                        Fn::ImportValue: !Sub medislot-${EnvironmentName}-AppointmentsTableName
+                  - !Sub
+                    - arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${Table}/index/*
+                    - Table:
+                        Fn::ImportValue: !Sub medislot-${EnvironmentName}-AppointmentsTableName
+              - Sid: PublishDomainEvents
+                Effect: Allow
+                Action:
+                  - events:PutEvents
+                Resource:
+                  - Fn::ImportValue: !Sub medislot-${EnvironmentName}-EventBusArn
+              - Sid: ConsumeWaitlistQueue
+                Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                  - sqs:ChangeMessageVisibility
+                Resource:
+                  - !Sub arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:medislot-${EnvironmentName}-waitlist-seat-freed
+      Tags:
+        - Key: Project
+          Value: MediSlot
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  NotificationLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub medislot-${EnvironmentName}-notification-lambda-role
+      Description: Notification consumer and reminder dispatcher (dispatch log, SNS topic, notification queue)
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AWSXRayDaemonWriteAccess
+      Policies:
+        - PolicyName: MediSlotNotificationAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: DispatchLog
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                Resource:
+                  - !Sub
+                    - arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${Table}
+                    - Table:
+                        Fn::ImportValue: !Sub medislot-${EnvironmentName}-NotificationDispatchLogTableName
+              - Sid: ReadAppointmentsByStatus
+                Effect: Allow
+                Action:
+                  - dynamodb:Query
+                Resource:
+                  - !Sub
+                    - arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${Table}/index/StatusStartIndex
+                    - Table:
+                        Fn::ImportValue: !Sub medislot-${EnvironmentName}-AppointmentsTableName
+              - Sid: PublishNotifications
+                Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource:
+                  - !Sub arn:${AWS::Partition}:sns:${AWS::Region}:${AWS::AccountId}:medislot-${EnvironmentName}-notifications
+              - Sid: ConsumeNotificationQueue
+                Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                  - sqs:ChangeMessageVisibility
+                Resource:
+                  - !Sub arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:medislot-${EnvironmentName}-notifications
+      Tags:
+        - Key: Project
+          Value: MediSlot
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  StepFunctionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub medislot-${EnvironmentName}-reschedule-saga-role
+      Description: Reschedule saga state machine (invokes the saga Lambda, writes logs and traces)
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: MediSlotRescheduleSaga
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: InvokeSagaFunction
+                Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:medislot-${EnvironmentName}-reschedule-saga
+                  - !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:medislot-${EnvironmentName}-reschedule-saga:*
+              # CloudWatch Logs delivery and X-Ray do not support resource-level permissions,
+              # so these specific actions are granted on "*" (as the Step Functions docs require).
+              - Sid: ExecutionLogDelivery
+                Effect: Allow
+                Action:
+                  - logs:CreateLogDelivery
+                  - logs:GetLogDelivery
+                  - logs:UpdateLogDelivery
+                  - logs:DeleteLogDelivery
+                  - logs:ListLogDeliveries
+                  - logs:PutResourcePolicy
+                  - logs:DescribeResourcePolicies
+                  - logs:DescribeLogGroups
+                Resource: "*"
+              - Sid: Tracing
+                Effect: Allow
+                Action:
+                  - xray:PutTraceSegments
+                  - xray:PutTelemetryRecords
+                  - xray:GetSamplingRules
+                  - xray:GetSamplingTargets
+                Resource: "*"
+      Tags:
+        - Key: Project
+          Value: MediSlot
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  SchedulerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub medislot-${EnvironmentName}-scheduler-role
+      Description: EventBridge Scheduler invokes the offer expiry sweeper, reminder dispatcher and no-show sweeper
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: InvokeScheduledJobs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: InvokeScheduledJobs
+                Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:medislot-${EnvironmentName}-offer-expiry-sweeper
+                  - !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:medislot-${EnvironmentName}-reminder-dispatcher
+                  - !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:medislot-${EnvironmentName}-no-show-sweeper
+      Tags:
+        - Key: Project
+          Value: MediSlot
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
 Outputs:
   AuthLambdaRoleArn:
     Description: Execution role ARN for the consolidated Auth Lambda
@@ -490,3 +723,23 @@ Outputs:
   JwtSigningSecretParameterName:
     Description: SSM parameter name containing the JWT signing secret
     Value: !Sub /medislot/${EnvironmentName}/auth/jwt-signing-secret
+
+  WorkflowDatabaseLambdaRoleArn:
+    Value: !GetAtt WorkflowDatabaseLambdaRole.Arn
+    Export:
+      Name: !Sub medislot-${EnvironmentName}-WorkflowDatabaseLambdaRoleArn
+
+  NotificationLambdaRoleArn:
+    Value: !GetAtt NotificationLambdaRole.Arn
+    Export:
+      Name: !Sub medislot-${EnvironmentName}-NotificationLambdaRoleArn
+
+  RescheduleSagaRoleArn:
+    Value: !GetAtt StepFunctionsRole.Arn
+    Export:
+      Name: !Sub medislot-${EnvironmentName}-RescheduleSagaRoleArn
+
+  SchedulerRoleArn:
+    Value: !GetAtt SchedulerRole.Arn
+    Export:
+      Name: !Sub medislot-${EnvironmentName}-SchedulerRoleArn

@@ -2,6 +2,7 @@
 # MediSlot operations (Milestone 7). Run by .github/workflows/operations.yml and by the deploy
 # pipeline (drift-check). Needs AWS credentials, AWS_REGION and ENVIRONMENT_NAME.
 #
+#   scripts/ops.sh stack-errors STACK     print why a stack deployment failed (used by the pipeline)
 #   scripts/ops.sh drift-check            detect drift on every stack; prints IN_SYNC / DRIFTED
 #   scripts/ops.sh dr-drill               restore RDS (point in time) and the appointments table
 #                                         (DynamoDB PITR) into temporary copies, measure the restore
@@ -148,9 +149,32 @@ teardown() {
   echo "Teardown complete. The RDS instance left a final snapshot (DeletionPolicy: Snapshot)." | tee -a "$SUMMARY"
 }
 
+stack_errors() {
+  # Print why a stack deployment failed (the pipeline calls this after a failed deploy).
+  local stack="$1" status
+  status="$(aws cloudformation describe-stacks --stack-name "$stack" --region "$AWS_REGION" \
+    --query "Stacks[0].StackStatus" --output text 2>/dev/null || echo "UNKNOWN")"
+  echo "::error::Stack ${stack} failed (status ${status}). First failure reasons, newest first:"
+  aws cloudformation describe-stack-events --stack-name "$stack" --region "$AWS_REGION" --max-items 60 \
+    --query "StackEvents[?contains(ResourceStatus,'FAILED') && ResourceStatusReason!='Resource update cancelled' && ResourceStatusReason!='Resource creation cancelled'].[Timestamp,LogicalResourceId,ResourceStatusReason]" \
+    --output table || true
+  if aws cloudformation describe-stack-events --stack-name "$stack" --region "$AWS_REGION" --max-items 60 \
+      --query "StackEvents[].ResourceStatusReason" --output text 2>/dev/null \
+      | grep -qiE "not authorized|AccessDenied|is not authorized to perform"; then
+    echo "::error::The GitHub deploy role (secret AWS_ROLE_ARN) is missing a permission named above. Add it to that role and run the deploy again."
+  fi
+  case "$status" in
+    *ROLLBACK_FAILED)
+      echo "::error::The stack is stuck in ${status}. In CloudFormation choose 'Continue update rollback' (or delete the stack if it was never created), then rerun." ;;
+    ROLLBACK_COMPLETE)
+      echo "::error::The stack was never created successfully. Delete it in CloudFormation, then rerun the deploy." ;;
+  esac
+}
+
 case "${1:-}" in
+  stack-errors) stack_errors "${2:?stack name required}" ;;
   drift-check) drift_check ;;
   dr-drill) dr_drill ;;
   teardown) teardown "${2:-}" ;;
-  *) echo "usage: $0 drift-check | dr-drill | teardown DELETE-medislot-<env>"; exit 2 ;;
+  *) echo "usage: $0 stack-errors STACK | drift-check | dr-drill | teardown DELETE-medislot-<env>"; exit 2 ;;
 esac

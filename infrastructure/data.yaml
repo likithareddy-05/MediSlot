@@ -19,6 +19,15 @@ Parameters:
     Default: ""
     Description: Optional e-mail address subscribed to the operations alarm topic (alarms and budget alerts).
 
+  DatabaseBackupRetentionDays:
+    Type: Number
+    Default: 1
+    MinValue: 1
+    MaxValue: 35
+    Description: >-
+      Days of automated RDS backups (point-in-time restore window). AWS free-tier / free-plan
+      accounts allow at most 1; on a paid account set 7 (repository variable DB_BACKUP_RETENTION_DAYS).
+
 Conditions:
   HasAlarmEmail: !Not [!Equals [!Ref AlarmEmail, ""]]
 
@@ -69,9 +78,9 @@ Resources:
             !Sub "medislot-${EnvironmentName}-RDSSecurityGroupId"
       PubliclyAccessible: false
       MultiAZ: false
-      # Milestone 7: 7 days of automated backups = point-in-time restore of the database
-      # to any second in the last week (used by the DR drill, see docs/operations.md).
-      BackupRetentionPeriod: 7
+      # Milestone 7: automated backups = point-in-time restore of the database to any second
+      # inside the retention window (used by the DR drill). 1 day is the free-tier maximum.
+      BackupRetentionPeriod: !Ref DatabaseBackupRetentionDays
       AutoMinorVersionUpgrade: true
       CopyTagsToSnapshot: true
       DeletionProtection: false

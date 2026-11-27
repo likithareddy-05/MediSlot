@@ -179,6 +179,7 @@ jobs:
             local template="$2"
             shift 2
 
+            bash scripts/ops.sh clear-failed-create "$stack"
             if ! aws cloudformation deploy \
               --stack-name "$stack" \
               --template-file "$template" \
@@ -357,6 +358,7 @@ jobs:
         run: |
           set -euo pipefail
 
+          bash scripts/ops.sh clear-failed-create "medislot-${ENVIRONMENT_NAME}-schema-init"
           if ! aws cloudformation deploy \
             --stack-name "medislot-${ENVIRONMENT_NAME}-schema-init" \
             --template-file infrastructure/schema-init.yaml \
@@ -390,6 +392,7 @@ jobs:
         run: |
           set -euo pipefail
 
+          bash scripts/ops.sh clear-failed-create "medislot-${ENVIRONMENT_NAME}-authentication"
           if ! aws cloudformation deploy \
             --stack-name "medislot-${ENVIRONMENT_NAME}-authentication" \
             --template-file infrastructure/authentication.yaml \
@@ -437,6 +440,7 @@ jobs:
         run: |
           set -euo pipefail
 
+          bash scripts/ops.sh clear-failed-create "medislot-${ENVIRONMENT_NAME}-workflows"
           if ! aws cloudformation deploy \
             --stack-name "medislot-${ENVIRONMENT_NAME}-workflows" \
             --template-file infrastructure/workflows.yaml \
@@ -460,6 +464,7 @@ jobs:
         run: |
           set -euo pipefail
 
+          bash scripts/ops.sh clear-failed-create "medislot-${ENVIRONMENT_NAME}-observability"
           if ! aws cloudformation deploy \
             --stack-name "medislot-${ENVIRONMENT_NAME}-observability" \
             --template-file infrastructure/observability.yaml \
@@ -527,6 +532,7 @@ jobs:
         run: |
           set -euo pipefail
 
+          bash scripts/ops.sh clear-failed-create "medislot-${ENVIRONMENT_NAME}-dashboard"
           if ! aws cloudformation deploy \
             --stack-name "medislot-${ENVIRONMENT_NAME}-dashboard" \
             --template-file infrastructure/dashboard.yaml \

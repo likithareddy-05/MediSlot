@@ -464,11 +464,13 @@ Resources:
                "label": "Seat release failures"
               }
              ],
-             {
-              "expression": "SEARCH('{MediSlot,Environment,Reason} MetricName=\"BookingsRejected\" Environment=\"${EnvironmentName}\"', 'Sum', 300)",
-              "label": "BookingsRejected",
-              "id": "s14820"
-             }
+             [
+              {
+               "expression": "SEARCH('{MediSlot,Environment,Reason} MetricName=\"BookingsRejected\" Environment=\"${EnvironmentName}\"', 'Sum', 300)",
+               "label": "BookingsRejected",
+               "id": "s14820"
+              }
+             ]
             ],
             "view": "timeSeries",
             "stat": "Sum",
@@ -486,11 +488,13 @@ Resources:
             "title": "Cancellations by refund tier",
             "region": "${AWS::Region}",
             "metrics": [
-             {
-              "expression": "SEARCH('{MediSlot,Environment,Tier} MetricName=\"CancellationsByTier\" Environment=\"${EnvironmentName}\"', 'Sum', 300)",
-              "label": "CancellationsByTier",
-              "id": "s86642"
-             }
+             [
+              {
+               "expression": "SEARCH('{MediSlot,Environment,Tier} MetricName=\"CancellationsByTier\" Environment=\"${EnvironmentName}\"', 'Sum', 300)",
+               "label": "CancellationsByTier",
+               "id": "s86642"
+              }
+             ]
             ],
             "view": "timeSeries",
             "stat": "Sum",
@@ -644,11 +648,13 @@ Resources:
                "label": "ReschedulesCompensated"
               }
              ],
-             {
-              "expression": "SEARCH('{MediSlot,Environment,Reason} MetricName=\"ReschedulesFailed\" Environment=\"${EnvironmentName}\"', 'Sum', 300)",
-              "label": "ReschedulesFailed",
-              "id": "s21247"
-             }
+             [
+              {
+               "expression": "SEARCH('{MediSlot,Environment,Reason} MetricName=\"ReschedulesFailed\" Environment=\"${EnvironmentName}\"', 'Sum', 300)",
+               "label": "ReschedulesFailed",
+               "id": "s21247"
+              }
+             ]
             ],
             "view": "timeSeries",
             "stat": "Sum",
@@ -760,11 +766,13 @@ Resources:
             "title": "Notifications dispatched by event",
             "region": "${AWS::Region}",
             "metrics": [
-             {
-              "expression": "SEARCH('{MediSlot,Environment,EventType} MetricName=\"NotificationsDispatched\" Environment=\"${EnvironmentName}\"', 'Sum', 300)",
-              "label": "NotificationsDispatched",
-              "id": "s13849"
-             }
+             [
+              {
+               "expression": "SEARCH('{MediSlot,Environment,EventType} MetricName=\"NotificationsDispatched\" Environment=\"${EnvironmentName}\"', 'Sum', 300)",
+               "label": "NotificationsDispatched",
+               "id": "s13849"
+              }
+             ]
             ],
             "view": "timeSeries",
             "stat": "Sum",

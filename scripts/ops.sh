@@ -3,6 +3,7 @@
 # pipeline (drift-check). Needs AWS credentials, AWS_REGION and ENVIRONMENT_NAME.
 #
 #   scripts/ops.sh stack-errors STACK     print why a stack deployment failed (used by the pipeline)
+#   scripts/ops.sh clear-failed-create STACK  remove a stack left in ROLLBACK_COMPLETE (used by the pipeline)
 #   scripts/ops.sh drift-check            detect drift on every stack; prints IN_SYNC / DRIFTED
 #   scripts/ops.sh dr-drill               restore RDS (point in time) and the appointments table
 #                                         (DynamoDB PITR) into temporary copies, measure the restore
@@ -149,6 +150,20 @@ teardown() {
   echo "Teardown complete. The RDS instance left a final snapshot (DeletionPolicy: Snapshot)." | tee -a "$SUMMARY"
 }
 
+clear_failed_create() {
+  # A stack whose FIRST creation failed sits in ROLLBACK_COMPLETE and can never be updated.
+  # It holds no resources, so delete it and let the deploy create it again. Stacks that
+  # failed an UPDATE (UPDATE_ROLLBACK_COMPLETE) are healthy and are left alone.
+  local stack="$1" status
+  status="$(aws cloudformation describe-stacks --stack-name "$stack" --region "$AWS_REGION" \
+    --query "Stacks[0].StackStatus" --output text 2>/dev/null || echo "NONE")"
+  if [[ "$status" == "ROLLBACK_COMPLETE" ]]; then
+    echo "Stack ${stack} is ROLLBACK_COMPLETE from an earlier failed create; deleting it before deploying again."
+    aws cloudformation delete-stack --stack-name "$stack" --region "$AWS_REGION"
+    aws cloudformation wait stack-delete-complete --stack-name "$stack" --region "$AWS_REGION"
+  fi
+}
+
 stack_errors() {
   # Print why a stack deployment failed (the pipeline calls this after a failed deploy).
   local stack="$1" status
@@ -167,14 +182,15 @@ stack_errors() {
     *ROLLBACK_FAILED)
       echo "::error::The stack is stuck in ${status}. In CloudFormation choose 'Continue update rollback' (or delete the stack if it was never created), then rerun." ;;
     ROLLBACK_COMPLETE)
-      echo "::error::The stack was never created successfully. Delete it in CloudFormation, then rerun the deploy." ;;
+      echo "::error::The stack was never created successfully. Fix the reason above and rerun; the next deploy removes the failed stack automatically." ;;
   esac
 }
 
 case "${1:-}" in
   stack-errors) stack_errors "${2:?stack name required}" ;;
+  clear-failed-create) clear_failed_create "${2:?stack name required}" ;;
   drift-check) drift_check ;;
   dr-drill) dr_drill ;;
   teardown) teardown "${2:-}" ;;
-  *) echo "usage: $0 stack-errors STACK | drift-check | dr-drill | teardown DELETE-medislot-<env>"; exit 2 ;;
+  *) echo "usage: $0 stack-errors STACK | clear-failed-create STACK | drift-check | dr-drill | teardown DELETE-medislot-<env>"; exit 2 ;;
 esac

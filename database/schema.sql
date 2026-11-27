@@ -460,6 +460,11 @@ CREATE TABLE IF NOT EXISTS doctor_blackouts (
 -- slot_id is deterministic (doctor#consultation_type#UTC start), so refreshing the
 -- slots is idempotent. slot_date is the doctor's local calendar date.
 -- status: AVAILABLE | CANCELLED (doctor cancelled it) | REMOVED | BLACKED_OUT
+--
+-- held_count (Milestone 6): seats reserved for the waitlist. When a seat is given back
+-- while patients are waiting, the SAME UPDATE moves it from booked_count to held_count,
+-- so normal booking (which needs booked_count + held_count < capacity) can never take it.
+-- Each held seat carries at most one live hold offer (see waitlist_offers).
 -- ============================================================
 
 CREATE TABLE IF NOT EXISTS slots (
@@ -476,6 +481,7 @@ CREATE TABLE IF NOT EXISTS slots (
     fee DECIMAL(10,2) NOT NULL,
     capacity SMALLINT UNSIGNED NOT NULL,
     booked_count SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+    held_count SMALLINT UNSIGNED NOT NULL DEFAULT 0,
     version INT UNSIGNED NOT NULL DEFAULT 0,
     status VARCHAR(12) NOT NULL DEFAULT 'AVAILABLE',
     created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
@@ -493,6 +499,7 @@ CREATE TABLE IF NOT EXISTS slots (
     CONSTRAINT chk_slots_status CHECK (status IN ('AVAILABLE','CANCELLED','REMOVED','BLACKED_OUT')),
     CONSTRAINT chk_slots_capacity CHECK (capacity >= 1),
     CONSTRAINT chk_slots_booked CHECK (booked_count <= capacity),
+    CONSTRAINT chk_slots_held CHECK (booked_count + held_count <= capacity),
     CONSTRAINT chk_slots_times CHECK (start_time_utc < end_time_utc)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
@@ -532,6 +539,67 @@ CREATE TABLE IF NOT EXISTS refund_ledger (
     CONSTRAINT chk_refund_trigger CHECK (trigger_type IN ('PATIENT_CANCELLATION','DOCTOR_CANCELLATION','NO_SHOW')),
     CONSTRAINT chk_refund_percent CHECK (refund_percent BETWEEN 0 AND 100),
     CONSTRAINT chk_refund_amounts CHECK (refund_amount >= 0 AND deduction_amount >= 0 AND refund_amount <= fee_amount)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+
+-- ============================================================
+-- WAITLIST (Milestone 6)
+-- A patient may join the waitlist of a FULL slot; the line is ordered by join time.
+-- status: WAITING -> OFFERED -> PROMOTED (accepted) | EXPIRED (offer not accepted)
+--         WAITING/OFFERED -> LEFT (patient left) | CLOSED (slot cancelled or started)
+-- `active` is 1 while WAITING or OFFERED and NULL otherwise, so the unique key allows
+-- one active entry per patient per slot but any number of finished ones.
+-- At most 5 active entries per patient (SSM: /medislot/<env>/waitlist/max-active-per-patient).
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS waitlist_entries (
+    entry_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    slot_id VARCHAR(64) NOT NULL,
+    patient_id BIGINT UNSIGNED NOT NULL,
+    status VARCHAR(10) NOT NULL DEFAULT 'WAITING',
+    active TINYINT GENERATED ALWAYS AS (IF(status IN ('WAITING','OFFERED'), 1, NULL)) STORED,
+    joined_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+    PRIMARY KEY (entry_id),
+    UNIQUE KEY uq_waitlist_active (slot_id, patient_id, active),
+    KEY idx_waitlist_queue (slot_id, status, joined_at, entry_id),
+    KEY idx_waitlist_patient (patient_id, status),
+    CONSTRAINT fk_waitlist_slot FOREIGN KEY (slot_id)
+        REFERENCES slots (slot_id) ON UPDATE RESTRICT ON DELETE CASCADE,
+    CONSTRAINT fk_waitlist_patient FOREIGN KEY (patient_id)
+        REFERENCES patients (user_id) ON UPDATE RESTRICT ON DELETE CASCADE,
+    CONSTRAINT chk_waitlist_status CHECK (status IN ('WAITING','OFFERED','PROMOTED','EXPIRED','LEFT','CLOSED'))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+-- ============================================================
+-- HOLD OFFERS (Milestone 6)
+-- One row per offer. An OFFERED row is a live offer: it owns one held seat of the slot
+-- (slots.held_count) until it is ACCEPTED, EXPIRED, DECLINED (patient left) or CANCELLED
+-- (slot cancelled). Every change happens while the slot row is locked (SELECT ... FOR
+-- UPDATE), so the number of live offers of a slot can never exceed its held seats: the
+-- same freed seat is never offered to two patients at once.
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS waitlist_offers (
+    offer_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    slot_id VARCHAR(64) NOT NULL,
+    entry_id BIGINT UNSIGNED NOT NULL,
+    patient_id BIGINT UNSIGNED NOT NULL,
+    status VARCHAR(10) NOT NULL DEFAULT 'OFFERED',
+    offered_at DATETIME(6) NOT NULL,
+    expires_at DATETIME(6) NOT NULL,
+    resolved_at DATETIME(6) NULL,
+    appointment_id BIGINT UNSIGNED NULL,
+    PRIMARY KEY (offer_id),
+    UNIQUE KEY uq_offer_entry (entry_id),
+    KEY idx_offers_expiry (status, expires_at),
+    KEY idx_offers_slot (slot_id, status),
+    KEY idx_offers_patient (patient_id, status),
+    CONSTRAINT fk_offer_slot FOREIGN KEY (slot_id)
+        REFERENCES slots (slot_id) ON UPDATE RESTRICT ON DELETE CASCADE,
+    CONSTRAINT fk_offer_entry FOREIGN KEY (entry_id)
+        REFERENCES waitlist_entries (entry_id) ON UPDATE RESTRICT ON DELETE CASCADE,
+    CONSTRAINT chk_offer_status CHECK (status IN ('OFFERED','ACCEPTED','EXPIRED','DECLINED','CANCELLED','FAILED'))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 

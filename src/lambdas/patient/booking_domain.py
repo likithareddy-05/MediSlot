@@ -13,7 +13,12 @@ URL, query string or body, so a patient can only ever see or change their own da
   GET  /appointments                    own appointments (?status=&upcoming=true&page=&page_size=)
   GET  /appointments/{id}               one own appointment, with a refund preview when cancellable
   POST /appointments/{id}/cancel        cancel; refund tier comes from the SSM refund policy
+  DELETE /appointments/{id}             the same cancel (Milestone 6 route name); returns the refund
+  PATCH /appointments/{id}              reschedule to {"target_slot_id": ...} (Step Functions saga)
   GET  /patients/me/refunds             own refund ledger entries and their total
+  POST/DELETE /slots/{slotId}/waitlist  join / leave a waitlist      (see waitlist_domain.py)
+  GET  /patients/me/waitlists           active waitlists and pending hold offers
+  POST /waitlist-offers/{id}/accept     accept a hold offer
 
 How a booking stays correct under contention (optimistic concurrency control)
   * A seat is claimed with ONE conditional UPDATE on the slot row:
@@ -48,14 +53,18 @@ import random
 import re
 import time
 from datetime import datetime, timezone
+from urllib.parse import unquote
 from decimal import Decimal
 from time import monotonic as _monotonic
 
 import boto3
 
 import appointment_store as store
+import reschedule_rules
 import slot_store
-from common import db_connect, get_config_value, is_transient_db_error, json_body, log_event, logger, response
+import waitlist_domain
+from common import (ApiError, db_connect, error_response, get_config_value, is_transient_db_error,
+                    json_body, log_event, logger, response)
 from events import emit_metric, publish_event
 from refunds import (DEFAULT_POLICY, PolicyError, calculate_refund, full_refund, money, parse_policy,
                      record_refund, refund_fields, result_from_item)
@@ -79,16 +88,8 @@ ID_RE = r"\d+"
 CONDITIONAL_FAILED = "ConditionalCheckFailedException"
 
 
-class ApiError(Exception):
-    """A business rule said no. Carries the HTTP status and a machine-readable code."""
-
-    def __init__(self, status, code, message, **extra):
-        super().__init__(message)
-        self.status, self.code, self.message, self.extra = status, code, message, extra
-
-
 def _error_response(exc):
-    return response(exc.status, {"message": exc.message, "code": exc.code, **exc.extra})
+    return error_response(exc)
 
 
 # ---------------------------------------------------------------------------
@@ -276,6 +277,9 @@ def _view(item, preview=None):
         "cancelled_at": item.get("cancelled_at"),
         "cancellation_reason": item.get("cancellation_reason"),
         "refund": refund,
+        "reschedule_count": int(item.get("reschedule_count") or 0),
+        "previous_slot_id": item.get("previous_slot_id"),
+        "booked_via": item.get("booked_via") or "DIRECT",
     }
     if preview is not None:
         out["cancellation_preview"] = preview
@@ -386,7 +390,7 @@ def _check_bookable(slot, now):
         raise ApiError(409, "SLOT_UNAVAILABLE", "This slot is no longer available.")
     if _parse_instant(slot["start_time_utc"]) <= now:
         raise ApiError(400, "SLOT_IN_PAST", "This slot has already started and can no longer be booked.")
-    if slot["booked_count"] >= slot["capacity"]:
+    if slot["free_seats"] <= 0:  # seats held for a waitlist offer count as taken
         raise ApiError(409, "SLOT_FULL", "This slot is full.")
 
 
@@ -653,6 +657,8 @@ def cancel(patient_id, appointment_id, body):
         return response(200, {"message": "Appointment already cancelled", "appointment": _view(item)})
     if item["status"] != store.CONFIRMED:
         raise ApiError(409, "NOT_CANCELLABLE", f"This appointment is {item['status']} and cannot be cancelled.")
+    if reschedule_rules.lock_is_fresh(item, _utcnow()):
+        raise ApiError(409, "RESCHEDULE_IN_PROGRESS", "This appointment is being rescheduled. Try again in a moment.")
 
     now = _utcnow()
     start = _parse_instant(item["start_time_utc"])
@@ -678,6 +684,86 @@ def cancel(patient_id, appointment_id, body):
               tier=result.tier, refund_percent=float(result.percent), seat_released=slot_after is not None)
     updated = store.get_appointment(table, appointment_id) or updated
     return response(200, {"message": "Appointment cancelled", "appointment": _view(updated)})
+
+
+# ---------------------------------------------------------------------------
+# Reschedule (Milestone 6): start the Step Functions saga and wait briefly for it
+# ---------------------------------------------------------------------------
+
+_sfn_client = None
+RESCHEDULE_WAIT_SECONDS = 20
+
+
+def set_sfn_client(client):
+    """Tests inject a fake Step Functions client here."""
+    global _sfn_client
+    _sfn_client = client
+
+
+def _sfn():
+    global _sfn_client
+    if _sfn_client is None:
+        _sfn_client = boto3.client("stepfunctions")
+    return _sfn_client
+
+
+def _saga_failure(error, cause):
+    """Turn a failed execution into the API answer. The original appointment is always intact."""
+    detail = {}
+    try:
+        message = json.loads(cause or "{}").get("errorMessage") or "{}"
+        detail = json.loads(message) if message.startswith("{") else {"message": message}
+    except (TypeError, ValueError) as exc:
+        logger.warning(json.dumps({"event": "saga_cause_unreadable", "error_type": type(exc).__name__}))
+    if error == "RescheduleCompensated":
+        emit_metric("ReschedulesFailed", 1, Reason="COMPENSATED")
+        return ApiError(409, "RESCHEDULE_COMPENSATED", "The reschedule could not be completed and was undone. "
+                        "Your original appointment is unchanged.")
+    if detail.get("code"):
+        return ApiError(int(detail.get("status") or 409), detail["code"], detail.get("message") or "Reschedule refused.")
+    emit_metric("ReschedulesFailed", 1, Reason=error or "UNKNOWN")
+    return ApiError(502, "RESCHEDULE_FAILED", "The reschedule could not be completed. Your original appointment is unchanged.")
+
+
+def reschedule(patient_id, appointment_id, body):
+    target = body.get("target_slot_id") or body.get("slot_id")
+    if not isinstance(target, str) or not target.strip() or len(target) > 128:
+        raise ApiError(400, "VALIDATION", "target_slot_id is required.")
+    target = target.strip()
+    table = _appointments_table()
+    item = _own_appointment(table, appointment_id, patient_id)
+    slot_conn = db_connect()
+    try:
+        target_slot = _read_slot(slot_conn, target)
+    finally:
+        slot_conn.close()
+    problem = reschedule_rules.check_rules(item, target_slot, _utcnow())
+    if problem:
+        raise ApiError(*problem)
+
+    name = f"appt-{appointment_id}-{int(time.time() * 1000)}"
+    started = _sfn().start_execution(
+        stateMachineArn=os.environ["RESCHEDULE_STATE_MACHINE_ARN"], name=name,
+        input=json.dumps({"appointment_id": str(appointment_id), "patient_id": int(patient_id),
+                          "target_slot_id": target, "requested_at": store.now_iso()}))
+    execution_arn = started["executionArn"]
+    log_event("reschedule_started", patient_id=patient_id, appointment_id=appointment_id, execution=name)
+    deadline = _monotonic() + RESCHEDULE_WAIT_SECONDS
+    pause = 0.2
+    while True:
+        result = _sfn().describe_execution(executionArn=execution_arn)
+        status = result.get("status")
+        if status == "SUCCEEDED":
+            updated = store.get_appointment(table, appointment_id)
+            return response(200, {"message": "Appointment rescheduled", "appointment": _view(updated),
+                                  "execution": name})
+        if status in ("FAILED", "TIMED_OUT", "ABORTED"):
+            raise _saga_failure(result.get("error"), result.get("cause"))
+        if _monotonic() >= deadline:
+            return response(202, {"message": "The reschedule is still being processed. Refresh in a moment.",
+                                  "execution": name, "code": "RESCHEDULE_PENDING"})
+        _sleep(pause)
+        pause = min(pause * 1.5, 1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -720,6 +806,28 @@ def _handle_api(event, context):
         if match and method == "POST":
             return cancel(patient_id, match.group(1), json_body(event))
 
+        match = re.fullmatch(f"/appointments/({ID_RE})", path)
+        if match and method == "DELETE":
+            return cancel(patient_id, match.group(1), json_body(event))
+        if match and method == "PATCH":
+            return reschedule(patient_id, match.group(1), json_body(event))
+
+        match = re.fullmatch(r"/slots/([^/]{1,128})/waitlist", path)
+        if match and method in ("POST", "DELETE"):
+            slot_id = unquote(match.group(1))
+            action = waitlist_domain.join if method == "POST" else waitlist_domain.leave
+            return response(*action(patient_id, slot_id))
+
+        if path == "/patients/me/waitlists" and method == "GET":
+            return response(*waitlist_domain.list_mine(patient_id))
+
+        match = re.fullmatch(f"/waitlist-offers/({ID_RE})/accept", path)
+        if match and method == "POST":
+            status, body, _item = waitlist_domain.accept(patient_id, int(match.group(1)))
+            if body.get("appointment_id"):
+                body["appointment"] = _view(store.get_appointment(_appointments_table(), body["appointment_id"]))
+            return response(status, body)
+
         if path == "/patients/me/refunds" and method == "GET":
             conn = db_connect()
             try:
@@ -728,7 +836,8 @@ def _handle_api(event, context):
             finally:
                 conn.close()
 
-        if re.fullmatch(f"/appointments(/{ID_RE}(/cancel)?)?|/patients/me/refunds", path):
+        if re.fullmatch(f"/appointments(/{ID_RE}(/cancel)?)?|/patients/me/(refunds|waitlists)"
+                        f"|/slots/[^/]+/waitlist|/waitlist-offers/{ID_RE}/accept", path):
             return response(405, {"message": "Method not allowed", "code": "METHOD_NOT_ALLOWED"})
         return response(404, {"message": "Endpoint not found", "path": path})
     except ApiError as exc:

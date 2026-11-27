@@ -1,4 +1,4 @@
-"""Business events (EventBridge) and custom metrics (CloudWatch Embedded Metric Format).
+"""Business events (EventBridge), custom metrics (CloudWatch Embedded Metric Format) and tracing.
 
 Shared by the booking Lambda and the doctor-domain Lambda. Nothing here talks to a
 database. Publishing is best effort: a failed event never fails or rolls back a booking
@@ -6,6 +6,11 @@ or a cancellation, it is logged and counted in the EventPublishFailures metric.
 
 Metrics are written as EMF log lines, so no CloudWatch API permission or VPC endpoint
 is needed: CloudWatch Logs turns the line into metrics automatically.
+
+Tracing (Milestone 7): inside a Lambda with active X-Ray tracing, importing this module patches
+boto3/botocore and PyMySQL with the X-Ray SDK, so a booking or a reschedule shows every DynamoDB,
+RDS, EventBridge and Step Functions call as a subsegment of one end-to-end trace. Outside Lambda
+(tests, local runs) nothing is patched.
 """
 import json
 import logging
@@ -18,6 +23,22 @@ EVENT_SOURCE = "medislot.booking"
 METRICS_NAMESPACE = os.environ.get("METRICS_NAMESPACE", "MediSlot")
 
 _client = None
+
+
+def enable_tracing():
+    """Patch the AWS SDK and PyMySQL for X-Ray when running in a traced Lambda. Returns True if patched."""
+    if not os.environ.get("AWS_XRAY_DAEMON_ADDRESS") or os.environ.get("MEDISLOT_DISABLE_XRAY") == "1":
+        return False
+    try:
+        from aws_xray_sdk.core import patch
+        patch(("boto3", "botocore", "pymysql"), raise_errors=False)
+        return True
+    except Exception as exc:  # tracing must never break a request
+        logger.warning(json.dumps({"event": "xray_patch_failed", "error": str(exc)[:200]}))
+        return False
+
+
+TRACING_ENABLED = enable_tracing()
 
 
 def set_client(client):

@@ -1,0 +1,320 @@
+{
+  "Comment": "MediSlot reschedule saga: claim the target seat, move the appointment, release the original seat. If the release fails after a successful claim, the compensation moves the appointment back and gives the target seat back, so the patient always holds exactly one appointment.",
+  "StartAt": "ValidateRequest",
+  "States": {
+    "ValidateRequest": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${SagaFunctionArn}",
+        "Payload": {
+          "action": "validate",
+          "saga.$": "$",
+          "execution.$": "$$.Execution.Name"
+        }
+      },
+      "OutputPath": "$.Payload",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Comment": "Rules (2 reschedules max, 6-hour cutoff, same doctor and type) and the appointment lock.",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "ReleaseLockAfterRejection"
+        }
+      ],
+      "Next": "ClaimTargetSeat"
+    },
+    "ClaimTargetSeat": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${SagaFunctionArn}",
+        "Payload": {
+          "action": "claim_target",
+          "saga.$": "$",
+          "execution.$": "$$.Execution.Name"
+        }
+      },
+      "OutputPath": "$.Payload",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Comment": "Optimistic-concurrency claim of one target seat. A full target ends the saga with nothing changed.",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "ReleaseLockAfterRejection"
+        }
+      ],
+      "Next": "SwitchAppointment"
+    },
+    "SwitchAppointment": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${SagaFunctionArn}",
+        "Payload": {
+          "action": "switch",
+          "saga.$": "$",
+          "execution.$": "$$.Execution.Name"
+        }
+      },
+      "OutputPath": "$.Payload",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Comment": "One conditional write moves the appointment to the target slot.",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "CompensateReleaseTarget"
+        }
+      ],
+      "Next": "ReleaseOriginalSeat"
+    },
+    "ReleaseOriginalSeat": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${SagaFunctionArn}",
+        "Payload": {
+          "action": "release_original",
+          "saga.$": "$",
+          "execution.$": "$$.Execution.Name"
+        }
+      },
+      "OutputPath": "$.Payload",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Comment": "Give the original seat back.",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "CompensateRevertAppointment"
+        }
+      ],
+      "Next": "Finalize"
+    },
+    "Finalize": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${SagaFunctionArn}",
+        "Payload": {
+          "action": "finalize",
+          "saga.$": "$",
+          "execution.$": "$$.Execution.Name"
+        }
+      },
+      "OutputPath": "$.Payload",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Comment": "Unlock, publish AppointmentRescheduled and SlotSeatFreed.",
+      "Next": "RescheduleSucceeded"
+    },
+    "RescheduleSucceeded": {
+      "Type": "Succeed"
+    },
+    "ReleaseLockAfterRejection": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${SagaFunctionArn}",
+        "Payload": {
+          "action": "unlock",
+          "saga.$": "$",
+          "execution.$": "$$.Execution.Name"
+        }
+      },
+      "OutputPath": "$.Payload",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Comment": "Nothing changed: only remove the lock.",
+      "Next": "RescheduleRejected"
+    },
+    "RescheduleRejected": {
+      "Type": "Fail",
+      "Comment": "A rule or a full target slot refused the reschedule; the original appointment is unchanged.",
+      "ErrorPath": "$.error.Error",
+      "CausePath": "$.error.Cause"
+    },
+    "CompensateRevertAppointment": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${SagaFunctionArn}",
+        "Payload": {
+          "action": "compensate_revert",
+          "saga.$": "$",
+          "execution.$": "$$.Execution.Name"
+        }
+      },
+      "OutputPath": "$.Payload",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Comment": "Compensation 1: move the appointment back to the original slot.",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.compensation_error",
+          "Next": "CompensationFailed"
+        }
+      ],
+      "Next": "CompensateReleaseTarget"
+    },
+    "CompensateReleaseTarget": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${SagaFunctionArn}",
+        "Payload": {
+          "action": "compensate_release_target",
+          "saga.$": "$",
+          "execution.$": "$$.Execution.Name"
+        }
+      },
+      "OutputPath": "$.Payload",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Comment": "Compensation 2: give the claimed target seat back.",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.compensation_error",
+          "Next": "CompensationFailed"
+        }
+      ],
+      "Next": "MarkCompensated"
+    },
+    "MarkCompensated": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${SagaFunctionArn}",
+        "Payload": {
+          "action": "mark_compensated",
+          "saga.$": "$",
+          "execution.$": "$$.Execution.Name"
+        }
+      },
+      "OutputPath": "$.Payload",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Comment": "Unlock and publish the ReschedulesCompensated metric.",
+      "Next": "RescheduleCompensated"
+    },
+    "RescheduleCompensated": {
+      "Type": "Fail",
+      "Error": "RescheduleCompensated",
+      "CausePath": "$.error.Cause",
+      "Comment": "The reschedule failed midway and was undone: the patient still holds the original appointment."
+    },
+    "CompensationFailed": {
+      "Type": "Fail",
+      "Error": "CompensationFailed",
+      "Cause": "A compensating action could not finish. See the execution history; an alarm is raised."
+    }
+  }
+}

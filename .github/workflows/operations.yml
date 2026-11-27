@@ -1,0 +1,55 @@
+name: MediSlot Operations
+
+# Manual operations for Milestone 7 (see docs/operations.md):
+#   drift-check  every CloudFormation stack should report IN_SYNC
+#   dr-drill     measured RDS point-in-time and DynamoDB PITR restores into temporary copies
+#   teardown     delete every stack; then run "MediSlot Infrastructure Deployment" to redeploy from scratch
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Operation to run
+        required: true
+        type: choice
+        options:
+          - drift-check
+          - dr-drill
+          - teardown
+      confirmation:
+        description: "Only for teardown: type DELETE-medislot-<environment>"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: medislot-infrastructure-${{ vars.ENVIRONMENT_NAME }}
+  cancel-in-progress: false
+
+jobs:
+  operate:
+    name: ${{ inputs.operation }}
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/feature'
+    timeout-minutes: 120
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      ENVIRONMENT_NAME: ${{ vars.ENVIRONMENT_NAME }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials using GitHub OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-duration-seconds: 7200
+
+      - name: Run ${{ inputs.operation }}
+        shell: bash
+        env:
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: bash scripts/ops.sh "${{ inputs.operation }}" "$CONFIRMATION"

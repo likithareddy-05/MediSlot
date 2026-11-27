@@ -9,6 +9,7 @@ Table layout (see infrastructure/data.yaml):
 * Index PatientIndex  (patient_id, start_time_utc): a patient's appointments.
 * Index DoctorIndex   (doctor_id,  start_time_utc): a doctor's appointments.
 * Index SlotIndex     (slot_id):                    every appointment of one slot.
+* Index StatusStartIndex (status, start_time_utc):  appointments by status and start (scheduled jobs).
 
 Ids are stored as strings. Money is stored as a string such as "500.00" so no float rounding
 can creep in. Times are ISO-8601 UTC text ending in Z, which sorts correctly.
@@ -221,6 +222,17 @@ def list_for_doctor(table, doctor_id, first_iso, last_iso):
     return _query_all(table, IndexName="DoctorIndex",
                       KeyConditionExpression="doctor_id = :d AND start_time_utc BETWEEN :a AND :b",
                       ExpressionAttributeValues={":d": str(doctor_id), ":a": first_iso, ":b": last_iso})
+
+
+def list_by_status(table, status, first_iso, last_iso):
+    """Appointments in one status that start in [first_iso, last_iso] (index StatusStartIndex).
+
+    Used by the scheduled jobs: the reminder dispatcher and the no-show sweeper.
+    """
+    return _query_all(table, IndexName="StatusStartIndex",
+                      KeyConditionExpression="#st = :s AND start_time_utc BETWEEN :a AND :b",
+                      ExpressionAttributeNames={"#st": "status"},
+                      ExpressionAttributeValues={":s": status, ":a": first_iso, ":b": last_iso})
 
 
 def list_for_slot(table, slot_id):

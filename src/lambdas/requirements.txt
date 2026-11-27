@@ -2,3 +2,4 @@ PyMySQL
 bcrypt
 PyJWT
 tzdata
+aws-xray-sdk

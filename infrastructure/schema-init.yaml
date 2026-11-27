@@ -29,6 +29,11 @@ Resources:
   SchemaInitLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
+      Tags:
+        - Key: Project
+          Value: MediSlot
+        - Key: Environment
+          Value: !Ref EnvironmentName
       LogGroupName: !Sub "/medislot/${EnvironmentName}/lambda/schema-init"
       RetentionInDays: !Ref LogRetentionInDays
 

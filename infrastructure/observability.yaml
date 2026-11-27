@@ -1,0 +1,1517 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >
+  MediSlot observability stack (Milestone 7): the medislot-operations CloudWatch
+  dashboard, the alarms of the six alarm categories (all delivering to the
+  operations SNS topic) and the monthly AWS Budget filtered on the Project tag.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    AllowedValues: [dev, test, prod]
+  DashboardName:
+    Type: String
+    Default: medislot-operations
+  MonthlyBudgetUsd:
+    Type: Number
+    Default: 200
+    Description: Monthly cost budget for everything tagged Project=MediSlot (USD).
+
+Resources:
+  OperationsDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Ref DashboardName
+      DashboardBody: !Sub |
+        {
+         "widgets": [
+          {
+           "type": "text",
+           "x": 0,
+           "y": 0,
+           "width": 24,
+           "height": 2,
+           "properties": {
+            "markdown": "# MediSlot operations (${EnvironmentName})\nAPI, Lambdas, booking engine, reschedule saga, waitlist, notifications, scheduled jobs and the data layer. Custom business metrics are published as CloudWatch EMF from the Lambdas (namespace **MediSlot**). Alarms deliver to the **medislot-${EnvironmentName}-operations-alarms** SNS topic."
+           }
+          },
+          {
+           "type": "metric",
+           "x": 0,
+           "y": 2,
+           "width": 8,
+           "height": 6,
+           "properties": {
+            "title": "API requests and errors",
+            "region": "${AWS::Region}",
+            "metrics": [
+             [
+              "AWS/ApiGateway",
+              "Count",
+              "ApiName",
+              "medislot-${EnvironmentName}-api",
+              "Stage",
+              "${EnvironmentName}",
+              {
+               "label": "Requests"
+              }
+             ],
+             [
+              "AWS/ApiGateway",
+              "4XXError",
+              "ApiName",
+              "medislot-${EnvironmentName}-api",
+              "Stage",
+              "${EnvironmentName}",
+              {
+               "label": "4XX"
+              }
+             ],
+             [
+              "AWS/ApiGateway",
+              "5XXError",
+              "ApiName",
+              "medislot-${EnvironmentName}-api",
+              "Stage",
+              "${EnvironmentName}",
+              {
+               "label": "5XX"
+              }
+             ]
+            ],
+            "view": "timeSeries",
+            "stat": "Sum",
+            "period": 300,
+            "stacked": false
+           }
+          },
+          {
+           "type": "metric",
+           "x": 8,
+           "y": 2,
+           "width": 8,
+           "height": 6,
+           "properties": {
+            "title": "API latency (ms)",
+            "region": "${AWS::Region}",
+            "metrics": [
+             [
+              "AWS/ApiGateway",
+              "Latency",
+              "ApiName",
+              "medislot-${EnvironmentName}-api",
+              "Stage",
+              "${EnvironmentName}",
+              {
+               "stat": "p50",
+               "label": "p50"
+              }
+             ],
+             [
+              "AWS/ApiGateway",
+              "Latency",
+              "ApiName",
+              "medislot-${EnvironmentName}-api",
+              "Stage",
+              "${EnvironmentName}",
+              {
+               "stat": "p99",
+               "label": "p99"
+              }
+             ]
+            ],
+            "view": "timeSeries",
+            "stat": "Average",
+            "period": 300,
+            "stacked": false
+           }
+          },
+          {
+           "type": "alarm",
+           "x": 16,
+           "y": 2,
+           "width": 8,
+           "height": 6,
+           "properties": {
+            "title": "Alarm status",
+            "alarms": [
+             "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:medislot-${EnvironmentName}-api-5xx",
+             "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:medislot-${EnvironmentName}-api-latency-p99",
+             "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:medislot-${EnvironmentName}-lambda-errors-workflows",
+             "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:medislot-${EnvironmentName}-dlq-notifications",
+             "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:medislot-${EnvironmentName}-dlq-waitlist",
+             "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:medislot-${EnvironmentName}-reschedule-compensated",
+             "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:medislot-${EnvironmentName}-saga-executions-failed-unexpectedly",
+             "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:medislot-${EnvironmentName}-offer-sweeper-not-running",
+             "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:medislot-${EnvironmentName}-reminders-not-running",
+             "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:medislot-${EnvironmentName}-no-show-sweeper-not-running",
+             "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:medislot-${EnvironmentName}-rds-cpu-high",
+             "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:medislot-${EnvironmentName}-rds-storage-low",
+             "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:medislot-${EnvironmentName}-dynamodb-throttles",
+             "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:medislot-${EnvironmentName}-event-publish-failures",
+             "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:medislot-${EnvironmentName}-booking-domain-errors"
+            ]
+           }
+          },
+          {
+           "type": "metric",
+           "x": 0,
+           "y": 8,
+           "width": 12,
+           "height": 6,
+           "properties": {
+            "title": "Lambda errors",
+            "region": "${AWS::Region}",
+            "metrics": [
+             [
+              "AWS/Lambda",
+              "Errors",
+              "FunctionName",
+              "medislot-${EnvironmentName}-auth",
+              {
+               "label": "auth"
+              }
+             ],
+             [
+              "AWS/Lambda",
+              "Errors",
+              "FunctionName",
+              "medislot-${EnvironmentName}-auth-authorizer",
+              {
+               "label": "auth-authorizer"
+              }
+             ],
+             [
+              "AWS/Lambda",
+              "Errors",
+              "FunctionName",
+              "medislot-${EnvironmentName}-account-profile",
+              {
+               "label": "account-profile"
+              }
+             ],
+             [
+              "AWS/Lambda",
+              "Errors",
+              "FunctionName",
+              "medislot-${EnvironmentName}-doctor-domain",
+              {
+               "label": "doctor-domain"
+              }
+             ],
+             [
+              "AWS/Lambda",
+              "Errors",
+              "FunctionName",
+              "medislot-${EnvironmentName}-patient-domain",
+              {
+               "label": "patient-domain"
+              }
+             ],
+             [
+              "AWS/Lambda",
+              "Errors",
+              "FunctionName",
+              "medislot-${EnvironmentName}-booking-domain",
+              {
+               "label": "booking-domain"
+              }
+             ],
+             [
+              "AWS/Lambda",
+              "Errors",
+              "FunctionName",
+              "medislot-${EnvironmentName}-slot-materializer",
+              {
+               "label": "slot-materializer"
+              }
+             ],
+             [
+              "AWS/Lambda",
+              "Errors",
+              "FunctionName",
+              "medislot-${EnvironmentName}-reschedule-saga",
+              {
+               "label": "reschedule-saga"
+              }
+             ],
+             [
+              "AWS/Lambda",
+              "Errors",
+              "FunctionName",
+              "medislot-${EnvironmentName}-notification-dispatcher",
+              {
+               "label": "notification-dispatcher"
+              }
+             ],
+             [
+              "AWS/Lambda",
+              "Errors",
+              "FunctionName",
+              "medislot-${EnvironmentName}-reminder-dispatcher",
+              {
+               "label": "reminder-dispatcher"
+              }
+             ],
+             [
+              "AWS/Lambda",
+              "Errors",
+              "FunctionName",
+              "medislot-${EnvironmentName}-waitlist-promotion",
+              {
+               "label": "waitlist-promotion"
+              }
+             ],
+             [
+              "AWS/Lambda",
+              "Errors",
+              "FunctionName",
+              "medislot-${EnvironmentName}-offer-expiry-sweeper",
+              {
+               "label": "offer-expiry-sweeper"
+              }
+             ],
+             [
+              "AWS/Lambda",
+              "Errors",
+              "FunctionName",
+              "medislot-${EnvironmentName}-no-show-sweeper",
+              {
+               "label": "no-show-sweeper"
+              }
+             ]
+            ],
+            "view": "timeSeries",
+            "stat": "Sum",
+            "period": 300,
+            "stacked": true
+           }
+          },
+          {
+           "type": "metric",
+           "x": 12,
+           "y": 8,
+           "width": 12,
+           "height": 6,
+           "properties": {
+            "title": "Lambda duration p95 (ms)",
+            "region": "${AWS::Region}",
+            "metrics": [
+             [
+              "AWS/Lambda",
+              "Duration",
+              "FunctionName",
+              "medislot-${EnvironmentName}-auth",
+              {
+               "stat": "p95",
+               "label": "auth"
+              }
+             ],
+             [
+              "AWS/Lambda",
+              "Duration",
+              "FunctionName",
+              "medislot-${EnvironmentName}-auth-authorizer",
+              {
+               "stat": "p95",
+               "label": "auth-authorizer"
+              }
+             ],
+             [
+              "AWS/Lambda",
+              "Duration",
+              "FunctionName",
+              "medislot-${EnvironmentName}-account-profile",
+              {
+               "stat": "p95",
+               "label": "account-profile"
+              }
+             ],
+             [
+              "AWS/Lambda",
+              "Duration",
+              "FunctionName",
+              "medislot-${EnvironmentName}-doctor-domain",
+              {
+               "stat": "p95",
+               "label": "doctor-domain"
+              }
+             ],
+             [
+              "AWS/Lambda",
+              "Duration",
+              "FunctionName",
+              "medislot-${EnvironmentName}-patient-domain",
+              {
+               "stat": "p95",
+               "label": "patient-domain"
+              }
+             ],
+             [
+              "AWS/Lambda",
+              "Duration",
+              "FunctionName",
+              "medislot-${EnvironmentName}-booking-domain",
+              {
+               "stat": "p95",
+               "label": "booking-domain"
+              }
+             ],
+             [
+              "AWS/Lambda",
+              "Duration",
+              "FunctionName",
+              "medislot-${EnvironmentName}-slot-materializer",
+              {
+               "stat": "p95",
+               "label": "slot-materializer"
+              }
+             ],
+             [
+              "AWS/Lambda",
+              "Duration",
+              "FunctionName",
+              "medislot-${EnvironmentName}-reschedule-saga",
+              {
+               "stat": "p95",
+               "label": "reschedule-saga"
+              }
+             ],
+             [
+              "AWS/Lambda",
+              "Duration",
+              "FunctionName",
+              "medislot-${EnvironmentName}-notification-dispatcher",
+              {
+               "stat": "p95",
+               "label": "notification-dispatcher"
+              }
+             ],
+             [
+              "AWS/Lambda",
+              "Duration",
+              "FunctionName",
+              "medislot-${EnvironmentName}-reminder-dispatcher",
+              {
+               "stat": "p95",
+               "label": "reminder-dispatcher"
+              }
+             ],
+             [
+              "AWS/Lambda",
+              "Duration",
+              "FunctionName",
+              "medislot-${EnvironmentName}-waitlist-promotion",
+              {
+               "stat": "p95",
+               "label": "waitlist-promotion"
+              }
+             ],
+             [
+              "AWS/Lambda",
+              "Duration",
+              "FunctionName",
+              "medislot-${EnvironmentName}-offer-expiry-sweeper",
+              {
+               "stat": "p95",
+               "label": "offer-expiry-sweeper"
+              }
+             ],
+             [
+              "AWS/Lambda",
+              "Duration",
+              "FunctionName",
+              "medislot-${EnvironmentName}-no-show-sweeper",
+              {
+               "stat": "p95",
+               "label": "no-show-sweeper"
+              }
+             ]
+            ],
+            "view": "timeSeries",
+            "stat": "p95",
+            "period": 300,
+            "stacked": false
+           }
+          },
+          {
+           "type": "metric",
+           "x": 0,
+           "y": 14,
+           "width": 8,
+           "height": 6,
+           "properties": {
+            "title": "Bookings: conflicts and rejections",
+            "region": "${AWS::Region}",
+            "metrics": [
+             [
+              "MediSlot",
+              "BookingConflictRetries",
+              "Environment",
+              "${EnvironmentName}",
+              {
+               "stat": "Sum",
+               "label": "OCC conflict retries"
+              }
+             ],
+             [
+              "MediSlot",
+              "SeatReleaseFailures",
+              "Environment",
+              "${EnvironmentName}",
+              {
+               "stat": "Sum",
+               "label": "Seat release failures"
+              }
+             ],
+             {
+              "expression": "SEARCH('{MediSlot,Environment,Reason} MetricName=\"BookingsRejected\" Environment=\"${EnvironmentName}\"', 'Sum', 300)",
+              "label": "BookingsRejected",
+              "id": "s14820"
+             }
+            ],
+            "view": "timeSeries",
+            "stat": "Sum",
+            "period": 300,
+            "stacked": false
+           }
+          },
+          {
+           "type": "metric",
+           "x": 8,
+           "y": 14,
+           "width": 8,
+           "height": 6,
+           "properties": {
+            "title": "Cancellations by refund tier",
+            "region": "${AWS::Region}",
+            "metrics": [
+             {
+              "expression": "SEARCH('{MediSlot,Environment,Tier} MetricName=\"CancellationsByTier\" Environment=\"${EnvironmentName}\"', 'Sum', 300)",
+              "label": "CancellationsByTier",
+              "id": "s86642"
+             }
+            ],
+            "view": "timeSeries",
+            "stat": "Sum",
+            "period": 300,
+            "stacked": true
+           }
+          },
+          {
+           "type": "metric",
+           "x": 16,
+           "y": 14,
+           "width": 8,
+           "height": 6,
+           "properties": {
+            "title": "Domain events",
+            "region": "${AWS::Region}",
+            "metrics": [
+             [
+              "MediSlot",
+              "EventPublishFailures",
+              "Environment",
+              "${EnvironmentName}",
+              {
+               "stat": "Sum",
+               "label": "Event publish failures"
+              }
+             ],
+             [
+              "AWS/Events",
+              "FailedInvocations",
+              "RuleName",
+              "medislot-${EnvironmentName}-notification-events",
+              {
+               "label": "Failed deliveries: notification-events"
+              }
+             ],
+             [
+              "AWS/Events",
+              "FailedInvocations",
+              "RuleName",
+              "medislot-${EnvironmentName}-waitlist-seat-freed",
+              {
+               "label": "Failed deliveries: waitlist-seat-freed"
+              }
+             ],
+             [
+              "AWS/Events",
+              "Invocations",
+              "RuleName",
+              "medislot-${EnvironmentName}-notification-events",
+              {
+               "label": "Delivered: notification-events"
+              }
+             ],
+             [
+              "AWS/Events",
+              "Invocations",
+              "RuleName",
+              "medislot-${EnvironmentName}-waitlist-seat-freed",
+              {
+               "label": "Delivered: waitlist-seat-freed"
+              }
+             ]
+            ],
+            "view": "timeSeries",
+            "stat": "Sum",
+            "period": 300,
+            "stacked": false
+           }
+          },
+          {
+           "type": "metric",
+           "x": 0,
+           "y": 20,
+           "width": 8,
+           "height": 6,
+           "properties": {
+            "title": "Reschedule saga executions",
+            "region": "${AWS::Region}",
+            "metrics": [
+             [
+              "AWS/States",
+              "ExecutionsStarted",
+              "StateMachineArn",
+              "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:medislot-${EnvironmentName}-reschedule-saga",
+              {
+               "label": "ExecutionsStarted"
+              }
+             ],
+             [
+              "AWS/States",
+              "ExecutionsSucceeded",
+              "StateMachineArn",
+              "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:medislot-${EnvironmentName}-reschedule-saga",
+              {
+               "label": "ExecutionsSucceeded"
+              }
+             ],
+             [
+              "AWS/States",
+              "ExecutionsFailed",
+              "StateMachineArn",
+              "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:medislot-${EnvironmentName}-reschedule-saga",
+              {
+               "label": "ExecutionsFailed"
+              }
+             ],
+             [
+              "AWS/States",
+              "ExecutionsTimedOut",
+              "StateMachineArn",
+              "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:medislot-${EnvironmentName}-reschedule-saga",
+              {
+               "label": "ExecutionsTimedOut"
+              }
+             ]
+            ],
+            "view": "timeSeries",
+            "stat": "Sum",
+            "period": 300,
+            "stacked": false
+           }
+          },
+          {
+           "type": "metric",
+           "x": 8,
+           "y": 20,
+           "width": 8,
+           "height": 6,
+           "properties": {
+            "title": "Reschedules: completed vs compensated",
+            "region": "${AWS::Region}",
+            "metrics": [
+             [
+              "MediSlot",
+              "ReschedulesCompleted",
+              "Environment",
+              "${EnvironmentName}",
+              {
+               "stat": "Sum",
+               "label": "Completed"
+              }
+             ],
+             [
+              "MediSlot",
+              "ReschedulesCompensated",
+              "Environment",
+              "${EnvironmentName}",
+              {
+               "stat": "Sum",
+               "label": "ReschedulesCompensated"
+              }
+             ],
+             {
+              "expression": "SEARCH('{MediSlot,Environment,Reason} MetricName=\"ReschedulesFailed\" Environment=\"${EnvironmentName}\"', 'Sum', 300)",
+              "label": "ReschedulesFailed",
+              "id": "s21247"
+             }
+            ],
+            "view": "timeSeries",
+            "stat": "Sum",
+            "period": 300,
+            "stacked": false
+           }
+          },
+          {
+           "type": "metric",
+           "x": 16,
+           "y": 20,
+           "width": 8,
+           "height": 6,
+           "properties": {
+            "title": "Saga duration (ms)",
+            "region": "${AWS::Region}",
+            "metrics": [
+             [
+              "AWS/States",
+              "ExecutionTime",
+              "StateMachineArn",
+              "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:medislot-${EnvironmentName}-reschedule-saga",
+              {
+               "stat": "p95",
+               "label": "p95"
+              }
+             ],
+             [
+              "AWS/States",
+              "ExecutionTime",
+              "StateMachineArn",
+              "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:medislot-${EnvironmentName}-reschedule-saga",
+              {
+               "stat": "Average",
+               "label": "average"
+              }
+             ]
+            ],
+            "view": "timeSeries",
+            "stat": "Average",
+            "period": 300,
+            "stacked": false
+           }
+          },
+          {
+           "type": "metric",
+           "x": 0,
+           "y": 26,
+           "width": 8,
+           "height": 6,
+           "properties": {
+            "title": "Waitlist",
+            "region": "${AWS::Region}",
+            "metrics": [
+             [
+              "MediSlot",
+              "WaitlistJoins",
+              "Environment",
+              "${EnvironmentName}",
+              {
+               "stat": "Sum",
+               "label": "Joins"
+              }
+             ],
+             [
+              "MediSlot",
+              "OffersIssued",
+              "Environment",
+              "${EnvironmentName}",
+              {
+               "stat": "Sum",
+               "label": "Offers issued"
+              }
+             ],
+             [
+              "MediSlot",
+              "WaitlistPromotions",
+              "Environment",
+              "${EnvironmentName}",
+              {
+               "stat": "Sum",
+               "label": "WaitlistPromotions"
+              }
+             ],
+             [
+              "MediSlot",
+              "OffersExpired",
+              "Environment",
+              "${EnvironmentName}",
+              {
+               "stat": "Sum",
+               "label": "OffersExpired"
+              }
+             ]
+            ],
+            "view": "timeSeries",
+            "stat": "Sum",
+            "period": 300,
+            "stacked": false
+           }
+          },
+          {
+           "type": "metric",
+           "x": 8,
+           "y": 26,
+           "width": 8,
+           "height": 6,
+           "properties": {
+            "title": "Notifications dispatched by event",
+            "region": "${AWS::Region}",
+            "metrics": [
+             {
+              "expression": "SEARCH('{MediSlot,Environment,EventType} MetricName=\"NotificationsDispatched\" Environment=\"${EnvironmentName}\"', 'Sum', 300)",
+              "label": "NotificationsDispatched",
+              "id": "s13849"
+             }
+            ],
+            "view": "timeSeries",
+            "stat": "Sum",
+            "period": 300,
+            "stacked": true
+           }
+          },
+          {
+           "type": "metric",
+           "x": 16,
+           "y": 26,
+           "width": 8,
+           "height": 6,
+           "properties": {
+            "title": "Queues and dead-letter queues (messages waiting)",
+            "region": "${AWS::Region}",
+            "metrics": [
+             [
+              "AWS/SQS",
+              "ApproximateNumberOfMessagesVisible",
+              "QueueName",
+              "medislot-${EnvironmentName}-notifications",
+              {
+               "label": "notifications",
+               "stat": "Maximum"
+              }
+             ],
+             [
+              "AWS/SQS",
+              "ApproximateNumberOfMessagesVisible",
+              "QueueName",
+              "medislot-${EnvironmentName}-notifications-dlq",
+              {
+               "label": "notifications-dlq",
+               "stat": "Maximum"
+              }
+             ],
+             [
+              "AWS/SQS",
+              "ApproximateNumberOfMessagesVisible",
+              "QueueName",
+              "medislot-${EnvironmentName}-waitlist-seat-freed",
+              {
+               "label": "waitlist-seat-freed",
+               "stat": "Maximum"
+              }
+             ],
+             [
+              "AWS/SQS",
+              "ApproximateNumberOfMessagesVisible",
+              "QueueName",
+              "medislot-${EnvironmentName}-waitlist-seat-freed-dlq",
+              {
+               "label": "waitlist-seat-freed-dlq",
+               "stat": "Maximum"
+              }
+             ]
+            ],
+            "view": "timeSeries",
+            "stat": "Maximum",
+            "period": 300,
+            "stacked": false
+           }
+          },
+          {
+           "type": "metric",
+           "x": 0,
+           "y": 32,
+           "width": 8,
+           "height": 6,
+           "properties": {
+            "title": "Scheduled jobs (invocations)",
+            "region": "${AWS::Region}",
+            "metrics": [
+             [
+              "AWS/Lambda",
+              "Invocations",
+              "FunctionName",
+              "medislot-${EnvironmentName}-offer-expiry-sweeper",
+              {
+               "label": "offer-expiry-sweeper"
+              }
+             ],
+             [
+              "AWS/Lambda",
+              "Invocations",
+              "FunctionName",
+              "medislot-${EnvironmentName}-reminder-dispatcher",
+              {
+               "label": "reminder-dispatcher"
+              }
+             ],
+             [
+              "AWS/Lambda",
+              "Invocations",
+              "FunctionName",
+              "medislot-${EnvironmentName}-no-show-sweeper",
+              {
+               "label": "no-show-sweeper"
+              }
+             ],
+             [
+              "AWS/Lambda",
+              "Invocations",
+              "FunctionName",
+              "medislot-${EnvironmentName}-slot-materializer",
+              {
+               "label": "slot-materializer"
+              }
+             ]
+            ],
+            "view": "timeSeries",
+            "stat": "Sum",
+            "period": 300,
+            "stacked": false
+           }
+          },
+          {
+           "type": "metric",
+           "x": 8,
+           "y": 32,
+           "width": 8,
+           "height": 6,
+           "properties": {
+            "title": "No-shows marked",
+            "region": "${AWS::Region}",
+            "metrics": [
+             [
+              "MediSlot",
+              "NoShowsMarked",
+              "Environment",
+              "${EnvironmentName}",
+              {
+               "stat": "Sum",
+               "label": "NoShowsMarked"
+              }
+             ]
+            ],
+            "view": "timeSeries",
+            "stat": "Sum",
+            "period": 300,
+            "stacked": false
+           }
+          },
+          {
+           "type": "metric",
+           "x": 16,
+           "y": 32,
+           "width": 8,
+           "height": 6,
+           "properties": {
+            "title": "SNS notifications",
+            "region": "${AWS::Region}",
+            "metrics": [
+             [
+              "AWS/SNS",
+              "NumberOfMessagesPublished",
+              "TopicName",
+              "medislot-${EnvironmentName}-notifications",
+              {
+               "label": "published"
+              }
+             ],
+             [
+              "AWS/SNS",
+              "NumberOfNotificationsFailed",
+              "TopicName",
+              "medislot-${EnvironmentName}-notifications",
+              {
+               "label": "failed"
+              }
+             ]
+            ],
+            "view": "timeSeries",
+            "stat": "Sum",
+            "period": 300,
+            "stacked": false
+           }
+          },
+          {
+           "type": "metric",
+           "x": 0,
+           "y": 38,
+           "width": 8,
+           "height": 6,
+           "properties": {
+            "title": "RDS CPU and connections",
+            "region": "${AWS::Region}",
+            "metrics": [
+             [
+              "AWS/RDS",
+              "CPUUtilization",
+              "DBInstanceIdentifier",
+              "medislot-${EnvironmentName}-mysql",
+              {
+               "label": "CPU %",
+               "stat": "Average"
+              }
+             ],
+             [
+              "AWS/RDS",
+              "DatabaseConnections",
+              "DBInstanceIdentifier",
+              "medislot-${EnvironmentName}-mysql",
+              {
+               "label": "connections",
+               "stat": "Maximum",
+               "yAxis": "right"
+              }
+             ]
+            ],
+            "view": "timeSeries",
+            "stat": "Average",
+            "period": 300,
+            "stacked": false
+           }
+          },
+          {
+           "type": "metric",
+           "x": 8,
+           "y": 38,
+           "width": 8,
+           "height": 6,
+           "properties": {
+            "title": "RDS free storage (bytes)",
+            "region": "${AWS::Region}",
+            "metrics": [
+             [
+              "AWS/RDS",
+              "FreeStorageSpace",
+              "DBInstanceIdentifier",
+              "medislot-${EnvironmentName}-mysql",
+              {
+               "stat": "Minimum"
+              }
+             ]
+            ],
+            "view": "timeSeries",
+            "stat": "Minimum",
+            "period": 300,
+            "stacked": false
+           }
+          },
+          {
+           "type": "metric",
+           "x": 16,
+           "y": 38,
+           "width": 8,
+           "height": 6,
+           "properties": {
+            "title": "DynamoDB appointments table",
+            "region": "${AWS::Region}",
+            "metrics": [
+             [
+              "AWS/DynamoDB",
+              "ConsumedReadCapacityUnits",
+              "TableName",
+              "medislot-${EnvironmentName}-appointments",
+              {
+               "label": "reads"
+              }
+             ],
+             [
+              "AWS/DynamoDB",
+              "ConsumedWriteCapacityUnits",
+              "TableName",
+              "medislot-${EnvironmentName}-appointments",
+              {
+               "label": "writes"
+              }
+             ],
+             [
+              "AWS/DynamoDB",
+              "ThrottledRequests",
+              "TableName",
+              "medislot-${EnvironmentName}-appointments",
+              {
+               "label": "throttled"
+              }
+             ]
+            ],
+            "view": "timeSeries",
+            "stat": "Sum",
+            "period": 300,
+            "stacked": false
+           }
+          },
+          {
+           "type": "log",
+           "x": 0,
+           "y": 44,
+           "width": 24,
+           "height": 6,
+           "properties": {
+            "title": "Recent errors (booking, saga, waitlist, notifications)",
+            "region": "${AWS::Region}",
+            "query": "SOURCE '/medislot/${EnvironmentName}/lambda/booking-domain' | SOURCE '/medislot/${EnvironmentName}/lambda/reschedule-saga' | SOURCE '/medislot/${EnvironmentName}/lambda/waitlist-promotion' | SOURCE '/medislot/${EnvironmentName}/lambda/notification-dispatcher' | fields @timestamp, @log, @message | filter @message like /ERROR|\"level\": \"ERROR\"|failed/ | sort @timestamp desc | limit 50",
+            "view": "table"
+           }
+          }
+         ]
+        }
+
+  # ---- Category 1: API health (the 5XX alarm lives in the authentication stack)
+  ApiLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub medislot-${EnvironmentName}-api-latency-p99
+      AlarmDescription: "API p99 latency above 3 seconds for 10 minutes."
+      Namespace: AWS/ApiGateway
+      MetricName: Latency
+      Dimensions:
+        - Name: ApiName
+          Value: !Sub medislot-${EnvironmentName}-api
+        - Name: Stage
+          Value: !Ref EnvironmentName
+      ExtendedStatistic: p99
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 3000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - Fn::ImportValue: !Sub medislot-${EnvironmentName}-OperationsAlarmTopicArn
+      OKActions:
+        - Fn::ImportValue: !Sub medislot-${EnvironmentName}-OperationsAlarmTopicArn
+      Tags:
+        - Key: Project
+          Value: MediSlot
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # ---- Category 2: Lambda errors (API Lambdas have one alarm each in the authentication stack)
+  WorkflowLambdaErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub medislot-${EnvironmentName}-lambda-errors-workflows
+      AlarmDescription: "A saga, waitlist, notification or scheduled-job Lambda returned an error. Check /medislot/<env>/lambda/*."
+      Metrics:
+        - Id: e0
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/Lambda
+              MetricName: Errors
+              Dimensions:
+                - Name: FunctionName
+                  Value: !Sub medislot-${EnvironmentName}-reschedule-saga
+            Period: 300
+            Stat: Sum
+        - Id: e1
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/Lambda
+              MetricName: Errors
+              Dimensions:
+                - Name: FunctionName
+                  Value: !Sub medislot-${EnvironmentName}-notification-dispatcher
+            Period: 300
+            Stat: Sum
+        - Id: e2
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/Lambda
+              MetricName: Errors
+              Dimensions:
+                - Name: FunctionName
+                  Value: !Sub medislot-${EnvironmentName}-reminder-dispatcher
+            Period: 300
+            Stat: Sum
+        - Id: e3
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/Lambda
+              MetricName: Errors
+              Dimensions:
+                - Name: FunctionName
+                  Value: !Sub medislot-${EnvironmentName}-waitlist-promotion
+            Period: 300
+            Stat: Sum
+        - Id: e4
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/Lambda
+              MetricName: Errors
+              Dimensions:
+                - Name: FunctionName
+                  Value: !Sub medislot-${EnvironmentName}-offer-expiry-sweeper
+            Period: 300
+            Stat: Sum
+        - Id: e5
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/Lambda
+              MetricName: Errors
+              Dimensions:
+                - Name: FunctionName
+                  Value: !Sub medislot-${EnvironmentName}-no-show-sweeper
+            Period: 300
+            Stat: Sum
+        - Id: total
+          Expression: SUM(METRICS())
+          Label: Workflow Lambda errors
+          ReturnData: true
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - Fn::ImportValue: !Sub medislot-${EnvironmentName}-OperationsAlarmTopicArn
+      OKActions:
+        - Fn::ImportValue: !Sub medislot-${EnvironmentName}-OperationsAlarmTopicArn
+      Tags:
+        - Key: Project
+          Value: MediSlot
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # ---- Category 3: dead-letter queues (a notification or promotion failed 5 times)
+  NotificationDlqAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub medislot-${EnvironmentName}-dlq-notifications
+      AlarmDescription: "Messages in the notification dead-letter queue: some notifications were not delivered."
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !Sub medislot-${EnvironmentName}-notifications-dlq
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - Fn::ImportValue: !Sub medislot-${EnvironmentName}-OperationsAlarmTopicArn
+      OKActions:
+        - Fn::ImportValue: !Sub medislot-${EnvironmentName}-OperationsAlarmTopicArn
+      Tags:
+        - Key: Project
+          Value: MediSlot
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  WaitlistDlqAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub medislot-${EnvironmentName}-dlq-waitlist
+      AlarmDescription: "Messages in the waitlist dead-letter queue: a freed seat was not offered (the expiry sweeper re-checks held seats every minute)."
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !Sub medislot-${EnvironmentName}-waitlist-seat-freed-dlq
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - Fn::ImportValue: !Sub medislot-${EnvironmentName}-OperationsAlarmTopicArn
+      OKActions:
+        - Fn::ImportValue: !Sub medislot-${EnvironmentName}-OperationsAlarmTopicArn
+      Tags:
+        - Key: Project
+          Value: MediSlot
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # ---- Category 4: reschedule saga
+  RescheduleCompensatedAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub medislot-${EnvironmentName}-reschedule-compensated
+      AlarmDescription: "A reschedule failed midway and was compensated (the patient kept the original appointment). Review the execution history."
+      Namespace: MediSlot
+      MetricName: ReschedulesCompensated
+      Dimensions:
+        - Name: Environment
+          Value: !Ref EnvironmentName
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - Fn::ImportValue: !Sub medislot-${EnvironmentName}-OperationsAlarmTopicArn
+      OKActions:
+        - Fn::ImportValue: !Sub medislot-${EnvironmentName}-OperationsAlarmTopicArn
+      Tags:
+        - Key: Project
+          Value: MediSlot
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  SagaTimedOutAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub medislot-${EnvironmentName}-saga-executions-failed-unexpectedly
+      AlarmDescription: "A reschedule saga execution timed out or was aborted."
+      Namespace: AWS/States
+      MetricName: ExecutionsTimedOut
+      Dimensions:
+        - Name: StateMachineArn
+          Value: !Sub arn:${AWS::Partition}:states:${AWS::Region}:${AWS::AccountId}:stateMachine:medislot-${EnvironmentName}-reschedule-saga
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - Fn::ImportValue: !Sub medislot-${EnvironmentName}-OperationsAlarmTopicArn
+      OKActions:
+        - Fn::ImportValue: !Sub medislot-${EnvironmentName}-OperationsAlarmTopicArn
+      Tags:
+        - Key: Project
+          Value: MediSlot
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # ---- Category 5: scheduled jobs not running (missing data = not running = alarm)
+  OfferSweeperNotRunningAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub medislot-${EnvironmentName}-offer-sweeper-not-running
+      AlarmDescription: "The hold-offer expiry sweeper (every minute) has not run for 5 minutes."
+      Namespace: AWS/Lambda
+      MetricName: Invocations
+      Dimensions:
+        - Name: FunctionName
+          Value: !Sub medislot-${EnvironmentName}-offer-expiry-sweeper
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions:
+        - Fn::ImportValue: !Sub medislot-${EnvironmentName}-OperationsAlarmTopicArn
+      OKActions:
+        - Fn::ImportValue: !Sub medislot-${EnvironmentName}-OperationsAlarmTopicArn
+      Tags:
+        - Key: Project
+          Value: MediSlot
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  ReminderNotRunningAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub medislot-${EnvironmentName}-reminders-not-running
+      AlarmDescription: "The reminder dispatcher (every 5 minutes) has not run for 15 minutes."
+      Namespace: AWS/Lambda
+      MetricName: Invocations
+      Dimensions:
+        - Name: FunctionName
+          Value: !Sub medislot-${EnvironmentName}-reminder-dispatcher
+      Statistic: Sum
+      Period: 900
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions:
+        - Fn::ImportValue: !Sub medislot-${EnvironmentName}-OperationsAlarmTopicArn
+      OKActions:
+        - Fn::ImportValue: !Sub medislot-${EnvironmentName}-OperationsAlarmTopicArn
+      Tags:
+        - Key: Project
+          Value: MediSlot
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  NoShowNotRunningAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub medislot-${EnvironmentName}-no-show-sweeper-not-running
+      AlarmDescription: "The no-show sweeper (every 15 minutes) has not run for 45 minutes."
+      Namespace: AWS/Lambda
+      MetricName: Invocations
+      Dimensions:
+        - Name: FunctionName
+          Value: !Sub medislot-${EnvironmentName}-no-show-sweeper
+      Statistic: Sum
+      Period: 900
+      EvaluationPeriods: 3
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions:
+        - Fn::ImportValue: !Sub medislot-${EnvironmentName}-OperationsAlarmTopicArn
+      OKActions:
+        - Fn::ImportValue: !Sub medislot-${EnvironmentName}-OperationsAlarmTopicArn
+      Tags:
+        - Key: Project
+          Value: MediSlot
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # ---- Category 6: data layer and event delivery
+  RdsCpuAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub medislot-${EnvironmentName}-rds-cpu-high
+      AlarmDescription: "RDS CPU above 80% for 15 minutes."
+      Namespace: AWS/RDS
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Sub medislot-${EnvironmentName}-mysql
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 3
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - Fn::ImportValue: !Sub medislot-${EnvironmentName}-OperationsAlarmTopicArn
+      OKActions:
+        - Fn::ImportValue: !Sub medislot-${EnvironmentName}-OperationsAlarmTopicArn
+      Tags:
+        - Key: Project
+          Value: MediSlot
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  RdsStorageAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub medislot-${EnvironmentName}-rds-storage-low
+      AlarmDescription: "RDS free storage below 2 GiB."
+      Namespace: AWS/RDS
+      MetricName: FreeStorageSpace
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Sub medislot-${EnvironmentName}-mysql
+      Statistic: Minimum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 2147483648
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - Fn::ImportValue: !Sub medislot-${EnvironmentName}-OperationsAlarmTopicArn
+      OKActions:
+        - Fn::ImportValue: !Sub medislot-${EnvironmentName}-OperationsAlarmTopicArn
+      Tags:
+        - Key: Project
+          Value: MediSlot
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  DynamoThrottleAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub medislot-${EnvironmentName}-dynamodb-throttles
+      AlarmDescription: "Requests to the appointments table were throttled."
+      Namespace: AWS/DynamoDB
+      MetricName: ThrottledRequests
+      Dimensions:
+        - Name: TableName
+          Value: !Sub medislot-${EnvironmentName}-appointments
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - Fn::ImportValue: !Sub medislot-${EnvironmentName}-OperationsAlarmTopicArn
+      OKActions:
+        - Fn::ImportValue: !Sub medislot-${EnvironmentName}-OperationsAlarmTopicArn
+      Tags:
+        - Key: Project
+          Value: MediSlot
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  EventPublishFailuresAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub medislot-${EnvironmentName}-event-publish-failures
+      AlarmDescription: "Domain events could not be put on EventBridge (notifications or waitlist promotions may be missing)."
+      Namespace: MediSlot
+      MetricName: EventPublishFailures
+      Dimensions:
+        - Name: Environment
+          Value: !Ref EnvironmentName
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - Fn::ImportValue: !Sub medislot-${EnvironmentName}-OperationsAlarmTopicArn
+      OKActions:
+        - Fn::ImportValue: !Sub medislot-${EnvironmentName}-OperationsAlarmTopicArn
+      Tags:
+        - Key: Project
+          Value: MediSlot
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # ---- Cost: monthly budget on the Project cost allocation tag
+  MonthlyBudget:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetName: !Sub medislot-${EnvironmentName}-monthly
+        BudgetType: COST
+        TimeUnit: MONTHLY
+        BudgetLimit:
+          Amount: !Ref MonthlyBudgetUsd
+          Unit: USD
+        CostFilters:
+          TagKeyValue:
+            - user:Project$MediSlot
+      NotificationsWithSubscribers:
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 80
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: SNS
+              Address:
+                Fn::ImportValue: !Sub medislot-${EnvironmentName}-OperationsAlarmTopicArn
+        - Notification:
+            NotificationType: FORECASTED
+            ComparisonOperator: GREATER_THAN
+            Threshold: 100
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: SNS
+              Address:
+                Fn::ImportValue: !Sub medislot-${EnvironmentName}-OperationsAlarmTopicArn
+
+Outputs:
+  DashboardUrl:
+    Value: !Sub https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${DashboardName}

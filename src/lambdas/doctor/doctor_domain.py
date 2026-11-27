@@ -23,6 +23,7 @@ import pymysql
 from botocore.config import Config
 import appointment_store as store
 import slot_store
+import waitlist_store
 from slot_generation import materialize_doctor_slots
 from refunds import delete_ledger_row, full_refund, no_show_refund, record_refund, refund_fields
 from events import emit_metric, publish_event
@@ -407,6 +408,8 @@ def _cancel_slot_appointments(conn, cursor, doctor_id, slot_id):
     Shared by "Cancel slot" and by adding a blackout date. See _cancel_slot for the ordering rules.
     """
     slot_store.close_slot(cursor, slot_id)
+    # Milestone 6: nobody can be promoted into a closed slot. End its waitlist and live offers.
+    waitlist_store.close_waitlist(cursor, slot_id, datetime.now(timezone.utc).replace(tzinfo=None))
     conn.commit()
     expected = slot_store.get_slot(cursor, slot_id)["booked_count"]
     conn.commit()
@@ -1174,6 +1177,48 @@ def materializer_handler(event, context):
                removed=sum(s["removed"] for s in summaries),
                dst_wall_times_skipped=sum(s["dst_wall_times_skipped"] for s in summaries))
     return {"doctors_processed":len(summaries),"results":summaries}
+
+
+NO_SHOW_GRACE_MINUTES = 30
+NO_SHOW_LOOKBACK_DAYS = 7
+
+
+def mark_no_shows(now=None):
+    """Mark every appointment still CONFIRMED 30 minutes after its slot end as NO_SHOW.
+
+    Uses the doctor's own NO_SHOW rule (_set_doctor_status): conditional status change plus the
+    0% ledger row. Running it twice changes nothing the second time.
+    """
+    now = now or datetime.now(timezone.utc)
+    cutoff = (now - timedelta(minutes=NO_SHOW_GRACE_MINUTES)).replace(microsecond=0)
+    cutoff_iso = cutoff.isoformat().replace("+00:00", "Z")
+    first_iso = (cutoff - timedelta(days=NO_SHOW_LOOKBACK_DAYS)).isoformat().replace("+00:00", "Z")
+    table = _appointments_table()
+    candidates = [i for i in store.list_by_status(table, store.CONFIRMED, first_iso, cutoff_iso)
+                  if str(i.get("end_time_utc", "")) <= cutoff_iso]
+    marked = 0
+    conn = db_connect()
+    try:
+        with conn.cursor() as cur:
+            for item in candidates:
+                try:
+                    _set_doctor_status(conn, cur, int(item["doctor_id"]), item, store.NO_SHOW)
+                    marked += 1
+                except ValueError as exc:  # changed meanwhile (the doctor marked it, a cancel, ...)
+                    _log_event("no_show_skipped", logging.WARNING, appointment_id=item["appointment_id"],
+                               reason=str(exc)[:120])
+    finally:
+        conn.close()
+    if marked:
+        emit_metric("NoShowsMarked", marked)
+    return {"candidates": len(candidates), "marked_no_show": marked}
+
+
+def no_show_sweeper_handler(event, context):
+    """EventBridge Scheduler entry point (every 15 minutes)."""
+    summary = mark_no_shows()
+    _log_event("no_show_sweep_completed", **summary)
+    return summary
 
 
 def lambda_handler(event, context):

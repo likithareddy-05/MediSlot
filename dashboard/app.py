@@ -329,31 +329,39 @@ def bff_api(api_path):
     return _json_response(upstream)
 
 
-# Patient portal routes the BFF is willing to forward, mapped to the platform API.
+# Patient portal routes the BFF is willing to forward, mapped to the platform API, with the
+# write methods each one accepts (GET is always allowed; the profile accepts every method).
 _PATIENT_ROUTES = (
-    (re.compile(r"/profile"), lambda m: "patients/me"),
-    (re.compile(r"/doctors"), lambda m: "doctors"),
-    (re.compile(r"/doctors/(\d+)"), lambda m: f"doctors/{m.group(1)}"),
-    (re.compile(r"/doctors/(\d+)/slots"), lambda m: f"doctors/{m.group(1)}/slots"),
+    (re.compile(r"/profile"), lambda m: "patients/me", None),
+    (re.compile(r"/doctors"), lambda m: "doctors", ()),
+    (re.compile(r"/doctors/(\d+)"), lambda m: f"doctors/{m.group(1)}", ()),
+    (re.compile(r"/doctors/(\d+)/slots"), lambda m: f"doctors/{m.group(1)}/slots", ()),
     # Milestone 5: booking, cancellation and refunds
-    (re.compile(r"/appointments"), lambda m: "appointments"),
-    (re.compile(r"/appointments/(\d+)"), lambda m: f"appointments/{m.group(1)}"),
-    (re.compile(r"/appointments/(\d+)/cancel"), lambda m: f"appointments/{m.group(1)}/cancel"),
-    (re.compile(r"/refunds"), lambda m: "patients/me/refunds"),
+    (re.compile(r"/appointments"), lambda m: "appointments", ("POST",)),
+    # Milestone 6: PATCH reschedules (Step Functions saga)
+    (re.compile(r"/appointments/(\d+)"), lambda m: f"appointments/{m.group(1)}", ("PATCH",)),
+    (re.compile(r"/appointments/(\d+)/cancel"), lambda m: f"appointments/{m.group(1)}/cancel", ("POST",)),
+    (re.compile(r"/refunds"), lambda m: "patients/me/refunds", ()),
+    # Milestone 6: waitlists and hold offers
+    (re.compile(r"/slots/([^/]{1,128})/waitlist"), lambda m: f"slots/{m.group(1)}/waitlist", ("POST", "DELETE")),
+    (re.compile(r"/waitlists"), lambda m: "patients/me/waitlists", ()),
+    (re.compile(r"/waitlist-offers/(\d+)/accept"), lambda m: f"waitlist-offers/{m.group(1)}/accept", ("POST",)),
 )
 
-# Upstream routes (besides the profile) that accept a write, with the one method allowed.
-_PATIENT_WRITES = {"appointments": "POST"}
+
+def _patient_route(api_path):
+    """(upstream path, allowed write methods or None for any) for a patient portal path, or (None, None)."""
+    path = "/" + api_path.strip("/")
+    for pattern, build, writes in _PATIENT_ROUTES:
+        match = pattern.fullmatch(path)
+        if match:
+            return build(match), writes
+    return None, None
 
 
 def _local_patient_path(api_path):
     """Map same-origin patient portal paths to the documented MediSlot API routes."""
-    path = "/" + api_path.strip("/")
-    for pattern, build in _PATIENT_ROUTES:
-        match = pattern.fullmatch(path)
-        if match:
-            return build(match)
-    return None
+    return _patient_route(api_path)[0]
 
 
 @app.route("/bff/patient/api/<path:api_path>", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
@@ -365,12 +373,11 @@ def bff_patient_api(api_path):
     if request.method not in {"GET", "HEAD"} and not _csrf_valid():
         return jsonify({"message": "Invalid session request. Refresh the page and try again."}), 403
 
-    upstream_path = _local_patient_path(api_path)
+    upstream_path, writes = _patient_route(api_path)
     if not upstream_path:
         return jsonify({"message": "Patient portal API route is not supported."}), 404
-    # Reads are GET only; writes are allowed on the profile, on booking and on cancel.
-    write_method = "POST" if upstream_path.endswith("/cancel") else _PATIENT_WRITES.get(upstream_path)
-    if upstream_path != "patients/me" and request.method != "GET" and request.method != write_method:
+    # Reads are GET; each route accepts only its own writes (the profile accepts every method).
+    if writes is not None and request.method != "GET" and request.method not in writes:
         return jsonify({"message": "Method not allowed."}), 405
     body = request.get_json(silent=True) if request.method not in {"GET", "DELETE"} else None
     # The client-generated Idempotency-Key must reach the booking Lambda unchanged.

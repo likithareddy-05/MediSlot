@@ -23,6 +23,8 @@ ADDITIVE_COLUMNS = [
     ("patients", "city", "ADD COLUMN city VARCHAR(100) NULL AFTER address"),
     ("patients", "emergency_contact_name", "ADD COLUMN emergency_contact_name VARCHAR(100) NULL AFTER city"),
     ("patients", "emergency_contact_phone", "ADD COLUMN emergency_contact_phone VARCHAR(16) NULL AFTER emergency_contact_name"),
+    # Milestone 6: seats reserved for the waitlist while a hold offer is live.
+    ("slots", "held_count", "ADD COLUMN held_count SMALLINT UNSIGNED NOT NULL DEFAULT 0 AFTER booked_count"),
 ]
 ADDITIVE_INDEXES = [
     # (table, index, DDL fragment)
@@ -216,14 +218,14 @@ def lambda_handler(event, context):
                 SELECT TABLE_NAME
                 FROM information_schema.tables
                 WHERE TABLE_SCHEMA = %s
-                  AND TABLE_NAME IN ('users', 'patients', 'hospitals', 'specializations', 'doctors', 'consultation_types', 'doctor_consultation_types', 'availability_patterns', 'doctor_blackouts', 'slots', 'refund_ledger')
+                  AND TABLE_NAME IN ('users', 'patients', 'hospitals', 'specializations', 'doctors', 'consultation_types', 'doctor_consultation_types', 'availability_patterns', 'doctor_blackouts', 'slots', 'refund_ledger', 'waitlist_entries', 'waitlist_offers')
                 ORDER BY TABLE_NAME
                 """,
                 (database,),
             )
             tables = [row[0] for row in cursor.fetchall()]
 
-        expected = {"users", "patients", "hospitals", "specializations", "doctors", "consultation_types", "doctor_consultation_types", "availability_patterns", "doctor_blackouts", "slots", "refund_ledger"}
+        expected = {"users", "patients", "hospitals", "specializations", "doctors", "consultation_types", "doctor_consultation_types", "availability_patterns", "doctor_blackouts", "slots", "refund_ledger", "waitlist_entries", "waitlist_offers"}
         missing = sorted(expected - set(tables))
 
         if missing:

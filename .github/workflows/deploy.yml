@@ -20,6 +20,8 @@ jobs:
     env:
       AWS_REGION: ${{ vars.AWS_REGION }}
       ENVIRONMENT_NAME: ${{ vars.ENVIRONMENT_NAME }}
+      ALARM_EMAIL: ${{ vars.ALARM_EMAIL }}
+      NOTIFICATION_EMAIL: ${{ vars.NOTIFICATION_EMAIL }}
 
     steps:
       - name: Checkout repository
@@ -59,6 +61,10 @@ jobs:
             infrastructure/authentication.yaml \
             infrastructure/schema-init.yaml \
             infrastructure/dashboard.yaml \
+            infrastructure/workflows.yaml \
+            infrastructure/observability.yaml \
+            infrastructure/statemachines/reschedule-saga.asl.json \
+            scripts/ops.sh \
             src/lambdas/auth/auth_handler.py \
             src/lambdas/auth/register.py \
             src/lambdas/auth/refresh.py \
@@ -70,6 +76,11 @@ jobs:
             src/lambdas/doctor/slot_materializer.py \
             src/lambdas/patient/patient_domain.py \
             src/lambdas/patient/booking_domain.py \
+            src/lambdas/patient/waitlist_domain.py \
+            src/lambdas/workflows/reschedule_saga.py \
+            src/lambdas/workflows/notifications.py \
+            src/lambdas/shared/waitlist_store.py \
+            src/lambdas/shared/reschedule_rules.py \
             src/lambdas/shared/events.py \
             src/lambdas/shared/refunds.py \
             src/lambdas/shared/slot_store.py \
@@ -88,6 +99,10 @@ jobs:
             tests/test_slot_idempotency.py \
             tests/test_refund_tiers.py \
             tests/test_booking_engine.py \
+            tests/test_reschedule_saga.py \
+            tests/test_waitlist.py \
+            tests/test_notifications.py \
+            tests/fakes_workflows.py \
             tests/fakes_booking.py; do
 
             test -f "$file" || {
@@ -120,6 +135,7 @@ jobs:
           python -m pip install -r dashboard/requirements.txt
 
           python -m compileall -q src/lambdas dashboard
+          python -m json.tool infrastructure/statemachines/reschedule-saga.asl.json >/dev/null
           python -m unittest discover -s tests -v   # unit tests only; they use in-memory fakes and never touch the real database
 
       - name: Validate CloudFormation templates
@@ -133,7 +149,9 @@ jobs:
             infrastructure/security.yaml \
             infrastructure/authentication.yaml \
             infrastructure/schema-init.yaml \
-            infrastructure/dashboard.yaml; do
+            infrastructure/dashboard.yaml \
+            infrastructure/workflows.yaml \
+            infrastructure/observability.yaml; do
 
             # Inline template bodies are limited to 51,200 bytes. Larger templates are
             # validated from S3 once the artifact bucket exists (see the step after
@@ -170,7 +188,8 @@ jobs:
           }
 
           deploy_stack "medislot-${ENVIRONMENT_NAME}-network" infrastructure/network.yaml
-          deploy_stack "medislot-${ENVIRONMENT_NAME}-data" infrastructure/data.yaml
+          # Optional repository variable ALARM_EMAIL subscribes an address to the operations alarm topic.
+          deploy_stack "medislot-${ENVIRONMENT_NAME}-data" infrastructure/data.yaml "AlarmEmail=${ALARM_EMAIL:-}"
           deploy_stack "medislot-${ENVIRONMENT_NAME}-security" infrastructure/security.yaml
 
       - name: Ensure SSM configuration parameters exist
@@ -297,10 +316,17 @@ jobs:
           package_lambda auth auth/auth_handler.py auth/register.py auth/refresh.py auth/logout.py
           package_lambda authorizer auth/authorizer.py
           package_lambda profile auth/profile.py
-          package_lambda doctor-domain doctor/doctor_domain.py shared/slot_time.py shared/events.py shared/refunds.py shared/slot_store.py shared/appointment_store.py shared/slot_generation.py
+          package_lambda doctor-domain doctor/doctor_domain.py shared/slot_time.py shared/events.py shared/refunds.py shared/slot_store.py shared/appointment_store.py shared/slot_generation.py shared/waitlist_store.py
           package_lambda slot-materializer doctor/slot_materializer.py shared/slot_time.py shared/slot_store.py shared/slot_generation.py
-          package_lambda patient-domain patient/patient_domain.py shared/common.py shared/slot_time.py shared/slot_store.py shared/appointment_store.py
-          package_lambda booking-domain patient/booking_domain.py shared/common.py shared/events.py shared/refunds.py shared/slot_store.py shared/appointment_store.py
+          package_lambda patient-domain patient/patient_domain.py shared/common.py shared/events.py shared/slot_time.py shared/slot_store.py shared/appointment_store.py
+          # booking-domain.zip also runs the waitlist workers (waitlist_domain.seat_freed_handler / expiry_sweeper_handler)
+          package_lambda booking-domain patient/booking_domain.py patient/waitlist_domain.py shared/common.py shared/events.py shared/refunds.py shared/slot_store.py shared/appointment_store.py shared/waitlist_store.py shared/reschedule_rules.py
+          # Milestone 6: reschedule saga task Lambda, notification consumer and reminder dispatcher
+          package_lambda workflows workflows/reschedule_saga.py workflows/notifications.py shared/common.py shared/events.py shared/slot_store.py shared/appointment_store.py shared/reschedule_rules.py
+
+          aws s3 cp infrastructure/statemachines/reschedule-saga.asl.json \
+            "s3://${ARTIFACT_BUCKET}/artifacts/${GITHUB_SHA}/statemachines/reschedule-saga.asl.json" \
+            --region "$AWS_REGION"
 
           schema_dir=build/schema-init
 
@@ -317,32 +343,7 @@ jobs:
             "s3://${ARTIFACT_BUCKET}/artifacts/${GITHUB_SHA}/schema-init.zip" \
             --region "$AWS_REGION"
 
-      - name: Deploy authentication and doctor API
-        env:
-          ARTIFACT_BUCKET: ${{ steps.assets.outputs.bucket }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          aws cloudformation deploy \
-            --stack-name "medislot-${ENVIRONMENT_NAME}-authentication" \
-            --template-file infrastructure/authentication.yaml \
-            --s3-bucket "$ARTIFACT_BUCKET" \
-            --s3-prefix "artifacts/${GITHUB_SHA}/templates" \
-            --parameter-overrides \
-              "EnvironmentName=${ENVIRONMENT_NAME}" \
-              "LambdaArtifactBucket=${ARTIFACT_BUCKET}" \
-              "AuthLambdaS3Key=artifacts/${GITHUB_SHA}/auth.zip" \
-              "AuthorizerLambdaS3Key=artifacts/${GITHUB_SHA}/authorizer.zip" \
-              "ProfileLambdaS3Key=artifacts/${GITHUB_SHA}/profile.zip" \
-              "DoctorDomainLambdaS3Key=artifacts/${GITHUB_SHA}/doctor-domain.zip" \
-              "SlotMaterializerLambdaS3Key=artifacts/${GITHUB_SHA}/slot-materializer.zip" \
-              "PatientDomainLambdaS3Key=artifacts/${GITHUB_SHA}/patient-domain.zip" \
-              "BookingDomainLambdaS3Key=artifacts/${GITHUB_SHA}/booking-domain.zip" \
-            --capabilities CAPABILITY_NAMED_IAM \
-            --region "$AWS_REGION" \
-            --no-fail-on-empty-changeset
-
+      # The schema goes first so new tables and columns exist before the new code is live.
       - name: Deploy and explicitly invoke schema initializer
         env:
           ARTIFACT_BUCKET: ${{ steps.assets.outputs.bucket }}
@@ -373,6 +374,32 @@ jobs:
           jq -e '(.FunctionError // null) == null' /tmp/schema-init-metadata.json >/dev/null
           jq -e '.statusCode == 200' /tmp/schema-init-response.json >/dev/null
 
+      - name: Deploy authentication and doctor API
+        env:
+          ARTIFACT_BUCKET: ${{ steps.assets.outputs.bucket }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          aws cloudformation deploy \
+            --stack-name "medislot-${ENVIRONMENT_NAME}-authentication" \
+            --template-file infrastructure/authentication.yaml \
+            --s3-bucket "$ARTIFACT_BUCKET" \
+            --s3-prefix "artifacts/${GITHUB_SHA}/templates" \
+            --parameter-overrides \
+              "EnvironmentName=${ENVIRONMENT_NAME}" \
+              "LambdaArtifactBucket=${ARTIFACT_BUCKET}" \
+              "AuthLambdaS3Key=artifacts/${GITHUB_SHA}/auth.zip" \
+              "AuthorizerLambdaS3Key=artifacts/${GITHUB_SHA}/authorizer.zip" \
+              "ProfileLambdaS3Key=artifacts/${GITHUB_SHA}/profile.zip" \
+              "DoctorDomainLambdaS3Key=artifacts/${GITHUB_SHA}/doctor-domain.zip" \
+              "SlotMaterializerLambdaS3Key=artifacts/${GITHUB_SHA}/slot-materializer.zip" \
+              "PatientDomainLambdaS3Key=artifacts/${GITHUB_SHA}/patient-domain.zip" \
+              "BookingDomainLambdaS3Key=artifacts/${GITHUB_SHA}/booking-domain.zip" \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --region "$AWS_REGION" \
+            --no-fail-on-empty-changeset
+
       - name: Materialize initial rolling slot window
         shell: bash
         run: |
@@ -390,6 +417,48 @@ jobs:
 
           jq -e '(.FunctionError // null) == null' /tmp/slot-materializer-metadata.json >/dev/null
           jq -e '.statusCode == 200' /tmp/slot-materializer-response.json >/dev/null
+
+      - name: Deploy workflows (reschedule saga, waitlist, notifications, scheduled jobs)
+        env:
+          ARTIFACT_BUCKET: ${{ steps.assets.outputs.bucket }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          aws cloudformation deploy \
+            --stack-name "medislot-${ENVIRONMENT_NAME}-workflows" \
+            --template-file infrastructure/workflows.yaml \
+            --parameter-overrides \
+              "EnvironmentName=${ENVIRONMENT_NAME}" \
+              "LambdaArtifactBucket=${ARTIFACT_BUCKET}" \
+              "WorkflowsLambdaS3Key=artifacts/${GITHUB_SHA}/workflows.zip" \
+              "BookingDomainLambdaS3Key=artifacts/${GITHUB_SHA}/booking-domain.zip" \
+              "DoctorDomainLambdaS3Key=artifacts/${GITHUB_SHA}/doctor-domain.zip" \
+              "RescheduleSagaDefinitionS3Key=artifacts/${GITHUB_SHA}/statemachines/reschedule-saga.asl.json" \
+              "NotificationEmail=${NOTIFICATION_EMAIL:-}" \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --region "$AWS_REGION" \
+            --no-fail-on-empty-changeset
+
+      - name: Deploy observability (dashboard, alarms, budget)
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          aws cloudformation deploy \
+            --stack-name "medislot-${ENVIRONMENT_NAME}-observability" \
+            --template-file infrastructure/observability.yaml \
+            --parameter-overrides "EnvironmentName=${ENVIRONMENT_NAME}" \
+            --region "$AWS_REGION" \
+            --no-fail-on-empty-changeset
+
+          # Cost allocation: the Project / Environment tags must be activated once per account
+          # before AWS Budgets and Cost Explorer can filter on them (takes up to 24 hours).
+          aws ce update-cost-allocation-tags-status \
+            --cost-allocation-tags-status TagKey=Project,Status=Active TagKey=Environment,Status=Active \
+            --region us-east-1 >/dev/null 2>&1 \
+            && echo "Cost allocation tags Project and Environment are active" \
+            || echo "::warning::Could not activate the cost allocation tags (the deploy role needs ce:UpdateCostAllocationTagsStatus, or activate them once in the Billing console)."
 
       - name: Package and upload dashboard
         env:
@@ -681,7 +750,7 @@ jobs:
             --output text \
             --region "$AWS_REGION")
 
-          for path in patients/me appointments; do
+          for path in patients/me appointments patients/me/waitlists; do
             CODE=$(curl -s -o /dev/null -w '%{http_code}' "${API_BASE_URL%/}/${path}")
             echo "GET /${path} without a token -> HTTP ${CODE}"
             [[ "$CODE" == "401" || "$CODE" == "403" ]] || {
@@ -698,6 +767,8 @@ jobs:
           for stack in \
             "medislot-${ENVIRONMENT_NAME}-authentication" \
             "medislot-${ENVIRONMENT_NAME}-schema-init" \
+            "medislot-${ENVIRONMENT_NAME}-workflows" \
+            "medislot-${ENVIRONMENT_NAME}-observability" \
             "medislot-${ENVIRONMENT_NAME}-dashboard"; do
 
             echo "Outputs for $stack"
@@ -708,3 +779,9 @@ jobs:
               --output table \
               --region "$AWS_REGION"
           done
+
+      - name: Drift detection (every stack should be IN_SYNC)
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/ops.sh drift-check

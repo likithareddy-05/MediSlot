@@ -263,7 +263,8 @@ function slotCard(slot,appointments,tz){
  const bookedNow=booked.filter(a=>a.status==='CONFIRMED').length;
  const cancelled=slot.status==='CANCELLED';
  const over=end<=new Date();
- const full=!cancelled&&Number(slot.booked_count||0)>=Number(slot.capacity||0)&&Number(slot.capacity||0)>0;
+ const held=Number(slot.held_count||0);
+ const full=!cancelled&&Number(slot.booked_count||0)+held>=Number(slot.capacity||0)&&Number(slot.capacity||0)>0;
  let badge=cancelled?'CANCELLED':full?'FULL':slot.status,good=slot.status==='AVAILABLE'&&!full;
  if(over&&!cancelled&&booked.length){
   if(booked.some(a=>a.status==='CONFIRMED')){badge='AWAITING OUTCOME';good=false}
@@ -273,7 +274,7 @@ function slotCard(slot,appointments,tz){
  }
  const patients=booked.length?`<details open><summary>Patients (${booked.length})</summary>${booked.map(a=>`<div class="appt-row"><span class="who">${esc(a.first_name)} ${esc(a.last_name)}${a.phone?' · '+esc(a.phone):''}</span><span class="pill ${a.status==='CONFIRMED'||a.status==='COMPLETED'?'':'off'}">${esc(STATUS_LABEL[a.status]||a.status)}</span></div>`).join('')}</details>`:'';
  const cancelBtn=!cancelled&&!over?`<div class="slot-actions"><button class="btn danger small" data-cancel-slot="${esc(slot.slot_id)}" data-booked="${bookedNow}">Cancel slot</button></div>`:'';
- return `<div class="wslot ${cancelled?'cancelled':full?'full':''}"><strong>${fmt(start)} – ${fmt(end)}</strong><div class="meta">${esc(consultation?.consultation_name||slot.consultation_name||'Consultation')}</div><div class="meta">Booked ${esc(slot.booked_count||0)}/${esc(slot.capacity)} · <span class="pill ${good?'':'off'}">${esc(badge)}</span></div>${patients}${cancelBtn}</div>`;
+ return `<div class="wslot ${cancelled?'cancelled':full?'full':''}"><strong>${fmt(start)} – ${fmt(end)}</strong><div class="meta">${esc(consultation?.consultation_name||slot.consultation_name||'Consultation')}</div><div class="meta">Booked ${esc(slot.booked_count||0)}/${esc(slot.capacity)}${held?` · ${esc(held)} held for waitlist`:''} · <span class="pill ${good?'':'off'}">${esc(badge)}</span></div>${patients}${cancelBtn}</div>`;
 }
 async function loadSchedule(){
  if(!state.weekStart)state.weekStart=currentWeekStart();

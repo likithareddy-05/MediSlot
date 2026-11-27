@@ -436,30 +436,6 @@ Resources:
           Value: MediSlot
 
   # ============================================================
-  # EVENTBRIDGE INTERFACE ENDPOINT
-  # ============================================================
-
-  EventBridgeInterfaceEndpoint:
-    Type: AWS::EC2::VPCEndpoint
-    Properties:
-      VpcId: !Ref MediSlotVPC
-      VpcEndpointType: Interface
-      ServiceName: !Sub "com.amazonaws.${AWS::Region}.events"
-      PrivateDnsEnabled: true
-      SubnetIds:
-        - !Ref PrivateSubnetA
-        - !Ref PrivateSubnetB
-      SecurityGroupIds:
-        - !Ref VPCEndpointSecurityGroup
-      Tags:
-        - Key: Name
-          Value: !Sub "medislot-${EnvironmentName}-events-endpoint"
-        - Key: Environment
-          Value: !Ref EnvironmentName
-        - Key: Project
-          Value: MediSlot
-
-  # ============================================================
   # CLOUDWATCH LOGS INTERFACE ENDPOINT
   # ============================================================
 
@@ -526,6 +502,32 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub "medislot-${EnvironmentName}-step-functions-endpoint"
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Project
+          Value: MediSlot
+
+  # ============================================================
+  # X-RAY INTERFACE ENDPOINT (Milestone 7)
+  # Lambdas in the private subnets send trace segments of their AWS SDK and
+  # MySQL calls to X-Ray (active tracing, end-to-end booking and reschedule traces).
+  # ============================================================
+
+  XRayInterfaceEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref MediSlotVPC
+      VpcEndpointType: Interface
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.xray"
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnetA
+        - !Ref PrivateSubnetB
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub "medislot-${EnvironmentName}-xray-endpoint"
         - Key: Environment
           Value: !Ref EnvironmentName
         - Key: Project
@@ -632,3 +634,7 @@ Outputs:
   StepFunctionsInterfaceEndpointId:
     Description: Step Functions interface endpoint ID
     Value: !Ref StepFunctionsInterfaceEndpoint
+
+  XRayInterfaceEndpointId:
+    Description: X-Ray interface endpoint ID
+    Value: !Ref XRayInterfaceEndpoint

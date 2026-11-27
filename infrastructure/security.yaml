@@ -37,6 +37,8 @@ Resources:
       ManagedPolicyArns:
         - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
         - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+        # Milestone 7: active X-Ray tracing (xray:PutTraceSegments and friends; no wildcard actions)
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AWSXRayDaemonWriteAccess
       Policies:
         - PolicyName: MediSlotAuthRuntimeAccess
           PolicyDocument:
@@ -144,6 +146,22 @@ Resources:
                   - ssm:GetParameter
                 Resource:
                   - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/medislot/${EnvironmentName}/booking/*
+                  # Milestone 6: waitlist hold time / cap and reschedule limit / cutoff
+                  - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/medislot/${EnvironmentName}/waitlist/*
+                  - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/medislot/${EnvironmentName}/reschedule/*
+              # Milestone 6: PATCH /appointments/{id} starts the reschedule saga and waits for its result.
+              - Sid: StartRescheduleSaga
+                Effect: Allow
+                Action:
+                  - states:StartExecution
+                Resource:
+                  - !Sub arn:${AWS::Partition}:states:${AWS::Region}:${AWS::AccountId}:stateMachine:medislot-${EnvironmentName}-reschedule-saga
+              - Sid: ReadRescheduleSagaExecutions
+                Effect: Allow
+                Action:
+                  - states:DescribeExecution
+                Resource:
+                  - !Sub arn:${AWS::Partition}:states:${AWS::Region}:${AWS::AccountId}:execution:medislot-${EnvironmentName}-reschedule-saga:*
               - Sid: ManageDoctorProfilePhotos
                 Effect: Allow
                 Action:
@@ -183,6 +201,8 @@ Resources:
       ManagedPolicyArns:
         - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
         - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+        # Milestone 7: active X-Ray tracing (xray:PutTraceSegments and friends; no wildcard actions)
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AWSXRayDaemonWriteAccess
       Policies:
         - PolicyName: MediSlotAuthorizerRuntimeAccess
           PolicyDocument:
@@ -311,6 +331,11 @@ Resources:
   JwtParameterCreatorFunction:
     Type: AWS::Lambda::Function
     Properties:
+      Tags:
+        - Key: Project
+          Value: MediSlot
+        - Key: Environment
+          Value: !Ref EnvironmentName
       FunctionName: !Sub medislot-${EnvironmentName}-jwt-parameter-creator
       Description: Creates the MediSlot JWT signing secret in SSM Parameter Store
       Runtime: python3.12

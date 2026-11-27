@@ -144,6 +144,21 @@ class PortalTests(unittest.TestCase):
         self.assertEqual(self.client.post("/bff/patient/api/appointments/12", json={}, headers=h).status_code, 405)
         self.assertEqual(self.client.post("/bff/patient/api/refunds", json={}, headers=h).status_code, 405)
 
+    def test_reschedule_and_waitlist_routes_map_to_the_api(self):
+        csrf = self.sign_in("PATIENT")
+        h = {"X-CSRF-Token": csrf}
+        cases = [("patch", "/bff/patient/api/appointments/12", ("appointments/12", "PATCH")),
+                 ("post", "/bff/patient/api/slots/7%231%23X/waitlist", ("slots/7#1#X/waitlist", "POST")),
+                 ("delete", "/bff/patient/api/slots/7%231%23X/waitlist", ("slots/7#1#X/waitlist", "DELETE")),
+                 ("get", "/bff/patient/api/waitlists", ("patients/me/waitlists", "GET")),
+                 ("post", "/bff/patient/api/waitlist-offers/9/accept", ("waitlist-offers/9/accept", "POST"))]
+        for verb, url, upstream in cases:
+            with mock.patch.object(web, "_api_call", return_value=FakeResponse(200, {})) as call:
+                self.assertEqual(getattr(self.client, verb)(url, json={}, headers=h).status_code, 200, url)
+            self.assertEqual(call.call_args.args[:2], upstream)
+        self.assertEqual(self.client.put("/bff/patient/api/waitlists", json={}, headers=h).status_code, 405)
+        self.assertEqual(self.client.delete("/bff/patient/api/waitlist-offers/9/accept", headers=h).status_code, 405)
+
     def test_doctor_cannot_use_booking_routes(self):
         self.sign_in("DOCTOR")
         self.assertEqual(self.client.get("/bff/patient/api/appointments").status_code, 403)

@@ -134,7 +134,7 @@ small.note{display:block;margin-top:4px;color:var(--muted)}
 
 <div class="shell hidden" id="appShell">
 <aside class="sidebar"><div class="brand"><span class="brand-mark">M</span> MediSlot</div><div><nav class="nav" aria-label="Patient portal">
-<button class="active" data-panel="search">Find Doctors</button><button data-panel="slots">Slot Browser</button><button data-panel="appointments">My Appointments</button><button data-panel="cancelled">Cancelled</button><button data-panel="refunds">Refunds</button><button data-panel="profile">My Profile</button>
+<button class="active" data-panel="search">Find Doctors</button><button data-panel="slots">Slot Browser</button><button data-panel="appointments">My Appointments</button><button data-panel="waitlists">Waitlists</button><button data-panel="cancelled">Cancelled</button><button data-panel="refunds">Refunds</button><button data-panel="profile">My Profile</button>
 </nav></div></aside>
 <main class="main"><header class="topbar"><div><h1 id="pageTitle">Find a doctor</h1><small id="welcome">Search by name, hospital, specialisation or city</small></div>
 <div class="filebox"><button class="btn danger" id="logoutButton">Logout</button></div></header>
@@ -178,6 +178,14 @@ small.note{display:block;margin-top:4px;color:var(--muted)}
 <div class="card"><div class="filters"><div class="field"><label for="apptFilter">Show</label><select id="apptFilter"><option value="upcoming">Upcoming</option><option value="">All</option><option value="COMPLETED">Completed</option><option value="CANCELLED">Cancelled</option><option value="NO_SHOW">No-show</option></select></div></div>
 <div id="apptSummary" class="status" style="margin-top:12px"></div>
 <div class="table-wrap"><table><thead><tr><th>When</th><th>Doctor</th><th>Consultation</th><th>Fee</th><th>Status</th><th>Refund</th><th></th></tr></thead><tbody id="apptBody"></tbody></table></div></div>
+<div class="card hidden" id="reschedulePanel" style="margin-top:18px"><div class="section-head" style="margin-bottom:8px"><div><h3 style="margin:0" id="rescheduleTitle">Reschedule</h3><p class="muted" id="rescheduleNote">Pick a new slot with the same doctor and consultation type. There is no fee change and no refund.</p></div><div class="filebox"><button class="btn secondary small" type="button" id="rescheduleClose">Close</button></div></div>
+<div id="rescheduleSummary" class="status"></div><div id="rescheduleSlots" class="week-grid"></div></div>
+</section>
+
+<section class="panel" id="panel-waitlists">
+<div class="section-head"><div><h2>Waitlists and hold offers</h2><p>When a seat frees up, the first patient in line gets a hold offer. The seat is kept for you alone until the offer expires.</p></div></div>
+<div class="card"><div id="waitlistSummary" class="status"></div>
+<div class="table-wrap"><table><thead><tr><th>Slot</th><th>Doctor</th><th>Consultation</th><th>Fee</th><th>Status</th><th></th></tr></thead><tbody id="waitlistBody"></tbody></table></div></div>
 </section>
 
 <section class="panel" id="panel-cancelled">
@@ -241,11 +249,12 @@ async function api(path,method='GET',body,extraHeaders){
 
 /* ---------- navigation ---------- */
 function showPanel(name){
-  if(name==='appointments')loadAppointments();if(name==='cancelled')loadCancelled();if(name==='refunds')loadRefunds();
+  if(name==='appointments')loadAppointments();if(name==='cancelled')loadCancelled();if(name==='refunds')loadRefunds();if(name==='waitlists')loadWaitlists();
+  state.panel=name;
   $$('.panel').forEach(p=>p.classList.toggle('active',p.id==='panel-'+name));
   const nav=name==='doctor'?'search':name;
   $$('.nav button').forEach(b=>b.classList.toggle('active',b.dataset.panel===nav));
-  $('#pageTitle').textContent={search:'Find a doctor',doctor:'Doctor profile',slots:'Slot browser',appointments:'My appointments',cancelled:'Cancelled appointments',refunds:'Refunds',profile:'My profile'}[name]||'MediSlot';
+  $('#pageTitle').textContent={search:'Find a doctor',doctor:'Doctor profile',slots:'Slot browser',appointments:'My appointments',waitlists:'Waitlists',cancelled:'Cancelled appointments',refunds:'Refunds',profile:'My profile'}[name]||'MediSlot';
 }
 $$('.nav button').forEach(b=>b.addEventListener('click',()=>showPanel(b.dataset.panel)));
 $$('[data-go]').forEach(b=>b.addEventListener('click',()=>showPanel(b.dataset.go)));
@@ -347,7 +356,7 @@ function slotChip(s){
   return `<div class="wslot ${full?'full':''}"><strong>${esc(fmt(s.start_time_utc))} – ${esc(fmt(s.end_time_utc))}</strong>
     <div class="meta">${esc(s.consultation_name)} · ${money(s.fee)}</div>
     <div class="meta"><span class="pill ${full?'off':''}">${full?'Full':esc(s.free_seats)+' of '+esc(s.capacity)+' free'}</span></div>
-    ${full?'':`<div class="slot-actions"><button class="btn small" type="button" data-book="${esc(s.slot_id)}">Book</button></div>`}</div>`;
+    <div class="slot-actions">${full?`<button class="btn secondary small" type="button" data-waitlist="${esc(s.slot_id)}">Join waitlist</button>`:`<button class="btn small" type="button" data-book="${esc(s.slot_id)}">Book</button>`}</div></div>`;
 }
 /* ---------- booking ---------- */
 /* One Idempotency-Key per slot attempt. It is reused if the patient presses Book again after a
@@ -387,7 +396,7 @@ async function loadAppointments(){
       <td>Dr. ${esc(a.doctor_name)}</td><td>${esc(a.consultation_name)}</td><td>${money(a.fee)}</td>
       <td><span class="pill ${a.status==='CONFIRMED'||a.status==='COMPLETED'?'':'off'}">${esc(STATUS_LABEL[a.status]||a.status)}</span></td>
       <td>${a.refund?money(a.refund.amount)+' ('+esc(a.refund.percent)+'%)':'—'}</td>
-      <td>${a.status==='CONFIRMED'&&new Date(a.start_time_utc)>new Date()?`<button class="btn danger small" type="button" data-cancel="${a.appointment_id}">Cancel</button>`:''}</td></tr>`).join('');
+      <td>${a.status==='CONFIRMED'&&new Date(a.start_time_utc)>new Date()?`<div class="filebox"><button class="btn secondary small" type="button" data-reschedule="${a.appointment_id}" data-doctor="${a.doctor_id}" data-type="${a.consultation_type_id}" data-slot="${esc(a.slot_id)}">Reschedule${a.reschedule_count?` (${a.reschedule_count}/2 used)`:''}</button><button class="btn danger small" type="button" data-cancel="${a.appointment_id}">Cancel</button></div>`:''}</td></tr>`).join('');
   }catch(e){$('#apptSummary').textContent=e.message;$('#apptSummary').className='status err'}
 }
 async function loadCancelled(){
@@ -414,6 +423,80 @@ async function cancelAppointment(id,btn){
 }
 document.addEventListener('click',e=>{const b=e.target.closest('[data-cancel]');if(b)cancelAppointment(b.dataset.cancel,b)});
 $('#apptFilter').onchange=loadAppointments;
+
+/* ---------- reschedule (Milestone 6: Step Functions saga) ---------- */
+const RESCHEDULE_MESSAGES={RESCHEDULE_LIMIT_REACHED:'This appointment has already been rescheduled twice.',
+  RESCHEDULE_TOO_LATE:'Appointments cannot be rescheduled within 6 hours of the start.',SLOT_FULL:'That slot has just filled up. Your appointment is unchanged.',
+  RESCHEDULE_COMPENSATED:'The reschedule could not be completed and was undone. Your original appointment is unchanged.',
+  RESCHEDULE_IN_PROGRESS:'A reschedule of this appointment is already in progress.'};
+const rescheduleState={};
+async function openReschedule(btn){
+  Object.assign(rescheduleState,{id:btn.dataset.reschedule,doctor:btn.dataset.doctor,type:btn.dataset.type,current:btn.dataset.slot});
+  const panel=$('#reschedulePanel');panel.classList.remove('hidden');panel.scrollIntoView({behavior:'smooth'});
+  $('#rescheduleTitle').textContent='Reschedule appointment #'+rescheduleState.id;
+  const grid=$('#rescheduleSlots');grid.innerHTML='<div class="empty" style="grid-column:1/-1">Loading slots…</div>';
+  const from=todayISO(),to=addDays(from,13);
+  try{
+    const d=await api(`/doctors/${rescheduleState.doctor}/slots?`+new URLSearchParams({from,to,consultationTypeId:rescheduleState.type}).toString());
+    const open=d.slots.filter(s=>s.free_seats>0&&s.slot_id!==rescheduleState.current);
+    $('#rescheduleSummary').textContent=open.length?`${open.length} free slot(s) in the next 14 days`:'No free slots with this doctor in the next 14 days.';
+    grid.innerHTML=open.map(s=>{const fmt=t=>new Date(t).toLocaleString([],{dateStyle:'medium',timeStyle:'short',timeZone:s.timezone||undefined});
+      return `<div class="wslot"><strong>${esc(fmt(s.start_time_utc))}</strong><div class="meta">${esc(s.consultation_name)} · ${esc(s.free_seats)} free</div>
+      <div class="slot-actions"><button class="btn small" type="button" data-move-to="${esc(s.slot_id)}">Move here</button></div></div>`}).join('');
+  }catch(e){grid.innerHTML='';$('#rescheduleSummary').textContent=e.message;$('#rescheduleSummary').className='status err'}
+}
+async function moveAppointment(slotId,btn){
+  if(!confirm('Move your appointment to this slot? There is no fee change.'))return;
+  $$('[data-move-to]').forEach(b=>b.disabled=true);
+  try{
+    const r=await api('/appointments/'+rescheduleState.id,'PATCH',{target_slot_id:slotId});
+    toast(r.code==='RESCHEDULE_PENDING'?r.message:`Rescheduled to ${new Date(r.appointment.start_time_utc).toLocaleString()}`);
+    $('#reschedulePanel').classList.add('hidden');await loadAppointments();
+  }catch(e){toast(RESCHEDULE_MESSAGES[e.code]||e.message);$$('[data-move-to]').forEach(b=>b.disabled=false)}
+}
+document.addEventListener('click',e=>{const b=e.target.closest('[data-reschedule]');if(b)openReschedule(b)});
+document.addEventListener('click',e=>{const b=e.target.closest('[data-move-to]');if(b)moveAppointment(b.dataset.moveTo,b)});
+$('#rescheduleClose').onclick=()=>$('#reschedulePanel').classList.add('hidden');
+
+/* ---------- waitlists and hold offers (Milestone 6) ---------- */
+const WAITLIST_MESSAGES={SLOT_NOT_FULL:'That slot has free seats again. Book it directly.',WAITLIST_LIMIT_REACHED:'You can be on at most 5 waitlists at once.',
+  ALREADY_BOOKED:'You already have an appointment in this slot.',OFFER_EXPIRED:'Sorry, this offer has expired.',
+  OFFER_NOT_LIVE:'This offer is no longer available.',DOCTOR_LIMIT_REACHED:'You already have 3 upcoming appointments with this doctor.'};
+async function joinWaitlist(slotId,btn){
+  btn.disabled=true;
+  try{const r=await api(`/slots/${encodeURIComponent(slotId)}/waitlist`,'POST',{});toast(`${r.message} · position ${r.position}`);await loadSlots()}
+  catch(e){toast(WAITLIST_MESSAGES[e.code]||e.message);if(e.code==='PROFILE_REQUIRED')showPanel('profile')}
+  finally{btn.disabled=false}
+}
+const until=t=>{const ms=new Date(t)-new Date();if(ms<=0)return'expired';const m=Math.floor(ms/60000),s=Math.floor(ms%60000/1000);return `${m}m ${String(s).padStart(2,'0')}s left`};
+async function loadWaitlists(){
+  try{
+    const d=await api('/waitlists');
+    const offers=d.waitlists.filter(w=>w.offer).length;
+    $('#waitlistSummary').className='status'+(offers?' ok':'');
+    $('#waitlistSummary').textContent=d.waitlists.length?`On ${d.waitlists.length} of ${d.limit} waitlists`+(offers?` · ${offers} seat(s) held for you for ${d.hold_minutes} minutes`:''):'You are not on any waitlist. Use "Join waitlist" on a full slot.';
+    $('#waitlistBody').innerHTML=d.waitlists.map(w=>`<tr><td>${esc(new Date(w.start_time_utc).toLocaleString([],{dateStyle:'medium',timeStyle:'short'}))}</td>
+      <td>Dr. ${esc(w.doctor_name)}</td><td>${esc(w.consultation_name)}</td><td>${money(w.fee)}</td>
+      <td>${w.offer?`<span class="pill">Seat held · <span data-until="${esc(w.offer.expires_at_utc)}">${esc(until(w.offer.expires_at_utc))}</span></span>`:`<span class="pill off">Waiting · #${esc(w.position)} in line</span>`}</td>
+      <td><div class="filebox">${w.offer?`<button class="btn small" type="button" data-accept="${w.offer.offer_id}">Accept</button>`:''}<button class="btn secondary small" type="button" data-leave="${esc(w.slot_id)}">${w.offer?'Decline':'Leave'}</button></div></td></tr>`).join('');
+  }catch(e){$('#waitlistSummary').textContent=e.message;$('#waitlistSummary').className='status err'}
+}
+async function acceptOffer(offerId,btn){
+  btn.disabled=true;
+  try{const r=await api(`/waitlist-offers/${offerId}/accept`,'POST',{});toast(r.message);await loadWaitlists()}
+  catch(e){toast(WAITLIST_MESSAGES[e.code]||e.message);await loadWaitlists()}
+}
+async function leaveWaitlist(slotId,btn){
+  if(!confirm('Leave this waitlist? A held seat goes to the next patient in line.'))return;
+  btn.disabled=true;
+  try{const r=await api(`/slots/${encodeURIComponent(slotId)}/waitlist`,'DELETE');toast(r.message);await loadWaitlists()}
+  catch(e){toast(e.message);btn.disabled=false}
+}
+document.addEventListener('click',e=>{const b=e.target.closest('[data-waitlist]');if(b)joinWaitlist(b.dataset.waitlist,b)});
+document.addEventListener('click',e=>{const b=e.target.closest('[data-accept]');if(b)acceptOffer(b.dataset.accept,b)});
+document.addEventListener('click',e=>{const b=e.target.closest('[data-leave]');if(b)leaveWaitlist(b.dataset.leave,b)});
+setInterval(()=>{$$('[data-until]').forEach(el=>el.textContent=until(el.dataset.until))},1000);
+setInterval(()=>{if(state.panel==='waitlists'&&!document.hidden)loadWaitlists()},30000);
 
 /* ---------- refunds ---------- */
 const TRIGGER_LABEL={PATIENT_CANCELLATION:'You cancelled',DOCTOR_CANCELLATION:'Doctor cancelled',NO_SHOW:'No-show'};

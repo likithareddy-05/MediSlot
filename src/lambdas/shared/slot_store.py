@@ -18,7 +18,7 @@ VIEWER_PATIENT = "PATIENT"
 
 SLOT_SELECT = """SELECT s.slot_id, s.doctor_id, s.slot_date, s.consultation_type_id, c.consultation_name,
     s.start_time_utc, s.end_time_utc, s.timezone_name, s.local_start, s.duration_minutes,
-    s.fee AS slot_fee, d.fee AS current_fee, s.capacity, s.booked_count, s.version, s.status,
+    s.fee AS slot_fee, d.fee AS current_fee, s.capacity, s.booked_count, s.held_count, s.version, s.status,
     s.availability_pattern_id
     FROM slots s
     JOIN consultation_types c ON c.consultation_type_id = s.consultation_type_id
@@ -45,6 +45,7 @@ def to_utc_naive(value):
 def _present(row):
     """One slots row as the dict both dashboards receive."""
     capacity, booked = int(row["capacity"]), int(row["booked_count"])
+    held = int(row.get("held_count") or 0)
     fee = row.get("current_fee") if row.get("current_fee") is not None else row.get("slot_fee")
     return {
         "slot_id": row["slot_id"],
@@ -60,7 +61,9 @@ def _present(row):
         "fee": float(fee),
         "capacity": capacity,
         "booked_count": booked,
-        "free_seats": max(capacity - booked, 0),
+        "held_count": held,
+        # Seats held for a waitlist hold offer are not free: nobody else can book them.
+        "free_seats": max(capacity - booked - held, 0),
         "version": int(row["version"]),
         "status": row["status"],
         "availability_pattern_id": row.get("availability_pattern_id"),
@@ -130,16 +133,18 @@ def insert_slot_if_absent(cursor, slot):
 
 
 def set_status_if_unbooked(cursor, slot_id, new_status, expected_status):
-    """Change status only while the slot is still empty and still in `expected_status`."""
+    """Change status only while the slot is still empty (no booking, no held seat) and in `expected_status`."""
     cursor.execute("""UPDATE slots SET status = %s, version = version + 1
-        WHERE slot_id = %s AND status = %s AND booked_count = 0""", (new_status, slot_id, expected_status))
+        WHERE slot_id = %s AND status = %s AND booked_count = 0 AND held_count = 0""",
+                   (new_status, slot_id, expected_status))
     return cursor.rowcount == 1
 
 
 def delete_if_unbooked(cursor, slot_id, statuses):
-    """Delete an empty slot. Refuses when a patient booked it in the meantime."""
+    """Delete an empty slot. Refuses when a patient booked it, or a seat is held for a waitlist offer."""
     marks = ",".join(["%s"] * len(statuses))
-    cursor.execute(f"DELETE FROM slots WHERE slot_id = %s AND booked_count = 0 AND status IN ({marks})",
+    cursor.execute(f"DELETE FROM slots WHERE slot_id = %s AND booked_count = 0 AND held_count = 0 "
+                   f"AND status IN ({marks})",
                    (slot_id, *statuses))
     return cursor.rowcount == 1
 
@@ -181,16 +186,25 @@ def claim_seat(cursor, slot_id, expected_version):
 
     One conditional UPDATE. True means the seat is ours; False means the slot changed
     (somebody else booked, the doctor cancelled it, ...) or is full, and the caller must
-    re-read and decide.
+    re-read and decide. Seats held for a waitlist offer count as taken.
     """
     cursor.execute("""UPDATE slots SET booked_count = booked_count + 1, version = version + 1
-        WHERE slot_id = %s AND status = 'AVAILABLE' AND booked_count < capacity AND version = %s""",
+        WHERE slot_id = %s AND status = 'AVAILABLE' AND booked_count + held_count < capacity
+        AND version = %s""",
                    (slot_id, expected_version))
     return cursor.rowcount == 1
 
 
 def release_seat(cursor, slot_id):
-    """Give one seat back. The decrement is atomic in SQL, so no version check is needed."""
-    cursor.execute("""UPDATE slots SET booked_count = booked_count - 1, version = version + 1
-        WHERE slot_id = %s AND booked_count > 0""", (slot_id,))
+    """Give one seat back. The decrement is atomic in SQL, so no version check is needed.
+
+    Milestone 6: when patients are WAITING for this slot, the same statement moves the seat to
+    held_count instead of making it free. Normal booking can therefore never take a seat that
+    belongs to the waitlist, not even in the moment before the hold offer is issued.
+    """
+    cursor.execute("""UPDATE slots s SET s.booked_count = s.booked_count - 1,
+        s.held_count = s.held_count + IF(s.status = 'AVAILABLE' AND EXISTS (SELECT 1 FROM waitlist_entries w
+            WHERE w.slot_id = s.slot_id AND w.status = 'WAITING'), 1, 0),
+        s.version = s.version + 1
+        WHERE s.slot_id = %s AND s.booked_count > 0""", (slot_id,))
     return cursor.rowcount == 1

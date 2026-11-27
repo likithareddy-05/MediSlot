@@ -1,0 +1,877 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >
+  MediSlot workflows stack (Milestone 6): reschedule saga (Step Functions),
+  waitlist promotion and hold-offer expiry, notifications (EventBridge -> SQS ->
+  Lambda -> SNS with one dead-letter queue per consumer), reminder dispatcher and
+  no-show sweeper (EventBridge Scheduler). Every IAM role is scoped to the
+  resources it uses; no wildcard actions.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    AllowedValues: [dev, test, prod]
+  LambdaArtifactBucket:
+    Type: String
+    Description: S3 bucket holding the Lambda ZIPs and the state machine definition.
+  WorkflowsLambdaS3Key:
+    Type: String
+    Description: S3 key of workflows.zip (reschedule_saga.py, notifications.py and shared helpers).
+  BookingDomainLambdaS3Key:
+    Type: String
+    Description: S3 key of booking-domain.zip (also holds waitlist_domain.py for the waitlist workers).
+  DoctorDomainLambdaS3Key:
+    Type: String
+    Description: S3 key of doctor-domain.zip (holds the no-show sweeper).
+  RescheduleSagaDefinitionS3Key:
+    Type: String
+    Description: S3 key of statemachines/reschedule-saga.asl.json.
+  NotificationEmail:
+    Type: String
+    Default: ""
+    Description: Optional e-mail subscribed to the notification topic, to see notifications arrive. Delivery is otherwise verified in SNS.
+  LogRetentionInDays:
+    Type: Number
+    Default: 30
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365]
+
+Conditions:
+  HasNotificationEmail: !Not [!Equals [!Ref NotificationEmail, ""]]
+
+Resources:
+  # ---------------------------------------------------------
+  # IAM ROLES (least privilege, specific actions and resource ARNs)
+  # ---------------------------------------------------------
+
+  WorkflowDatabaseLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub medislot-${EnvironmentName}-workflow-db-lambda-role
+      Description: Reschedule saga, waitlist workers and no-show sweeper (RDS, appointments table, events)
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AWSXRayDaemonWriteAccess
+      Policies:
+        - PolicyName: MediSlotWorkflowDatabaseAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ReadDatabaseSecret
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - Fn::ImportValue: !Sub medislot-${EnvironmentName}-DatabaseSecretArn
+              - Sid: ReadConfiguration
+                Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                Resource:
+                  - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/medislot/${EnvironmentName}/database/*
+                  - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/medislot/${EnvironmentName}/booking/*
+                  - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/medislot/${EnvironmentName}/waitlist/*
+                  - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/medislot/${EnvironmentName}/reschedule/*
+              - Sid: ManageAppointments
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                Resource:
+                  - !Sub
+                    - arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${Table}
+                    - Table:
+                        Fn::ImportValue: !Sub medislot-${EnvironmentName}-AppointmentsTableName
+                  - !Sub
+                    - arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${Table}/index/*
+                    - Table:
+                        Fn::ImportValue: !Sub medislot-${EnvironmentName}-AppointmentsTableName
+              - Sid: PublishDomainEvents
+                Effect: Allow
+                Action:
+                  - events:PutEvents
+                Resource:
+                  - Fn::ImportValue: !Sub medislot-${EnvironmentName}-EventBusArn
+              - Sid: ConsumeWaitlistQueue
+                Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                  - sqs:ChangeMessageVisibility
+                Resource:
+                  - !GetAtt WaitlistQueue.Arn
+      Tags:
+        - Key: Project
+          Value: MediSlot
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  NotificationLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub medislot-${EnvironmentName}-notification-lambda-role
+      Description: Notification consumer and reminder dispatcher (dispatch log, SNS topic, notification queue)
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AWSXRayDaemonWriteAccess
+      Policies:
+        - PolicyName: MediSlotNotificationAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: DispatchLog
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                Resource:
+                  - !Sub
+                    - arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${Table}
+                    - Table:
+                        Fn::ImportValue: !Sub medislot-${EnvironmentName}-NotificationDispatchLogTableName
+              - Sid: ReadAppointmentsByStatus
+                Effect: Allow
+                Action:
+                  - dynamodb:Query
+                Resource:
+                  - !Sub
+                    - arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${Table}/index/StatusStartIndex
+                    - Table:
+                        Fn::ImportValue: !Sub medislot-${EnvironmentName}-AppointmentsTableName
+              - Sid: PublishNotifications
+                Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource:
+                  - !Ref NotificationTopic
+              - Sid: ConsumeNotificationQueue
+                Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                  - sqs:ChangeMessageVisibility
+                Resource:
+                  - !GetAtt NotificationQueue.Arn
+      Tags:
+        - Key: Project
+          Value: MediSlot
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  StepFunctionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub medislot-${EnvironmentName}-reschedule-saga-role
+      Description: Reschedule saga state machine (invokes the saga Lambda, writes logs and traces)
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: MediSlotRescheduleSaga
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: InvokeSagaFunction
+                Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !GetAtt RescheduleSagaFunction.Arn
+                  - !Sub "${RescheduleSagaFunction.Arn}:*"
+              # CloudWatch Logs delivery and X-Ray do not support resource-level permissions,
+              # so these specific actions are granted on "*" (as the Step Functions docs require).
+              - Sid: ExecutionLogDelivery
+                Effect: Allow
+                Action:
+                  - logs:CreateLogDelivery
+                  - logs:GetLogDelivery
+                  - logs:UpdateLogDelivery
+                  - logs:DeleteLogDelivery
+                  - logs:ListLogDeliveries
+                  - logs:PutResourcePolicy
+                  - logs:DescribeResourcePolicies
+                  - logs:DescribeLogGroups
+                Resource: "*"
+              - Sid: Tracing
+                Effect: Allow
+                Action:
+                  - xray:PutTraceSegments
+                  - xray:PutTelemetryRecords
+                  - xray:GetSamplingRules
+                  - xray:GetSamplingTargets
+                Resource: "*"
+      Tags:
+        - Key: Project
+          Value: MediSlot
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  SchedulerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub medislot-${EnvironmentName}-scheduler-role
+      Description: EventBridge Scheduler invokes the offer expiry sweeper, reminder dispatcher and no-show sweeper
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: InvokeScheduledJobs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: InvokeScheduledJobs
+                Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !GetAtt OfferExpirySweeperFunction.Arn
+                  - !GetAtt ReminderDispatcherFunction.Arn
+                  - !GetAtt NoShowSweeperFunction.Arn
+      Tags:
+        - Key: Project
+          Value: MediSlot
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # ---------------------------------------------------------
+  # RESCHEDULE SAGA (Step Functions, STANDARD: full execution history incl. compensation)
+  # ---------------------------------------------------------
+
+  RescheduleSagaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub medislot-${EnvironmentName}-reschedule-saga
+      Description: Task Lambda of the reschedule saga (validate, claim, switch, release, compensate).
+      Runtime: python3.12
+      Handler: reschedule_saga.handler
+      Role: !GetAtt WorkflowDatabaseLambdaRole.Arn
+      Code:
+        S3Bucket: !Ref LambdaArtifactBucket
+        S3Key: !Ref WorkflowsLambdaS3Key
+      Timeout: 30
+      MemorySize: 256
+      TracingConfig:
+        Mode: Active
+      LoggingConfig:
+        LogGroup: !Ref RescheduleSagaFunctionLogGroup
+      VpcConfig:
+        SecurityGroupIds:
+          - Fn::ImportValue: !Sub medislot-${EnvironmentName}-LambdaSecurityGroupId
+        SubnetIds:
+          - Fn::ImportValue: !Sub medislot-${EnvironmentName}-PrivateSubnetAId
+          - Fn::ImportValue: !Sub medislot-${EnvironmentName}-PrivateSubnetBId
+      Environment:
+        Variables:
+          DB_HOST_PARAMETER: !Sub /medislot/${EnvironmentName}/database/host
+          DB_PORT_PARAMETER: !Sub /medislot/${EnvironmentName}/database/port
+          DB_NAME_PARAMETER: !Sub /medislot/${EnvironmentName}/database/name
+          DB_USERNAME_PARAMETER: !Sub /medislot/${EnvironmentName}/database/username
+          DB_SECRET_ARN:
+            Fn::ImportValue: !Sub medislot-${EnvironmentName}-DatabaseSecretArn
+          APPOINTMENTS_TABLE_NAME:
+            Fn::ImportValue: !Sub medislot-${EnvironmentName}-AppointmentsTableName
+          EVENT_BUS_NAME:
+            Fn::ImportValue: !Sub medislot-${EnvironmentName}-EventBusName
+          ENVIRONMENT_NAME: !Ref EnvironmentName
+          RESCHEDULE_MAX_PARAMETER: !Sub /medislot/${EnvironmentName}/reschedule/max-reschedules
+          RESCHEDULE_CUTOFF_HOURS_PARAMETER: !Sub /medislot/${EnvironmentName}/reschedule/cutoff-hours
+          RESCHEDULE_FORCE_FAILURE_PARAMETER: !Sub /medislot/${EnvironmentName}/reschedule/force-release-failure
+          WAITLIST_HOLD_MINUTES_PARAMETER: !Sub /medislot/${EnvironmentName}/waitlist/hold-minutes
+          WAITLIST_MAX_ACTIVE_PARAMETER: !Sub /medislot/${EnvironmentName}/waitlist/max-active-per-patient
+          MAX_UPCOMING_PARAMETER: !Sub /medislot/${EnvironmentName}/booking/max-upcoming-per-doctor
+      Tags:
+        - Key: Project
+          Value: MediSlot
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  RescheduleSagaFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /medislot/${EnvironmentName}/lambda/reschedule-saga
+      RetentionInDays: !Ref LogRetentionInDays
+      Tags:
+        - Key: Project
+          Value: MediSlot
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+
+  RescheduleSagaStateMachineLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /medislot/${EnvironmentName}/states/reschedule-saga
+      RetentionInDays: !Ref LogRetentionInDays
+      Tags:
+        - Key: Project
+          Value: MediSlot
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  RescheduleSagaStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub medislot-${EnvironmentName}-reschedule-saga
+      StateMachineType: STANDARD
+      RoleArn: !GetAtt StepFunctionsRole.Arn
+      DefinitionS3Location:
+        Bucket: !Ref LambdaArtifactBucket
+        Key: !Ref RescheduleSagaDefinitionS3Key
+      DefinitionSubstitutions:
+        SagaFunctionArn: !GetAtt RescheduleSagaFunction.Arn
+      LoggingConfiguration:
+        Level: ALL
+        IncludeExecutionData: true
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt RescheduleSagaStateMachineLogGroup.Arn
+      TracingConfiguration:
+        Enabled: true
+      Tags:
+        - Key: Project
+          Value: MediSlot
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # ---------------------------------------------------------
+  # NOTIFICATIONS: EventBridge -> SQS (+DLQ) -> Lambda -> SNS
+  # ---------------------------------------------------------
+
+  NotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub medislot-${EnvironmentName}-notifications
+      KmsMasterKeyId: alias/aws/sns
+      Tags:
+        - Key: Project
+          Value: MediSlot
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  NotificationEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasNotificationEmail
+    Properties:
+      TopicArn: !Ref NotificationTopic
+      Protocol: email
+      Endpoint: !Ref NotificationEmail
+
+  NotificationQueueDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub medislot-${EnvironmentName}-notifications-dlq
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+      Tags:
+        - Key: Project
+          Value: MediSlot
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  NotificationQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub medislot-${EnvironmentName}-notifications
+      VisibilityTimeout: 180
+      MessageRetentionPeriod: 345600
+      SqsManagedSseEnabled: true
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt NotificationQueueDeadLetterQueue.Arn
+        maxReceiveCount: 5
+      Tags:
+        - Key: Project
+          Value: MediSlot
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  NotificationQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref NotificationQueue
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowEventBridgeRule
+            Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt NotificationQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !GetAtt NotificationQueueRule.Arn
+
+  NotificationQueueRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub medislot-${EnvironmentName}-notification-events
+      Description: Appointment and waitlist events that produce a notification
+      EventBusName:
+        Fn::ImportValue: !Sub medislot-${EnvironmentName}-EventBusName
+      EventPattern:
+        source:
+          - medislot.booking
+        detail-type:
+          - AppointmentBooked
+          - AppointmentRescheduled
+          - AppointmentCancelled
+          - WaitlistOfferIssued
+          - WaitlistOfferExpired
+      State: ENABLED
+      Targets:
+        - Id: NotificationQueue
+          Arn: !GetAtt NotificationQueue.Arn
+
+  NotificationFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub medislot-${EnvironmentName}-notification-dispatcher
+      Description: Consumes notification events from SQS and publishes each notification to SNS exactly once.
+      Runtime: python3.12
+      Handler: notifications.event_handler
+      Role: !GetAtt NotificationLambdaRole.Arn
+      Code:
+        S3Bucket: !Ref LambdaArtifactBucket
+        S3Key: !Ref WorkflowsLambdaS3Key
+      Timeout: 30
+      MemorySize: 256
+      TracingConfig:
+        Mode: Active
+      LoggingConfig:
+        LogGroup: !Ref NotificationFunctionLogGroup
+      Environment:
+        Variables:
+          DISPATCH_LOG_TABLE_NAME:
+            Fn::ImportValue: !Sub medislot-${EnvironmentName}-NotificationDispatchLogTableName
+          APPOINTMENTS_TABLE_NAME:
+            Fn::ImportValue: !Sub medislot-${EnvironmentName}-AppointmentsTableName
+          NOTIFICATION_TOPIC_ARN: !Ref NotificationTopic
+          ENVIRONMENT_NAME: !Ref EnvironmentName
+      Tags:
+        - Key: Project
+          Value: MediSlot
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  NotificationFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /medislot/${EnvironmentName}/lambda/notification-dispatcher
+      RetentionInDays: !Ref LogRetentionInDays
+      Tags:
+        - Key: Project
+          Value: MediSlot
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+
+  NotificationQueueMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt NotificationQueue.Arn
+      FunctionName: !Ref NotificationFunction
+      BatchSize: 10
+      FunctionResponseTypes:
+        - ReportBatchItemFailures
+
+  ReminderDispatcherFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub medislot-${EnvironmentName}-reminder-dispatcher
+      Description: "Every 5 minutes: sends the 24-hour and 2-hour reminders, each exactly once."
+      Runtime: python3.12
+      Handler: notifications.reminder_handler
+      Role: !GetAtt NotificationLambdaRole.Arn
+      Code:
+        S3Bucket: !Ref LambdaArtifactBucket
+        S3Key: !Ref WorkflowsLambdaS3Key
+      Timeout: 120
+      MemorySize: 256
+      TracingConfig:
+        Mode: Active
+      LoggingConfig:
+        LogGroup: !Ref ReminderDispatcherFunctionLogGroup
+      Environment:
+        Variables:
+          DISPATCH_LOG_TABLE_NAME:
+            Fn::ImportValue: !Sub medislot-${EnvironmentName}-NotificationDispatchLogTableName
+          APPOINTMENTS_TABLE_NAME:
+            Fn::ImportValue: !Sub medislot-${EnvironmentName}-AppointmentsTableName
+          NOTIFICATION_TOPIC_ARN: !Ref NotificationTopic
+          ENVIRONMENT_NAME: !Ref EnvironmentName
+      Tags:
+        - Key: Project
+          Value: MediSlot
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  ReminderDispatcherFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /medislot/${EnvironmentName}/lambda/reminder-dispatcher
+      RetentionInDays: !Ref LogRetentionInDays
+      Tags:
+        - Key: Project
+          Value: MediSlot
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+
+  # ---------------------------------------------------------
+  # WAITLIST: SlotSeatFreed -> SQS (+DLQ) -> promotion worker; expiry sweeper
+  # ---------------------------------------------------------
+
+  WaitlistQueueDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub medislot-${EnvironmentName}-waitlist-seat-freed-dlq
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+      Tags:
+        - Key: Project
+          Value: MediSlot
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  WaitlistQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub medislot-${EnvironmentName}-waitlist-seat-freed
+      VisibilityTimeout: 180
+      MessageRetentionPeriod: 345600
+      SqsManagedSseEnabled: true
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt WaitlistQueueDeadLetterQueue.Arn
+        maxReceiveCount: 5
+      Tags:
+        - Key: Project
+          Value: MediSlot
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  WaitlistQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref WaitlistQueue
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowEventBridgeRule
+            Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt WaitlistQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !GetAtt WaitlistQueueRule.Arn
+
+  WaitlistQueueRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub medislot-${EnvironmentName}-waitlist-seat-freed
+      Description: A seat was given back - offer it to the first patient on the waitlist
+      EventBusName:
+        Fn::ImportValue: !Sub medislot-${EnvironmentName}-EventBusName
+      EventPattern:
+        source:
+          - medislot.booking
+        detail-type:
+          - SlotSeatFreed
+      State: ENABLED
+      Targets:
+        - Id: WaitlistQueue
+          Arn: !GetAtt WaitlistQueue.Arn
+
+  WaitlistPromotionFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub medislot-${EnvironmentName}-waitlist-promotion
+      Description: Consumes SlotSeatFreed and issues a hold offer to the first waitlisted patient.
+      Runtime: python3.12
+      Handler: waitlist_domain.seat_freed_handler
+      Role: !GetAtt WorkflowDatabaseLambdaRole.Arn
+      Code:
+        S3Bucket: !Ref LambdaArtifactBucket
+        S3Key: !Ref BookingDomainLambdaS3Key
+      Timeout: 30
+      MemorySize: 256
+      TracingConfig:
+        Mode: Active
+      LoggingConfig:
+        LogGroup: !Ref WaitlistPromotionFunctionLogGroup
+      VpcConfig:
+        SecurityGroupIds:
+          - Fn::ImportValue: !Sub medislot-${EnvironmentName}-LambdaSecurityGroupId
+        SubnetIds:
+          - Fn::ImportValue: !Sub medislot-${EnvironmentName}-PrivateSubnetAId
+          - Fn::ImportValue: !Sub medislot-${EnvironmentName}-PrivateSubnetBId
+      Environment:
+        Variables:
+          DB_HOST_PARAMETER: !Sub /medislot/${EnvironmentName}/database/host
+          DB_PORT_PARAMETER: !Sub /medislot/${EnvironmentName}/database/port
+          DB_NAME_PARAMETER: !Sub /medislot/${EnvironmentName}/database/name
+          DB_USERNAME_PARAMETER: !Sub /medislot/${EnvironmentName}/database/username
+          DB_SECRET_ARN:
+            Fn::ImportValue: !Sub medislot-${EnvironmentName}-DatabaseSecretArn
+          APPOINTMENTS_TABLE_NAME:
+            Fn::ImportValue: !Sub medislot-${EnvironmentName}-AppointmentsTableName
+          EVENT_BUS_NAME:
+            Fn::ImportValue: !Sub medislot-${EnvironmentName}-EventBusName
+          ENVIRONMENT_NAME: !Ref EnvironmentName
+          RESCHEDULE_MAX_PARAMETER: !Sub /medislot/${EnvironmentName}/reschedule/max-reschedules
+          RESCHEDULE_CUTOFF_HOURS_PARAMETER: !Sub /medislot/${EnvironmentName}/reschedule/cutoff-hours
+          RESCHEDULE_FORCE_FAILURE_PARAMETER: !Sub /medislot/${EnvironmentName}/reschedule/force-release-failure
+          WAITLIST_HOLD_MINUTES_PARAMETER: !Sub /medislot/${EnvironmentName}/waitlist/hold-minutes
+          WAITLIST_MAX_ACTIVE_PARAMETER: !Sub /medislot/${EnvironmentName}/waitlist/max-active-per-patient
+          MAX_UPCOMING_PARAMETER: !Sub /medislot/${EnvironmentName}/booking/max-upcoming-per-doctor
+      Tags:
+        - Key: Project
+          Value: MediSlot
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  WaitlistPromotionFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /medislot/${EnvironmentName}/lambda/waitlist-promotion
+      RetentionInDays: !Ref LogRetentionInDays
+      Tags:
+        - Key: Project
+          Value: MediSlot
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+
+  WaitlistQueueMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt WaitlistQueue.Arn
+      FunctionName: !Ref WaitlistPromotionFunction
+      BatchSize: 10
+      FunctionResponseTypes:
+        - ReportBatchItemFailures
+
+  OfferExpirySweeperFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub medislot-${EnvironmentName}-offer-expiry-sweeper
+      Description: "Every minute: expires hold offers and passes the seat to the next patient in line."
+      Runtime: python3.12
+      Handler: waitlist_domain.expiry_sweeper_handler
+      Role: !GetAtt WorkflowDatabaseLambdaRole.Arn
+      Code:
+        S3Bucket: !Ref LambdaArtifactBucket
+        S3Key: !Ref BookingDomainLambdaS3Key
+      Timeout: 60
+      MemorySize: 256
+      TracingConfig:
+        Mode: Active
+      LoggingConfig:
+        LogGroup: !Ref OfferExpirySweeperFunctionLogGroup
+      VpcConfig:
+        SecurityGroupIds:
+          - Fn::ImportValue: !Sub medislot-${EnvironmentName}-LambdaSecurityGroupId
+        SubnetIds:
+          - Fn::ImportValue: !Sub medislot-${EnvironmentName}-PrivateSubnetAId
+          - Fn::ImportValue: !Sub medislot-${EnvironmentName}-PrivateSubnetBId
+      Environment:
+        Variables:
+          DB_HOST_PARAMETER: !Sub /medislot/${EnvironmentName}/database/host
+          DB_PORT_PARAMETER: !Sub /medislot/${EnvironmentName}/database/port
+          DB_NAME_PARAMETER: !Sub /medislot/${EnvironmentName}/database/name
+          DB_USERNAME_PARAMETER: !Sub /medislot/${EnvironmentName}/database/username
+          DB_SECRET_ARN:
+            Fn::ImportValue: !Sub medislot-${EnvironmentName}-DatabaseSecretArn
+          APPOINTMENTS_TABLE_NAME:
+            Fn::ImportValue: !Sub medislot-${EnvironmentName}-AppointmentsTableName
+          EVENT_BUS_NAME:
+            Fn::ImportValue: !Sub medislot-${EnvironmentName}-EventBusName
+          ENVIRONMENT_NAME: !Ref EnvironmentName
+          RESCHEDULE_MAX_PARAMETER: !Sub /medislot/${EnvironmentName}/reschedule/max-reschedules
+          RESCHEDULE_CUTOFF_HOURS_PARAMETER: !Sub /medislot/${EnvironmentName}/reschedule/cutoff-hours
+          RESCHEDULE_FORCE_FAILURE_PARAMETER: !Sub /medislot/${EnvironmentName}/reschedule/force-release-failure
+          WAITLIST_HOLD_MINUTES_PARAMETER: !Sub /medislot/${EnvironmentName}/waitlist/hold-minutes
+          WAITLIST_MAX_ACTIVE_PARAMETER: !Sub /medislot/${EnvironmentName}/waitlist/max-active-per-patient
+          MAX_UPCOMING_PARAMETER: !Sub /medislot/${EnvironmentName}/booking/max-upcoming-per-doctor
+      Tags:
+        - Key: Project
+          Value: MediSlot
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  OfferExpirySweeperFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /medislot/${EnvironmentName}/lambda/offer-expiry-sweeper
+      RetentionInDays: !Ref LogRetentionInDays
+      Tags:
+        - Key: Project
+          Value: MediSlot
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+
+  NoShowSweeperFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub medislot-${EnvironmentName}-no-show-sweeper
+      Description: "Every 15 minutes: marks appointments still CONFIRMED 30 minutes after the slot end as NO_SHOW."
+      Runtime: python3.12
+      Handler: doctor_domain.no_show_sweeper_handler
+      Role: !GetAtt WorkflowDatabaseLambdaRole.Arn
+      Code:
+        S3Bucket: !Ref LambdaArtifactBucket
+        S3Key: !Ref DoctorDomainLambdaS3Key
+      Timeout: 120
+      MemorySize: 256
+      TracingConfig:
+        Mode: Active
+      LoggingConfig:
+        LogGroup: !Ref NoShowSweeperFunctionLogGroup
+      VpcConfig:
+        SecurityGroupIds:
+          - Fn::ImportValue: !Sub medislot-${EnvironmentName}-LambdaSecurityGroupId
+        SubnetIds:
+          - Fn::ImportValue: !Sub medislot-${EnvironmentName}-PrivateSubnetAId
+          - Fn::ImportValue: !Sub medislot-${EnvironmentName}-PrivateSubnetBId
+      Environment:
+        Variables:
+          DB_HOST_PARAMETER: !Sub /medislot/${EnvironmentName}/database/host
+          DB_PORT_PARAMETER: !Sub /medislot/${EnvironmentName}/database/port
+          DB_NAME_PARAMETER: !Sub /medislot/${EnvironmentName}/database/name
+          DB_USERNAME_PARAMETER: !Sub /medislot/${EnvironmentName}/database/username
+          DB_SECRET_ARN:
+            Fn::ImportValue: !Sub medislot-${EnvironmentName}-DatabaseSecretArn
+          APPOINTMENTS_TABLE_NAME:
+            Fn::ImportValue: !Sub medislot-${EnvironmentName}-AppointmentsTableName
+          EVENT_BUS_NAME:
+            Fn::ImportValue: !Sub medislot-${EnvironmentName}-EventBusName
+          ENVIRONMENT_NAME: !Ref EnvironmentName
+          ASSETS_BUCKET:
+            Fn::ImportValue: !Sub medislot-${EnvironmentName}-AssetsBucketName
+      Tags:
+        - Key: Project
+          Value: MediSlot
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  NoShowSweeperFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /medislot/${EnvironmentName}/lambda/no-show-sweeper
+      RetentionInDays: !Ref LogRetentionInDays
+      Tags:
+        - Key: Project
+          Value: MediSlot
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+
+  # ---------------------------------------------------------
+  # SCHEDULED JOBS (EventBridge Scheduler). Every job is safe to run twice.
+  # ---------------------------------------------------------
+
+  OfferExpirySchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: !Sub medislot-${EnvironmentName}-offer-expiry-sweeper
+      Description: Hold offer expiry sweeper
+      ScheduleExpression: rate(1 minute)
+      FlexibleTimeWindow:
+        Mode: "OFF"
+      State: ENABLED
+      Target:
+        Arn: !GetAtt OfferExpirySweeperFunction.Arn
+        RoleArn: !GetAtt SchedulerRole.Arn
+        RetryPolicy:
+          MaximumRetryAttempts: 2
+          MaximumEventAgeInSeconds: 300
+
+  ReminderSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: !Sub medislot-${EnvironmentName}-reminder-dispatcher
+      Description: 24-hour and 2-hour appointment reminders
+      ScheduleExpression: rate(5 minutes)
+      FlexibleTimeWindow:
+        Mode: "OFF"
+      State: ENABLED
+      Target:
+        Arn: !GetAtt ReminderDispatcherFunction.Arn
+        RoleArn: !GetAtt SchedulerRole.Arn
+        RetryPolicy:
+          MaximumRetryAttempts: 2
+          MaximumEventAgeInSeconds: 300
+
+  NoShowSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: !Sub medislot-${EnvironmentName}-no-show-sweeper
+      Description: Marks stale CONFIRMED appointments NO_SHOW
+      ScheduleExpression: rate(15 minutes)
+      FlexibleTimeWindow:
+        Mode: "OFF"
+      State: ENABLED
+      Target:
+        Arn: !GetAtt NoShowSweeperFunction.Arn
+        RoleArn: !GetAtt SchedulerRole.Arn
+        RetryPolicy:
+          MaximumRetryAttempts: 2
+          MaximumEventAgeInSeconds: 300
+
+Outputs:
+  RescheduleStateMachineArn:
+    Value: !Ref RescheduleSagaStateMachine
+    Export:
+      Name: !Sub medislot-${EnvironmentName}-RescheduleStateMachineArn
+  NotificationTopicArn:
+    Value: !Ref NotificationTopic
+    Export:
+      Name: !Sub medislot-${EnvironmentName}-NotificationTopicArn
+  NotificationQueueName:
+    Value: !GetAtt NotificationQueue.QueueName
+  NotificationDeadLetterQueueName:
+    Value: !GetAtt NotificationQueueDeadLetterQueue.QueueName
+  WaitlistQueueName:
+    Value: !GetAtt WaitlistQueue.QueueName
+  WaitlistDeadLetterQueueName:
+    Value: !GetAtt WaitlistQueueDeadLetterQueue.QueueName

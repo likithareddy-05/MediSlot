@@ -34,6 +34,11 @@ Resources:
   DashboardLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
+      Tags:
+        - Key: Project
+          Value: MediSlot
+        - Key: Environment
+          Value: !Ref EnvironmentName
       LogGroupName: !Sub /medislot/${EnvironmentName}/dashboard
       RetentionInDays: !Ref LogRetentionInDays
 

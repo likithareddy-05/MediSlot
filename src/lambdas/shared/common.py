@@ -46,6 +46,33 @@ def get_config_value(name, default=None, ttl=CONFIG_TTL_SECONDS):
     return value
 
 
+def int_setting(env_name, default):
+    """A positive whole number from the SSM parameter named by an environment variable.
+
+    Falls back to `default` when the variable is unset, SSM cannot be read, or the value is
+    not a positive whole number (a typo in Parameter Store must not break the API).
+    """
+    raw = get_config_value(os.environ.get(env_name), None)
+    try:
+        value = int(str(raw).strip()) if raw is not None else default
+    except ValueError:
+        logger.warning(json.dumps({"event": "setting_not_a_number", "setting": env_name}))
+        return default
+    return value if value > 0 else default
+
+
+class ApiError(Exception):
+    """A business rule said no. Carries the HTTP status and a machine-readable code."""
+
+    def __init__(self, status, code, message, **extra):
+        super().__init__(message)
+        self.status, self.code, self.message, self.extra = status, code, message, extra
+
+
+def error_response(exc):
+    return response(exc.status, {"message": exc.message, "code": exc.code, **exc.extra})
+
+
 def log_event(event_name, level=logging.INFO, **fields):
     """Emit one structured JSON log line (searchable with CloudWatch Logs Insights).
 

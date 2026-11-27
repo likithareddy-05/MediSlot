@@ -14,6 +14,14 @@ Parameters:
       - prod
     Description: Environment name used for resource naming.
 
+  AlarmEmail:
+    Type: String
+    Default: ""
+    Description: Optional e-mail address subscribed to the operations alarm topic (alarms and budget alerts).
+
+Conditions:
+  HasAlarmEmail: !Not [!Equals [!Ref AlarmEmail, ""]]
+
 Resources:
 
   # ------------------------------------------------------------
@@ -34,6 +42,8 @@ Resources:
           Value: !Sub "medislot-${EnvironmentName}-db-subnet-group"
         - Key: Environment
           Value: !Ref EnvironmentName
+        - Key: Project
+          Value: MediSlot
 
   # ------------------------------------------------------------
   # RDS MYSQL
@@ -59,7 +69,10 @@ Resources:
             !Sub "medislot-${EnvironmentName}-RDSSecurityGroupId"
       PubliclyAccessible: false
       MultiAZ: false
-      BackupRetentionPeriod: 1
+      # Milestone 7: 7 days of automated backups = point-in-time restore of the database
+      # to any second in the last week (used by the DR drill, see docs/operations.md).
+      BackupRetentionPeriod: 7
+      PreferredBackupWindow: "20:00-21:00"
       AutoMinorVersionUpgrade: true
       CopyTagsToSnapshot: true
       DeletionProtection: false
@@ -68,6 +81,8 @@ Resources:
           Value: !Sub "medislot-${EnvironmentName}-mysql"
         - Key: Environment
           Value: !Ref EnvironmentName
+        - Key: Project
+          Value: MediSlot
 
   # ------------------------------------------------------------
   # DYNAMODB: REFRESH TOKENS
@@ -118,15 +133,18 @@ Resources:
       Tags:
         - Key: Environment
           Value: !Ref EnvironmentName
+        - Key: Project
+          Value: MediSlot
 
 
   # ------------------------------------------------------------
   # DYNAMODB: APPOINTMENTS (Milestone 5)
   # Appointments live in DynamoDB; slots live in RDS (the `slots` table).
-  # Partition key appointment_id (32 hex characters). Three indexes:
-  #   PatientIndex (patient_id, start_time_utc)  a patient's appointments
-  #   DoctorIndex  (doctor_id,  start_time_utc)  a doctor's appointments
-  #   SlotIndex    (slot_id)                     every appointment of one slot
+  # Partition key appointment_id (sequential number as text). Four indexes:
+  #   PatientIndex     (patient_id, start_time_utc)  a patient's appointments
+  #   DoctorIndex      (doctor_id,  start_time_utc)  a doctor's appointments
+  #   SlotIndex        (slot_id)                     every appointment of one slot
+  #   StatusStartIndex (status, start_time_utc)      scheduled jobs (reminders, no-shows)
   # Items whose key starts with HOLD# enforce one active appointment per patient per slot;
   # they have none of the index attributes, so they never appear in the indexes.
   # ------------------------------------------------------------
@@ -146,6 +164,8 @@ Resources:
         - AttributeName: slot_id
           AttributeType: S
         - AttributeName: start_time_utc
+          AttributeType: S
+        - AttributeName: status
           AttributeType: S
       KeySchema:
         - AttributeName: appointment_id
@@ -173,6 +193,16 @@ Resources:
               KeyType: HASH
           Projection:
             ProjectionType: ALL
+        # Milestone 6: the reminder dispatcher and the no-show sweeper read appointments
+        # by status and start time (e.g. CONFIRMED starting within the next 24 hours).
+        - IndexName: StatusStartIndex
+          KeySchema:
+            - AttributeName: status
+              KeyType: HASH
+            - AttributeName: start_time_utc
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
       SSESpecification:
         SSEEnabled: true
       PointInTimeRecoverySpecification:
@@ -180,6 +210,8 @@ Resources:
       Tags:
         - Key: Environment
           Value: !Ref EnvironmentName
+        - Key: Project
+          Value: MediSlot
 
   # ------------------------------------------------------------
   # DYNAMODB: BOOKING IDEMPOTENCY (Milestone 5)
@@ -204,9 +236,98 @@ Resources:
         Enabled: true
       SSESpecification:
         SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       Tags:
         - Key: Environment
           Value: !Ref EnvironmentName
+        - Key: Project
+          Value: MediSlot
+
+  # ------------------------------------------------------------
+  # DYNAMODB: NOTIFICATION DISPATCH LOG (Milestone 6)
+  # One item per notification (dispatch_id = business event + recipient). The
+  # notification Lambdas claim the id with a conditional put before publishing to
+  # SNS, so every notification is sent exactly once even if a dispatcher runs twice
+  # or SQS delivers an event twice. Items expire via TTL after 30 days.
+  # ------------------------------------------------------------
+
+  NotificationDispatchLogTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "medislot-${EnvironmentName}-notification-dispatch-log"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: dispatch_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: dispatch_id
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Project
+          Value: MediSlot
+
+  # ------------------------------------------------------------
+  # SNS: OPERATIONS ALARMS (Milestone 7)
+  # Every CloudWatch alarm and the AWS Budgets alert publish here. Created in the
+  # data stack because it is deployed first, so every later stack can use it.
+  # ------------------------------------------------------------
+
+  OperationsAlarmTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "medislot-${EnvironmentName}-operations-alarms"
+      # Not encrypted with the AWS-managed aws/sns key on purpose: CloudWatch alarms and
+      # AWS Budgets cannot publish to a topic that uses it. Alarm messages hold no personal data.
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Project
+          Value: MediSlot
+
+  OperationsAlarmTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !Ref OperationsAlarmTopic
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowCloudWatchAlarms
+            Effect: Allow
+            Principal:
+              Service: cloudwatch.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref OperationsAlarmTopic
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+          - Sid: AllowBudgetAlerts
+            Effect: Allow
+            Principal:
+              Service: budgets.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref OperationsAlarmTopic
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+
+  OperationsAlarmEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasAlarmEmail
+    Properties:
+      TopicArn: !Ref OperationsAlarmTopic
+      Protocol: email
+      Endpoint: !Ref AlarmEmail
 
   # ------------------------------------------------------------
   # EVENTBRIDGE: BUSINESS EVENTS (Milestone 5)
@@ -222,6 +343,8 @@ Resources:
       Tags:
         - Key: Environment
           Value: !Ref EnvironmentName
+        - Key: Project
+          Value: MediSlot
 
   # ------------------------------------------------------------
   # S3: REPORTS
@@ -246,6 +369,8 @@ Resources:
       Tags:
         - Key: Environment
           Value: !Ref EnvironmentName
+        - Key: Project
+          Value: MediSlot
 
   ReportsBucketPolicy:
     Type: AWS::S3::BucketPolicy
@@ -257,7 +382,19 @@ Resources:
           - Sid: DenyInsecureTransport
             Effect: Deny
             Principal: "*"
-            Action: "s3:*"
+            Action:
+              - s3:GetObject
+              - s3:GetObjectVersion
+              - s3:PutObject
+              - s3:DeleteObject
+              - s3:DeleteObjectVersion
+              - s3:ListBucket
+              - s3:ListBucketVersions
+              - s3:GetObjectTagging
+              - s3:PutObjectTagging
+              - s3:AbortMultipartUpload
+              - s3:ListMultipartUploadParts
+              - s3:RestoreObject
             Resource:
               - !GetAtt ReportsBucket.Arn
               - !Sub "${ReportsBucket.Arn}/*"
@@ -300,6 +437,8 @@ Resources:
       Tags:
         - Key: Environment
           Value: !Ref EnvironmentName
+        - Key: Project
+          Value: MediSlot
 
   AssetsBucketPolicy:
     Type: AWS::S3::BucketPolicy
@@ -311,7 +450,19 @@ Resources:
           - Sid: DenyInsecureTransport
             Effect: Deny
             Principal: "*"
-            Action: "s3:*"
+            Action:
+              - s3:GetObject
+              - s3:GetObjectVersion
+              - s3:PutObject
+              - s3:DeleteObject
+              - s3:DeleteObjectVersion
+              - s3:ListBucket
+              - s3:ListBucketVersions
+              - s3:GetObjectTagging
+              - s3:PutObjectTagging
+              - s3:AbortMultipartUpload
+              - s3:ListMultipartUploadParts
+              - s3:RestoreObject
             Resource:
               - !GetAtt AssetsBucket.Arn
               - !Sub "${AssetsBucket.Arn}/*"
@@ -416,6 +567,66 @@ Resources:
         Project: MediSlot
         Environment: !Ref EnvironmentName
 
+  # ------------------------------------------------------------
+  # WAITLIST AND RESCHEDULE CONFIGURATION (Milestone 6)
+  # Read by the Lambdas about once a minute, so a change needs no redeploy.
+  # ------------------------------------------------------------
+
+  WaitlistHoldMinutesParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub /medislot/${EnvironmentName}/waitlist/hold-minutes
+      Type: String
+      Value: "15"
+      Description: How long a waitlist hold offer reserves the freed seat (minutes)
+      Tags:
+        Project: MediSlot
+        Environment: !Ref EnvironmentName
+
+  WaitlistMaxActiveParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub /medislot/${EnvironmentName}/waitlist/max-active-per-patient
+      Type: String
+      Value: "5"
+      Description: Most waitlists one patient may be on at the same time
+      Tags:
+        Project: MediSlot
+        Environment: !Ref EnvironmentName
+
+  RescheduleMaxParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub /medislot/${EnvironmentName}/reschedule/max-reschedules
+      Type: String
+      Value: "2"
+      Description: Most times one appointment may be rescheduled
+      Tags:
+        Project: MediSlot
+        Environment: !Ref EnvironmentName
+
+  RescheduleCutoffHoursParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub /medislot/${EnvironmentName}/reschedule/cutoff-hours
+      Type: String
+      Value: "6"
+      Description: No reschedule within this many hours of the appointment start
+      Tags:
+        Project: MediSlot
+        Environment: !Ref EnvironmentName
+
+  RescheduleForceFailureParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub /medislot/${EnvironmentName}/reschedule/force-release-failure
+      Type: String
+      Value: "false"
+      Description: Checkpoint fault injection. "true" makes the saga's ReleaseOriginalSeat step fail so the compensation runs. Keep "false".
+      Tags:
+        Project: MediSlot
+        Environment: !Ref EnvironmentName
+
 Outputs:
   DatabaseEndpointAddress:
     Description: Private RDS endpoint hostname.
@@ -474,3 +685,18 @@ Outputs:
     Value: !GetAtt MediSlotEventBus.Arn
     Export:
       Name: !Sub "medislot-${EnvironmentName}-EventBusArn"
+
+  NotificationDispatchLogTableName:
+    Value: !Ref NotificationDispatchLogTable
+    Export:
+      Name: !Sub "medislot-${EnvironmentName}-NotificationDispatchLogTableName"
+
+  OperationsAlarmTopicArn:
+    Value: !Ref OperationsAlarmTopic
+    Export:
+      Name: !Sub "medislot-${EnvironmentName}-OperationsAlarmTopicArn"
+
+  DatabaseInstanceId:
+    Value: !Ref MediSlotDatabase
+    Export:
+      Name: !Sub "medislot-${EnvironmentName}-DatabaseInstanceId"

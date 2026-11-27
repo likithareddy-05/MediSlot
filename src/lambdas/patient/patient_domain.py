@@ -27,6 +27,7 @@ from boto3.dynamodb.conditions import Key
 from botocore.config import Config
 
 import appointment_store
+import events  # noqa: F401  (enables X-Ray tracing of AWS SDK and MySQL calls)
 import slot_store
 from common import db_connect, json_body, log_event, logger, response
 

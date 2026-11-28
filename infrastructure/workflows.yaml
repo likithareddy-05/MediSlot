@@ -223,6 +223,7 @@ Resources:
           - AppointmentBooked
           - AppointmentRescheduled
           - AppointmentCancelled
+          - WaitlistJoined
           - WaitlistOfferIssued
           - WaitlistOfferExpired
       State: ENABLED
@@ -255,6 +256,7 @@ Resources:
           APPOINTMENTS_TABLE_NAME:
             Fn::ImportValue: !Sub medislot-${EnvironmentName}-AppointmentsTableName
           NOTIFICATION_TOPIC_ARN: !Ref NotificationTopic
+          DISPLAY_TIMEZONE: Asia/Kolkata
           ENVIRONMENT_NAME: !Ref EnvironmentName
       Tags:
         - Key: Project
@@ -308,6 +310,7 @@ Resources:
           APPOINTMENTS_TABLE_NAME:
             Fn::ImportValue: !Sub medislot-${EnvironmentName}-AppointmentsTableName
           NOTIFICATION_TOPIC_ARN: !Ref NotificationTopic
+          DISPLAY_TIMEZONE: Asia/Kolkata
           ENVIRONMENT_NAME: !Ref EnvironmentName
       Tags:
         - Key: Project

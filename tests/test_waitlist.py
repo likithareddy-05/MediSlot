@@ -240,5 +240,39 @@ class WaitlistRuleTests(WaitlistHarness):
         self.assertEqual(self.slot(SLOT)["held_count"], 0)
 
 
+class WaitlistEventAndDoctorViewTests(WaitlistHarness):
+    def doctor_rows(self):
+        import appointment_store as store
+        first, last = (NOW - timedelta(days=1)).strftime("%Y-%m-%dT00:00:00Z"), (NOW + timedelta(days=30)).strftime("%Y-%m-%dT00:00:00Z")
+        return sorted((i["patient_id"], i["slot_id"], i["status"]) for i in store.list_for_doctor(self.appts, 7, first, last))
+
+    def test_joining_publishes_a_confirmation_event_with_the_slot_details(self):
+        self.join(2)
+        joined = self.events_of("WaitlistJoined")
+        self.assertEqual(len(joined), 1)
+        self.assertEqual((joined[0]["patient_id"], joined[0]["position"], joined[0]["slot_id"]), (2, 1, SLOT))
+        self.assertTrue(joined[0].get("consultation_name") and joined[0].get("start_time_utc"))
+
+    def test_offer_event_carries_doctor_and_consultation_for_the_email(self):
+        self.join(2)
+        wd.seat_freed_handler(sqs_batch(self.free_the_seat()), None)
+        offer = self.events_of("WaitlistOfferIssued")[0]
+        for key in ("doctor_name", "consultation_name", "fee", "timezone", "expires_at_utc", "start_time_utc"):
+            self.assertIn(key, offer)
+
+    def test_the_doctor_sees_the_promoted_patient_and_then_the_new_time(self):
+        self.join(2)
+        wd.seat_freed_handler(sqs_batch(self.free_the_seat()), None)
+        status, body = self.accept(2, self.live_offers()[0]["offer_id"])
+        self.assertEqual(status, 201)
+        self.assertEqual(self.doctor_rows(), [("1", SLOT, "CANCELLED_BY_PATIENT"), ("2", SLOT, "CONFIRMED")])
+        # the promoted patient reschedules: the doctor's list follows
+        target = OTHER_SLOTS[0]
+        self.rds.slots[target]["booked_count"] = 0
+        status, moved = self.call("PATCH", f"/appointments/{body['appointment_id']}", 2, {"target_slot_id": target})
+        self.assertEqual(status, 200, moved)
+        self.assertEqual(self.doctor_rows(), [("1", SLOT, "CANCELLED_BY_PATIENT"), ("2", target, "CONFIRMED")])
+
+
 if __name__ == "__main__":
     unittest.main()

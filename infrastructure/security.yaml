@@ -591,6 +591,16 @@ Resources:
                     - arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${Table}/index/StatusStartIndex
                     - Table:
                         Fn::ImportValue: !Sub medislot-${EnvironmentName}-AppointmentsTableName
+              # The e-mails show the doctor, consultation and fee stored on the appointment.
+              - Sid: ReadOneAppointment
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                Resource:
+                  - !Sub
+                    - arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${Table}
+                    - Table:
+                        Fn::ImportValue: !Sub medislot-${EnvironmentName}-AppointmentsTableName
               - Sid: PublishNotifications
                 Effect: Allow
                 Action:

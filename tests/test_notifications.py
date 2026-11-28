@@ -41,8 +41,8 @@ def appointment(aid, start, patient=201, doctor=101, status="CONFIRMED", minutes
 
 class NotificationHarness(Milestone6Harness):
     def sent(self):
-        return sorted((m["event_type"], m["recipient_role"], m["recipient_id"])
-                      for m in (json.loads(x["Message"]) for x in self.sns.messages))
+        return sorted((a["event_type"], a["recipient_role"], a["recipient_id"])
+                      for a in map(self.sns.attributes, self.sns.messages))
 
 
 class FrozenRuleSetEventTests(NotificationHarness):
@@ -53,6 +53,7 @@ class FrozenRuleSetEventTests(NotificationHarness):
         bus_event("AppointmentCancelled", appointment_id="4", patient_id=201, doctor_id=101, cancelled_by="DOCTOR"),
         bus_event("WaitlistOfferIssued", offer_id=7, patient_id=202, slot_id="S"),
         bus_event("WaitlistOfferExpired", offer_id=7, patient_id=202, slot_id="S"),
+        bus_event("WaitlistJoined", entry_id=3, patient_id=203, slot_id="S", position=1),
         bus_event("SlotSeatFreed", slot_id="S"),  # not a notification
     ]
 
@@ -63,13 +64,14 @@ class FrozenRuleSetEventTests(NotificationHarness):
             ("APPOINTMENT_RESCHEDULED", "PATIENT", "201"), ("APPOINTMENT_RESCHEDULED", "DOCTOR", "101"),
             ("APPOINTMENT_CANCELLED_BY_PATIENT", "PATIENT", "201"), ("APPOINTMENT_CANCELLED_BY_PATIENT", "DOCTOR", "101"),
             ("APPOINTMENT_CANCELLED_BY_DOCTOR", "PATIENT", "201"),
-            ("WAITLIST_OFFER_ISSUED", "PATIENT", "202"), ("WAITLIST_OFFER_EXPIRED", "PATIENT", "202")]))
-        self.assertEqual(self.metric_total("NotificationsDispatched"), 9)
+            ("WAITLIST_OFFER_ISSUED", "PATIENT", "202"), ("WAITLIST_OFFER_EXPIRED", "PATIENT", "202"),
+            ("WAITLIST_JOINED", "PATIENT", "203")]))
+        self.assertEqual(self.metric_total("NotificationsDispatched"), 10)
 
     def test_the_same_event_delivered_twice_is_sent_once(self):
         nt.event_handler(sqs(*self.EVENTS), None)
         nt.event_handler(sqs(*self.EVENTS), None)
-        self.assertEqual(len(self.sns.messages), 9)
+        self.assertEqual(len(self.sns.messages), 10)
         self.assertEqual({i["state"] for i in self.dispatch_log.items.values()}, {"SENT"})
 
     def test_parallel_duplicate_deliveries_are_sent_once(self):
@@ -92,12 +94,74 @@ class FrozenRuleSetEventTests(NotificationHarness):
     def test_messages_carry_no_personal_data(self):
         nt.event_handler(sqs(self.EVENTS[0]), None)
         body = self.sns.messages[0]["Message"]
-        for word in ("email", "phone", "first_name", "last_name"):
+        for word in ("@", "phone", "first_name", "last_name", "{"):
             self.assertNotIn(word, body)
 
     def test_dispatch_log_items_expire_by_ttl(self):
         nt.event_handler(sqs(self.EVENTS[0]), None)
         self.assertTrue(all(i["expires_at"] > i["claimed_at"] for i in self.dispatch_log.items.values()))
+
+
+class EmailFormatTests(NotificationHarness):
+    """The notifications read as professional e-mails, not JSON."""
+
+    def setUp(self):
+        super().setUp()
+        self.appts.items["42"] = {**appointment(42, datetime(2026, 11, 30, 10, 30, tzinfo=UTC)),
+                                  "doctor_name": "Karthik Rao", "consultation_name": "Standard Consult",
+                                  "fee_amount": "1000.00"}
+
+    def test_booked_email_for_the_patient(self):
+        nt.event_handler(sqs(bus_event("AppointmentBooked", appointment_id="42", patient_id=201, doctor_id=101)), None)
+        mail = [m for m in self.sns.of_type("APPOINTMENT_BOOKED") if m["recipient_role"] == "PATIENT"][0]
+        self.assertEqual(mail["subject"], "MediSlot: Your appointment is confirmed")
+        body = mail["body"]
+        self.assertTrue(body.startswith("Dear Patient,"))
+        for text in ("Appointment details", "Dr. Karthik Rao", "Standard Consult",
+                     "Mon, 30 Nov 2026, 4:00 PM (Asia/Kolkata)", "\u20b91,000.00", "Kind regards,"):
+            self.assertIn(text, body)
+        with self.assertRaises(ValueError):
+            json.loads(body)
+
+    def test_doctor_email_names_the_patient_by_number(self):
+        nt.event_handler(sqs(bus_event("AppointmentBooked", appointment_id="42", patient_id=201, doctor_id=101)), None)
+        mail = [m for m in self.sns.of_type("APPOINTMENT_BOOKED") if m["recipient_role"] == "DOCTOR"][0]
+        self.assertEqual(mail["subject"], "MediSlot: New appointment booked")
+        self.assertIn("Dear Doctor,", mail["body"])
+        self.assertIn("Patient #201", mail["body"])
+
+    def test_offer_email_says_how_long_the_seat_is_held(self):
+        nt.event_handler(sqs(bus_event("WaitlistOfferIssued", offer_id=9, patient_id=202, slot_id="S",
+                                       doctor_name="Karthik Rao", consultation_name="Standard Consult", fee=1000,
+                                       timezone="Asia/Kolkata", start_time_utc="2026-11-30T10:30:00Z",
+                                       expires_at_utc="2026-11-28T14:15:00Z")), None)
+        mail = self.sns.of_type("WAITLIST_OFFER_ISSUED")[0]
+        self.assertEqual(mail["subject"], "MediSlot: A seat is being held for you - please confirm")
+        self.assertIn("Seat held until", mail["body"])
+        self.assertIn("Sat, 28 Nov 2026, 7:45 PM (Asia/Kolkata)", mail["body"])
+        self.assertIn("choose Accept", mail["body"])
+
+    def test_cancellation_email_shows_the_refund(self):
+        nt.event_handler(sqs(bus_event("AppointmentCancelled", appointment_id="42", patient_id=201, doctor_id=101,
+                                       cancelled_by="PATIENT", refund={"percent": 50.0, "amount": 500.0})), None)
+        body = [m for m in self.sns.of_type("APPOINTMENT_CANCELLED_BY_PATIENT") if m["recipient_role"] == "PATIENT"][0]["body"]
+        self.assertIn("\u20b9500.00 (50% of the fee)", body)
+
+    def test_reschedule_email_shows_old_and_new_time(self):
+        nt.event_handler(sqs(bus_event("AppointmentRescheduled", appointment_id="42", patient_id=201, doctor_id=101,
+                                       reschedule_count=1, start_time_utc="2026-12-01T04:30:00Z",
+                                       previous_start_time_utc="2026-11-30T10:30:00Z")), None)
+        body = [m for m in self.sns.of_type("APPOINTMENT_RESCHEDULED") if m["recipient_role"] == "PATIENT"][0]["body"]
+        self.assertIn("New date and time:", body)
+        self.assertIn("Tue, 01 Dec 2026, 10:00 AM (Asia/Kolkata)", body)
+        self.assertIn("Previous time:", body)
+        self.assertIn("1 of 2", body)
+
+    def test_every_notification_type_has_an_email(self):
+        for event_type in nt.TEMPLATES:
+            subject, body = nt.compose_email(event_type, "PATIENT", 5, {"appointment_id": "1"})
+            self.assertTrue(subject.startswith("MediSlot: ") and subject.isascii() and len(subject) <= 100, subject)
+            self.assertIn("Kind regards,", body)
 
 
 class EndToEndBookingNotificationTests(NotificationHarness):
@@ -131,8 +195,7 @@ class ReminderTests(NotificationHarness):
     def test_each_appointment_gets_both_reminders_once_over_time(self):
         for minutes in range(0, 30 * 60, 5):  # the dispatcher runs every 5 minutes for 30 hours
             nt.send_reminders(self.now + timedelta(minutes=minutes))
-        kinds = sorted((m["details"]["appointment_id"], m["event_type"]) for m in
-                       (json.loads(x["Message"]) for x in self.sns.messages))
+        kinds = sorted((a["appointment_id"], a["event_type"]) for a in map(self.sns.attributes, self.sns.messages))
         self.assertEqual(kinds, [("1", "REMINDER_24H"), ("1", "REMINDER_2H"), ("2", "REMINDER_2H"),
                                  ("3", "REMINDER_24H"), ("3", "REMINDER_2H")])
 

@@ -150,8 +150,13 @@ class FakeSns:
             self.messages.append(kwargs)
             return {"MessageId": f"m-{len(self.messages)}"}
 
+    @staticmethod
+    def attributes(message):
+        return {k: v["StringValue"] for k, v in message["MessageAttributes"].items()}
+
     def of_type(self, event_type):
-        return [json.loads(m["Message"]) for m in self.messages
+        """Published messages of one notification type: their attributes plus subject and body."""
+        return [{**self.attributes(m), "subject": m["Subject"], "body": m["Message"]} for m in self.messages
                 if m["MessageAttributes"]["event_type"]["StringValue"] == event_type]
 
 

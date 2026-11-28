@@ -8,6 +8,8 @@ Three entry points share this module (one ZIP, three Lambda handlers):
         DELETE /slots/{slotId}/waitlist          leave it (a live offer is declined and passed on)
         GET    /patients/me/waitlists            active waitlists with their pending offers
         POST   /waitlist-offers/{offerId}/accept turn a hold offer into a CONFIRMED appointment
+  * Events: WaitlistJoined (confirmation to the patient), WaitlistOfferIssued, WaitlistOfferExpired.
+    They carry the doctor, consultation, fee and time so the notification e-mails can show them.
   * seat_freed_handler: SQS consumer of SlotSeatFreed (EventBridge -> SQS -> Lambda). Issues a
     hold offer to the first patient in line for every held seat that has none.
   * expiry_sweeper_handler: runs every minute (EventBridge Scheduler). Expires offers whose hold
@@ -66,18 +68,33 @@ def _iso(value):
 
 # ---------------------------------------------------------------------------- events
 
-def publish_offer_events(issued, expired=()):
+def slot_context(cursor, slot_id):
+    """Doctor, consultation, fee, time and time zone of a slot, for the notification e-mails."""
+    slot = slot_store.get_slot(cursor, slot_id)
+    if not slot:
+        return {"slot_id": slot_id}
+    doctor = _fee_and_doctor(cursor, slot["doctor_id"], slot["consultation_type_id"]) or {}
+    name = " ".join(x for x in (doctor.get("first_name"), doctor.get("last_name")) if x)
+    return {"slot_id": slot_id, "doctor_id": int(slot["doctor_id"]), "doctor_name": name or None,
+            "consultation_name": slot.get("consultation_name"), "fee": float(money(slot.get("fee") or 0)),
+            "timezone": slot.get("timezone"), "start_time_utc": slot.get("start_time_utc"),
+            "end_time_utc": slot.get("end_time_utc")}
+
+
+def publish_offer_events(issued, expired=(), context=None):
     """Events for offers created / expired by a transaction that has committed."""
+    context = {k: v for k, v in (context or {}).items() if v is not None}
     for offer in expired:
         publish_event("WaitlistOfferExpired", {
-            "offer_id": int(offer["offer_id"]), "slot_id": offer["slot_id"], "patient_id": int(offer["patient_id"]),
-            "expired_at_utc": _iso(offer.get("resolved_at"))})
+            **context, "offer_id": int(offer["offer_id"]), "slot_id": offer["slot_id"],
+            "patient_id": int(offer["patient_id"]), "expired_at_utc": _iso(offer.get("resolved_at"))})
         emit_metric("OffersExpired", 1)
     for offer in issued:
         publish_event("WaitlistOfferIssued", {
-            "offer_id": int(offer["offer_id"]), "slot_id": offer["slot_id"], "patient_id": offer["patient_id"],
+            **context, "offer_id": int(offer["offer_id"]), "slot_id": offer["slot_id"], "patient_id": offer["patient_id"],
             "doctor_id": offer["doctor_id"], "consultation_type_id": offer["consultation_type_id"],
-            "start_time_utc": _iso(offer["start_time_utc"]), "expires_at_utc": _iso(offer["expires_at"])})
+            "start_time_utc": _iso(offer["start_time_utc"]), "expires_at_utc": _iso(offer["expires_at"]),
+            "hold_minutes": hold_minutes()})
         emit_metric("OffersIssued", 1)
 
 
@@ -132,6 +149,7 @@ def join(patient_id, slot_id):
                 raise ApiError(409, "WAITLIST_LIMIT_REACHED", f"You can be on at most {limit} waitlists at once.")
             entry_id = wl.add_entry(cur, slot_id, patient_id)
             position = _position(cur, slot_id, entry_id)
+            context = slot_context(cur, slot_id)
         conn.commit()
     except BaseException:
         conn.rollback()
@@ -140,6 +158,9 @@ def join(patient_id, slot_id):
     finally:
         conn.close()
     emit_metric("WaitlistJoins", 1)
+    publish_event("WaitlistJoined", {**{k: v for k, v in context.items() if v is not None},
+                                     "entry_id": int(entry_id), "patient_id": int(patient_id), "position": position,
+                                     "hold_minutes": hold_minutes()})
     log_event("waitlist_joined", patient_id=patient_id, slot_id=slot_id, entry_id=entry_id, position=position)
     return 201, {"message": "You are on the waitlist", "entry_id": int(entry_id), "status": wl.WAITING,
                  "position": position}
@@ -165,6 +186,7 @@ def leave(patient_id, slot_id):
                 issued, _ = wl.issue_offers(cur, slot_id, now, hold_minutes())  # the seat goes to the next in line
             else:
                 wl.set_entry_status(cur, entry["entry_id"], wl.LEFT, wl.WAITING)
+            context = slot_context(cur, slot_id) if issued else {}
         conn.commit()
     except BaseException:
         conn.rollback()
@@ -172,7 +194,7 @@ def leave(patient_id, slot_id):
         raise
     finally:
         conn.close()
-    publish_offer_events(issued)
+    publish_offer_events(issued, context=context)
     log_event("waitlist_left", patient_id=patient_id, slot_id=slot_id, declined_offer=bool(declined),
               offers_passed_on=len(issued))
     return 200, {"message": "You have left the waitlist" + (" and declined your offer" if declined else ""),
@@ -328,6 +350,7 @@ def promote_slot(slot_id, now=None):
     try:
         with conn.cursor() as cur:
             issued, returned = wl.issue_offers(cur, slot_id, now, hold_minutes())
+            context = slot_context(cur, slot_id) if issued else {}
         conn.commit()
     except BaseException:
         conn.rollback()
@@ -335,7 +358,7 @@ def promote_slot(slot_id, now=None):
         raise
     finally:
         conn.close()
-    publish_offer_events(issued)
+    publish_offer_events(issued, context=context)
     if issued or returned:
         log_event("waitlist_promoted", slot_id=slot_id, offers_issued=len(issued), seats_returned=returned)
     return issued
@@ -369,6 +392,7 @@ def expire_offer(offer_id, slot_id, now):
             wl.resolve_offer(cur, offer_id, wl.OFFER_EXPIRED, now)
             wl.set_entry_status(cur, offer["entry_id"], wl.EXPIRED, wl.OFFERED)
             issued, _ = wl.issue_offers(cur, slot_id, now, hold_minutes())
+            context = slot_context(cur, slot_id)
         conn.commit()
     except BaseException:
         conn.rollback()
@@ -377,7 +401,7 @@ def expire_offer(offer_id, slot_id, now):
     finally:
         conn.close()
     expired = {**offer, "resolved_at": now}
-    publish_offer_events(issued, [expired])
+    publish_offer_events(issued, [expired], context)
     return expired, issued
 
 
